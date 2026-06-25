@@ -21,7 +21,7 @@ from runtime.execution.lead_reviewer import (
     render_lead_rework_limits,
     review_worker_reports,
 )
-from runtime.execution.parallel_scheduler import _execution_batches_for_mode, _format_parallel_batch_audit
+from runtime.execution.parallel_scheduler import _format_parallel_batch_audit, execution_batch_decisions_for_mode
 from runtime.execution.pipeline import PipelineRunState
 from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.supervisor_observer import emit_supervisor_observation, render_supervisor_context_for_workers
@@ -94,30 +94,25 @@ async def _run_multi_agent(
 
     try:
         for group_id, tasks in _tasks_by_parallel_group(plan).items():
-            batches = _execution_batches_for_mode(tasks, mode)
-            if mode != "full" and len(tasks) > 1:
-                _emit_parallel_batch_notice(
-                    run_state,
-                    group_id=group_id,
-                    batch=tasks,
-                    mode=mode,
-                    event_type="ParallelBatchSerialized",
-                    status="serialized",
-                    reason="non_full_mode_serialized",
-                    fallback_message=f"parallel group {group_id} serialized in {mode} mode",
-                )
-            elif len(tasks) > 1 and len(batches) > 1:
-                _emit_parallel_batch_notice(
-                    run_state,
-                    group_id=group_id,
-                    batch=tasks,
-                    mode=mode,
-                    event_type="ParallelBatchSerialized",
-                    status="serialized",
-                    reason="write_conflict_or_undeclared_write_scope",
-                    fallback_message=f"parallel group {group_id} split into serialized batches",
-                )
-            for batch in batches:
+            batch_decisions = execution_batch_decisions_for_mode(
+                tasks,
+                mode,
+                capability_resolver=getattr(factory, "capability_resolver", None),
+            )
+            for decision in batch_decisions:
+                batch = decision.tasks
+                if len(tasks) > 1 and not decision.parallel and decision.reason != "single_task":
+                    _emit_parallel_batch_notice(
+                        run_state,
+                        group_id=group_id,
+                        batch=batch,
+                        mode=mode,
+                        event_type="ParallelBatchSerialized",
+                        status="serialized",
+                        reason=decision.reason,
+                        details=decision.details,
+                        fallback_message=_format_scheduler_decision_fallback(group_id, decision),
+                    )
                 if len(batch) == 1:
                     task = batch[0]
                     if show_progress and run_state:
@@ -153,6 +148,7 @@ async def _run_multi_agent(
                     worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
                     report = build_worker_report(task, output, run_state=run_state)
                     worker_reports.append(report)
+                    _sync_worker_reports_to_run_state(run_state, worker_reports)
                     _record_worker_report_to_blackboard(run_state, report)
                     if show_progress and run_state:
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{task.title}")
@@ -165,7 +161,8 @@ async def _run_multi_agent(
                     mode=mode,
                     event_type="ParallelBatchStarted",
                     status="running",
-                    reason="readonly_no_write_conflict",
+                    reason=decision.reason,
+                    details=decision.details,
                     fallback_message=_format_parallel_batch_audit(group_id, batch),
                 )
                 if show_progress and run_state:
@@ -241,6 +238,7 @@ async def _run_multi_agent(
                     worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
                     report = build_worker_report(task, output, run_state=run_state)
                     worker_reports.append(report)
+                    _sync_worker_reports_to_run_state(run_state, worker_reports)
                     _record_worker_report_to_blackboard(run_state, report)
                 if show_progress and run_state:
                     _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{active}")
@@ -374,6 +372,7 @@ def _emit_parallel_batch_notice(
     event_type: str,
     status: str,
     reason: str,
+    details: tuple[str, ...] | list[str] | None = None,
     fallback_message: str,
 ) -> None:
     task_ids = [str(getattr(task, "id", "") or "task") for task in list(batch or [])]
@@ -392,8 +391,19 @@ def _emit_parallel_batch_notice(
             "task_ids": task_ids,
             "batch_size": len(task_ids),
             "reason": reason,
+            "details": list(details or []),
         },
     )
+
+
+
+def _format_scheduler_decision_fallback(group_id: int, decision) -> str:
+    task_ids = ", ".join(
+        str(getattr(task, "id", "") or "task") for task in list(getattr(decision, "tasks", []) or [])
+    )
+    details = "; ".join(str(item) for item in list(getattr(decision, "details", []) or []))
+    suffix = f": {details}" if details else ""
+    return f"parallel group {group_id} serialized ({getattr(decision, 'reason', 'unknown')}): {task_ids}{suffix}"
 
 
 def _record_worker_output_detail(
@@ -441,6 +451,15 @@ def _record_worker_output_detail(
             },
         )
     return hint
+
+
+def _sync_worker_reports_to_run_state(run_state: PipelineRunState | None, worker_reports: list) -> None:
+    if run_state is None:
+        return
+    try:
+        run_state.worker_reports = list(worker_reports or [])
+    except Exception:
+        return
 
 
 def _record_worker_report_to_blackboard(run_state: PipelineRunState | None, report) -> bool:
@@ -581,6 +600,7 @@ async def _run_lead_rework_until_stable(
             report = build_worker_report(rework_task, output, run_state=run_state)
             worker_outputs = _replace_worker_output(worker_outputs, str(getattr(rework_task, "id", "") or ""), title, output)
             worker_reports = _replace_worker_report(worker_reports, report)
+            _sync_worker_reports_to_run_state(run_state, worker_reports)
             _record_worker_report_to_blackboard(run_state, report)
             _emit_lead_rework_completed(run_state, action, report, mode=mode)
 

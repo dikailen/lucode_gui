@@ -14,6 +14,7 @@ class ExecutionContext:
     settings: Any
     output_controller: Any = None
     event_bus: Any = None
+    memory_pack: Any = None
 
 
 class ExecutionStrategy(Protocol):

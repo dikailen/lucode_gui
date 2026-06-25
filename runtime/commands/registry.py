@@ -35,7 +35,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("/config", "查看当前模型、隐私和运行配置", "配置"),
     CommandSpec("/api show", "查看 API 与 base_url 配置，自动隐藏密钥", "配置", aliases=("/api",)),
     CommandSpec("/privacy", "查看隐私模式", "配置"),
-    CommandSpec("/mode", "查看或切换 solo / serial / full", "配置", argument_hint="<solo|serial|full>", writable=True),
+    CommandSpec("/mode", "查看或切换统一 Agent Loop 执行入口", "配置", argument_hint="<auto>", writable=True),
     CommandSpec("/refiner", "开启或关闭前置优化副脑", "配置", argument_hint="<on|off>", writable=True),
     CommandSpec("/theme", "查看、预览或切换终端 UI 主题", "配置", argument_hint="[list|preview <name>|<name>]", writable=True),
     CommandSpec("/model", "查看详细模型优先级和能力状态", "模型"),

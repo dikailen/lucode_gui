@@ -19,4 +19,5 @@ class SoloStrategy:
             project_root=context.request.workspace_root,
             output_controller=context.output_controller,
             event_bus=context.event_bus,
+            memory_pack=context.memory_pack,
         )

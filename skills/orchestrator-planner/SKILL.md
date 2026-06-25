@@ -75,6 +75,16 @@ description: 动态多智能体系统的主脑规划技能。根据优化后的�
 - 只有当用户明确要求某个精确标记、文件名、命令结果或机器可验证输出时，才使用 `must_contain: ...`。`must_contain` 会被程序 Auditor 当作硬失败条件。
 - 简单只读任务不要为了“最终审核”拆出额外任务；优先让一个 `project_explorer` 任务完成，避免过度规划导致简单请求反复重跑。
 
+## 记忆解析器采纳规则
+
+运行输入可能包含 `failure_lesson` 失败教训候选。失败教训默认只是 planner candidate，不会自动进入 worker；只有你判断它确实适用于本轮任务时，才可以在 `memory_interface.memory_resolver` 里显式采纳。
+
+- `memory_interface.execution_contract` 归执行契约使用，不要覆盖、复用或写入该子键。
+- 只从输入给出的候选 id 中填写 `adopted_entry_ids`，不要编造 entry id。
+- `task_bindings` 的 key 必须是本次计划里真实存在的 task id，value 是要注入该 task 的候选 entry id 数组。
+- `adoption_reasons` 写明为什么这条失败教训适用于本轮，理由要短。
+- 不确定是否相关时，不要采纳，保持空数组或空对象。
+
 ## 输出格式
 
 只输出 JSON，不要输出 Markdown。不要输出解释、思考过程、前后缀文本或代码块围栏。即使不确定，也必须输出一个合法 JSON 对象。
@@ -108,7 +118,22 @@ description: 动态多智能体系统的主脑规划技能。根据优化后的�
   "synthesis_instruction": "如果 multi_agent，写最终汇总要求",
   "memory_interface": {
     "should_query_memory": false,
-    "query_hint": "未来知识图谱检索提示；当前不要依赖它"
+    "query_hint": "未来知识图谱检索提示；当前不要依赖它",
+    "memory_resolver": {
+      "provided_entry_ids": ["已作为背景提供给 planner 的记忆 id；通常由系统回填"],
+      "candidate_entry_ids": ["失败教训候选 id；通常由系统回填"],
+      "ignored_entry_ids": ["被过滤或低置信记忆 id；通常由系统回填"],
+      "adopted_entry_ids": ["你决定本轮采用的失败教训候选 id"],
+      "task_bindings": {
+        "计划 task id": ["要注入该 task 的 adopted entry id"]
+      },
+      "adoption_reasons": {
+        "adopted entry id": "为什么本轮适用"
+      },
+      "decision_reasons": {
+        "entry id": "系统或 planner 的处理原因"
+      }
+    }
   }
 }
 ```

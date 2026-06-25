@@ -29,6 +29,7 @@ from runtime.execution.inline_context import (
 )
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
 from runtime.hooks import TaskScopedHooks
+from runtime.memory.resolver import TaskMemoryPack
 from runtime.ui.live_status import dynamic_status
 from runtime.workspace.patch_ledger import PatchProposalLedger
 
@@ -100,12 +101,16 @@ def _task_prompt(
     dependency_context: str = "",
     workspace_context: str = "",
     shared_context: str = "",
+    task_memory_pack: TaskMemoryPack | None = None,
 ) -> str:
     prefix = "优化后的用户请求：\n" f"{refined_request}\n\n"
     if dependency_context.strip():
         prefix += "前序任务输出：\n" f"{dependency_context}\n\n"
     if shared_context.strip():
         prefix += f"{shared_context.strip()}\n\n"
+    task_memory_context = task_memory_pack.render_for_worker() if task_memory_pack is not None else ""
+    if task_memory_context.strip():
+        prefix += f"{task_memory_context.strip()}\n\n"
     if workspace_context.strip():
         prefix += f"{workspace_context.strip()}\n\n"
     prefix += "你的具体任务：\n" f"{task_instruction}"
@@ -151,6 +156,8 @@ async def _run_planned_task(
     dependency_context = _dependency_context_for_task(task, _task_output_map(run_state))
     workspace_context = _latest_workspace_context(project_root, task)
     shared_context = _shared_context_for_task(run_state, task)
+    task_memory_pack = _task_memory_pack_for_task(run_state, task)
+    _emit_task_memory_provided(run_state, task, task_memory_pack)
     try:
         run_agent_kwargs = _run_agent_kwargs(
             run_agent,
@@ -174,6 +181,7 @@ async def _run_planned_task(
                     dependency_context,
                     workspace_context,
                     shared_context,
+                    task_memory_pack=task_memory_pack,
                 ),
                 scoped_hooks,
                 **run_agent_kwargs,
@@ -492,6 +500,42 @@ def _task_delta_emitter(run_state: PipelineRunState | None, task):
 
     return _emit_delta
 
+
+def _task_memory_pack_for_task(run_state: PipelineRunState | None, task) -> TaskMemoryPack | None:
+    memory_pack = getattr(run_state, "memory_pack", None)
+    if memory_pack is None or not hasattr(memory_pack, "for_task"):
+        return None
+    try:
+        task_pack = memory_pack.for_task(task)
+    except Exception:
+        return None
+    if task_pack is None or not getattr(task_pack, "provided_entry_ids", []):
+        return None
+    return task_pack
+
+
+def _emit_task_memory_provided(run_state: PipelineRunState | None, task, task_memory_pack: TaskMemoryPack | None) -> None:
+    entry_ids = list(getattr(task_memory_pack, "provided_entry_ids", []) or [])
+    if not entry_ids or run_state is None:
+        return
+    memory_pack = getattr(run_state, "memory_pack", None)
+    usage_recorder = getattr(memory_pack, "record_usage", None)
+    if callable(usage_recorder):
+        try:
+            usage_recorder(entry_ids, source="worker")
+        except Exception:
+            pass
+    if not hasattr(run_state, "emit_event"):
+        return
+    task_id = str(getattr(task, "id", "") or "")
+    run_state.emit_event(
+        "TaskMemoryProvided",
+        "worker received task memory context",
+        agent=task_id or "worker",
+        task_id=task_id,
+        status="completed",
+        payload={"entry_ids": entry_ids},
+    )
 
 async def _create_task_agent(factory, task, *, execution_mode: str = ""):
     create_task_agent = factory.create_task_agent

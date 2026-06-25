@@ -1,5 +1,6 @@
 from catalog_system.model_catalog import ModelRegistry
 from planning.planner_schema import PlannedTask
+from runtime.capabilities.resolver import CapabilityResolver
 from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class
 from skills.loader import load_skill, skill_runtime_metadata
@@ -8,21 +9,28 @@ from skills.loader import load_skill, skill_runtime_metadata
 class AgentFactory:
     """Create temporary execution Agents from planner tasks."""
 
-    def __init__(self, model_registry: ModelRegistry, mcp_manager):
+    def __init__(self, model_registry: ModelRegistry, mcp_manager, capability_resolver=None):
         self.model_registry = model_registry
         self.mcp_manager = mcp_manager
+        self.capability_resolver = capability_resolver or CapabilityResolver()
 
     async def create_task_agent(self, task: PlannedTask, execution_mode: str = ""):
         model_info = self.model_registry.get_model_info(task.model)
-        if task.mcp and not model_info.get("supports_tools", True):
+        capability_binding = self.capability_resolver.resolve_task(task)
+        mcp_ids = list(getattr(capability_binding, "mcp", []) or [])
+        if mcp_ids and not model_info.get("supports_tools", True):
             raise ValueError(
                 "当前任务需要 MCP 工具，但所选模型不支持 tools/function calling："
                 f"{task.model}（{model_info.get('model_name') or '未知模型名'}）。"
                 "请换用支持工具调用的本地模型，或在隐私模式允许时配置可用云端模型。"
             )
         model = self.model_registry.get_model(task.model)
-        servers = await self.mcp_manager.get_many(task.mcp)
-        instructions = self._task_instructions(task, execution_mode=execution_mode)
+        servers = await self.mcp_manager.get_many(mcp_ids)
+        instructions = self._task_instructions(
+            task,
+            execution_mode=execution_mode,
+            capability_binding=capability_binding,
+        )
 
         Agent = agent_class()
         return Agent(
@@ -32,7 +40,12 @@ class AgentFactory:
             mcp_servers=servers,
         )
 
-    def _task_instructions(self, task: PlannedTask, execution_mode: str = "") -> str:
+    def _task_instructions(
+        self,
+        task: PlannedTask,
+        execution_mode: str = "",
+        capability_binding=None,
+    ) -> str:
         return sanitize_text(
             self._role_contract_for_mode(execution_mode)
             + load_skill(task.skill_id)
@@ -40,6 +53,7 @@ class AgentFactory:
             + "\n\n## 本次临时任务\n"
             + task.instruction
             + self._execution_contract(task)
+            + self._capability_context(capability_binding)
             + self._tool_budget(task, execution_mode=execution_mode)
             + self._tool_rules(task)
             + self._worker_report_contract(task, execution_mode=execution_mode)
@@ -50,6 +64,31 @@ class AgentFactory:
             + "- 用清晰的小标题和短段落回答，重点放在用户真正问的内容。\n"
             + "\n请直接完成本次任务，输出给用户可读的最终结果。"
         )
+
+
+    def _capability_context(self, binding) -> str:
+        if binding is None:
+            return ""
+        mcp = list(getattr(binding, "mcp", []) or [])
+        read_set = list(getattr(binding, "read_set", []) or [])
+        write_intent = list(getattr(binding, "write_intent", []) or [])
+        resource_locks = list(getattr(binding, "resource_locks", []) or [])
+        reasons = list(getattr(binding, "reasons", []) or [])
+        lines = [
+            "\n\n## Capability Resolver Result",
+            f"- source: {getattr(binding, 'source', '') or 'planner_task'}",
+            "- mcp: " + ("; ".join(mcp) if mcp else "none"),
+        ]
+        if read_set:
+            lines.append("- read_set: " + "; ".join(read_set))
+        if write_intent:
+            lines.append("- write_intent: " + "; ".join(write_intent))
+        if resource_locks:
+            lines.append("- resource_locks: " + "; ".join(resource_locks))
+        if reasons:
+            lines.append("- reasons: " + "; ".join(reasons))
+        lines.append("- Use only the tools bound by this capability result.")
+        return "\n".join(lines)
 
     def _role_contract_for_mode(self, execution_mode: str = "") -> str:
         mode = str(execution_mode or "").strip().lower()

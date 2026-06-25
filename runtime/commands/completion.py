@@ -31,9 +31,7 @@ class ReferenceToken:
 
 ARGUMENT_COMPLETIONS = {
     "/mode": (
-        ("solo", "单代理：默认工具 Agent，适合日常读写、命令和测试"),
-        ("serial", "串行多代理：主脑规划，多专家按顺序执行"),
-        ("full", "审核并行：通过安全门后并行执行无冲突任务"),
+        ("auto", "\u7edf\u4e00 Agent Loop\uff1a\u81ea\u52a8\u9009\u62e9\u76f4\u63a5\u56de\u7b54\u3001\u5355 Agent \u6216\u4efb\u52a1\u56fe\u8def\u7ebf"),
     ),
     "/refiner": (
         ("on", "开启前置优化副脑"),

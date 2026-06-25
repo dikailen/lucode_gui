@@ -161,6 +161,7 @@ async def run_solo_request(
     project_root: Path | None = None,
     output_controller=None,
     event_bus=None,
+    memory_pack=None,
 ) -> str:
     """Run one tool-capable Agent without planner/refiner/synthesizer."""
 
@@ -183,6 +184,7 @@ async def run_solo_request(
         project_root=project_root,
         output_controller=output_controller,
         event_bus=event_bus,
+        memory_pack=memory_pack,
     )
     rich_started = rich_runtime is not None and rich_state is not None
     try:
@@ -301,6 +303,7 @@ def _start_solo_rich_live(
     project_root: Path | None,
     output_controller=None,
     event_bus=None,
+    memory_pack=None,
 ) -> tuple[RichLiveRuntime | None, PipelineRunState | None, PlannedTask | None]:
     if not _should_use_solo_rich_live():
         return None, None, None
@@ -326,6 +329,7 @@ def _start_solo_rich_live(
         mode=settings.execution_mode,
         output_controller=output_controller,
         event_bus=event_bus,
+        memory_pack=memory_pack,
     )
     if project_root is not None:
         setattr(run_state, "project_root", Path(project_root))

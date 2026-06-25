@@ -13,6 +13,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback when tomli is installed.
     import tomli as tomllib  # type: ignore
 
+from runtime.config.execution_mode import EXECUTION_MODES, normalize_execution_mode
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROVIDER_CATALOG_PATH = PROJECT_ROOT / "catalogs" / "provider_catalog.json"
@@ -350,9 +352,10 @@ def reset_role_model_priorities(*, workspace_root: Path | str | None = None) -> 
 
 
 def set_execution_mode(mode: str, *, workspace_root: Path | str | None = None) -> dict[str, Any]:
-    value = str(mode or "").strip().lower()
-    if value not in {"solo", "serial", "full"}:
-        raise ValueError("执行模式必须是 solo、serial 或 full。")
+    raw_value = str(mode or "").strip().lower()
+    if raw_value not in EXECUTION_MODES:
+        raise ValueError("\u6267\u884c\u6a21\u5f0f\u5fc5\u987b\u662f auto\uff1bsolo\u3001serial \u548c full \u4ec5\u4f5c\u4e3a\u517c\u5bb9\u503c\u4fdd\u7559\u3002")
+    value = normalize_execution_mode(raw_value)
     config = load_lucode_config(workspace_root=workspace_root)
     config["mode"] = value
     save_lucode_config(config, workspace_root=workspace_root)

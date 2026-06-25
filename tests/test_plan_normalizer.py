@@ -226,3 +226,93 @@ def test_dynamic_attempt_emits_plan_normalized_for_single_task_multi_agent(monke
     assert len(normalized_events) == 1
     assert normalized_events[0].payload["route_type"] == "single_agent"
     assert planning_events[-1].payload["route_type"] == "single_agent"
+
+
+def test_dynamic_attempt_passes_memory_pack_to_preview_plan(monkeypatch, tmp_path):
+    from runtime.config.settings import RuntimeSettings
+    from runtime.execution import dynamic
+    from runtime.events import ExecutionEventBus
+    from planning.planner_schema import PlannerResult, RefinedRequest
+    from runtime.memory.resolver import MemoryPack, MemoryPackEntry
+
+    refined = RefinedRequest(raw_user_input="Read README", refined_request="Read README")
+    plan = PlannerResult(route_type="direct_answer", reason="memory wired", refined_request="Read README")
+    memory_pack = MemoryPack(
+        entries=[
+            MemoryPackEntry(
+                id="mem-1",
+                kind="tool_hint",
+                summary="Use pytest for this project",
+                confidence=0.8,
+                injection_policy="auto",
+            )
+        ]
+    )
+    captured = {}
+
+    class FakeResolver:
+        def __init__(self, project_root, *, flywheel=None):
+            captured["resolver_project_root"] = project_root
+            captured["resolver_flywheel"] = flywheel
+
+        def resolve_for_planner(self, request_text):
+            captured["resolver_request_text"] = request_text
+            return memory_pack
+
+    async def fake_preview_plan(*args, **kwargs):
+        del args
+        captured["memory_pack"] = kwargs.get("memory_pack")
+        return refined, plan
+
+    async def fake_run_direct_answer(*args, **kwargs):
+        del args, kwargs
+        return "direct done"
+
+    monkeypatch.setattr(dynamic, "MemoryResolver", FakeResolver)
+    monkeypatch.setattr(dynamic, "preview_plan", fake_preview_plan)
+    monkeypatch.setattr(dynamic, "_run_direct_answer", fake_run_direct_answer)
+    monkeypatch.setattr(dynamic, "validate_plan", lambda plan, privacy_policy=None: SimpleNamespace(valid=True, errors=[], warnings=[]))
+    monkeypatch.setattr(dynamic, "review_plan", lambda plan: SimpleNamespace(approved=True, findings=[]))
+    monkeypatch.setattr(dynamic, "_apply_executor_model_defaults", lambda plan, settings, model_registry: None)
+
+    class FakeModelRegistry:
+        def first_configured(self, model_ids):
+            return list(model_ids)[0]
+
+        def get_model(self, model_id):
+            return object()
+
+        def get_model_info(self, model_id):
+            return {"display_name": model_id}
+
+    settings = RuntimeSettings(
+        execution_mode="full",
+        query_refiner_enabled=False,
+        orchestrator_model_priority=["planner-model"],
+        final_synthesizer_model_priority=["synth-model"],
+        executor_model_priority=["worker-model"],
+    )
+
+    output, audit = asyncio.run(
+        dynamic._execute_dynamic_attempt(
+            "Read README",
+            tmp_path,
+            FakeModelRegistry(),
+            mcp_manager=object(),
+            hooks=None,
+            run_agent=None,
+            show_plan=False,
+            settings=settings,
+            privacy_policy=SimpleNamespace(mode="local_first"),
+            flywheel=object(),
+            attempt=1,
+            event_bus=ExecutionEventBus(),
+        )
+    )
+
+    assert output == "direct done"
+    assert audit is None
+    assert captured["memory_pack"] is memory_pack
+    assert captured["resolver_project_root"] == tmp_path
+    assert captured["resolver_flywheel"] is not None
+    assert captured["resolver_request_text"] == "Read README"

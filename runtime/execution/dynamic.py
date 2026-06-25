@@ -10,6 +10,7 @@ from runtime.agents.factory import AgentFactory
 from runtime.safety.auditor import audit_execution, audit_plan_review_failure, format_final_report
 from runtime.safety.checkpoint import create_checkpoint, rollback_checkpoint
 from runtime.memory.flywheel import FlywheelStore
+from runtime.memory.resolver import MemoryResolver
 from runtime.execution.pipeline import (
     PipelineRunState,
     apply_pipeline_gate,
@@ -183,6 +184,7 @@ async def _execute_dynamic_attempt(
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
     event_bus = event_bus or ExecutionEventBus()
     planning_run_context = RunContextStore(project_root) if project_root else None
+    memory_pack = _resolve_planner_memory_pack(project_root, flywheel, raw_user_input)
     event_bus.emit(
         "PlanningStarted",
         "开始规划本轮任务",
@@ -201,6 +203,7 @@ async def _execute_dynamic_attempt(
                 allowed_worker_models=settings.worker_model_pool(model_registry),
                 project_root=project_root,
                 run_context=planning_run_context,
+                memory_pack=memory_pack,
             )
     except Exception as exc:
         event_bus.emit(
@@ -233,6 +236,7 @@ async def _execute_dynamic_attempt(
         output_controller=output_controller,
         event_bus=event_bus,
         run_context=planning_run_context,
+        memory_pack=memory_pack,
     )
     run_state.model_labels = _model_label_map(
         model_registry,
@@ -380,9 +384,11 @@ async def _execute_dynamic_attempt(
                 attempt=attempt,
                 approval_policy_factory=_full_mode_approval_policy_factory(settings.execution_mode),
             )
-        finally:
+        except Exception:
             _record_flywheel_safely(flywheel, run_state)
+            raise
         audit = audit_execution(plan, run_state, output)
+        _record_flywheel_safely(flywheel, run_state, audit)
         if getattr(audit, "passed", True):
             run_state.output_controller.enter_completed("multi agent completed")
         else:
@@ -391,6 +397,15 @@ async def _execute_dynamic_attempt(
 
     run_state.output_controller.enter_failed("unknown route")
     return _dynamic_result("主脑没有给出可执行路线。", run_state), None
+
+
+def _resolve_planner_memory_pack(project_root: Path, flywheel: FlywheelStore, raw_user_input: str):
+    if project_root is None:
+        return None
+    try:
+        return MemoryResolver(project_root, flywheel=flywheel).resolve_for_planner(raw_user_input)
+    except Exception:
+        return None
 
 
 def _dynamic_result(output: str, run_state: PipelineRunState | None) -> DynamicExecutionResult:

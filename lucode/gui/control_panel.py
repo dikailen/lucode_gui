@@ -1,46 +1,47 @@
 from __future__ import annotations
 
-from runtime.config.execution_mode import EXECUTION_MODES, normalize_execution_mode
+from runtime.config.execution_mode import EXECUTION_MODES, execution_mode_policy, normalize_execution_mode
 from runtime.config.model_config import ROLE_ORDER
 from runtime.safety.privacy import PRIVACY_MODES
 
 from lucode.gui.i18n import Translator, normalize_language
 
 
-EXECUTION_MODE_ORDER = ("solo", "serial", "full")
+EXECUTION_MODE_ORDER = ("auto",)
 PRIVACY_MODE_ORDER = ("offline", "local_first", "cloud_allowed")
 
-# 每个执行模式实际会用到的角色脑（依据 runtime 实现核实）。
-# value: (role_id, "always" | "conditional")
+UNIFIED_LOOP_ROLES: list[tuple[str, str]] = [
+    ("orchestrator", "always"),
+    ("executor", "always"),
+    ("final_synthesizer", "conditional"),
+]
+
 MODE_ROLE_USAGE: dict[str, list[tuple[str, str]]] = {
-    "solo": [("executor", "always")],
-    "serial": [
-        ("orchestrator", "always"),
-        ("executor", "always"),
-        ("final_synthesizer", "conditional"),
-    ],
-    "full": [
-        ("orchestrator", "always"),
-        ("executor", "always"),
-        ("final_synthesizer", "conditional"),
-    ],
+    "auto": list(UNIFIED_LOOP_ROLES),
+    "solo": list(UNIFIED_LOOP_ROLES),
+    "serial": list(UNIFIED_LOOP_ROLES),
+    "full": list(UNIFIED_LOOP_ROLES),
 }
 
 
+def _visible_execution_mode(mode: str) -> str:
+    return execution_mode_policy(mode).canonical_mode
+
+
 def execution_mode_label(mode: str, language: str = "zh") -> str:
-    normalized = normalize_execution_mode(mode)
-    return Translator(language)(f"control.mode.{normalized}")
+    visible_mode = _visible_execution_mode(mode)
+    return Translator(language)(f"control.mode.{visible_mode}")
 
 
 def compact_execution_mode_label(mode: str, language: str = "zh") -> str:
-    normalized = normalize_execution_mode(mode)
+    visible_mode = _visible_execution_mode(mode)
     labels = {
-        "zh": {"solo": "单人", "serial": "串行", "full": "完全"},
-        "en": {"solo": "Solo", "serial": "Serial", "full": "Full"},
+        "zh": {"auto": "\u81ea\u52a8"},
+        "en": {"auto": "Auto"},
     }
     return labels.get(normalize_language(language), labels["zh"]).get(
-        normalized,
-        execution_mode_label(normalized, language),
+        visible_mode,
+        execution_mode_label(visible_mode, language),
     )
 
 
@@ -79,19 +80,21 @@ def role_options(language: str = "zh") -> list[tuple[str, str]]:
 def roles_for_mode(mode: str) -> list[tuple[str, str]]:
     """Return (role_id, usage) the given execution mode actually uses."""
 
-    return list(MODE_ROLE_USAGE.get(normalize_execution_mode(mode), MODE_ROLE_USAGE["solo"]))
+    normalized = normalize_execution_mode(mode)
+    return list(MODE_ROLE_USAGE.get(normalized, MODE_ROLE_USAGE["auto"]))
 
 
 def query_refiner_available_for_mode(mode: str) -> bool:
-    """solo never runs the query refiner; serial/full do when enabled."""
+    """The unified loop can run the query refiner for every compatibility mode."""
 
-    return normalize_execution_mode(mode) != "solo"
+    del mode
+    return True
 
 
 def worker_pool_available_for_mode(mode: str) -> bool:
-    """Only full team mode lets the supervisor build a multi-model worker team."""
+    """Expose the worker pool when the selected policy may schedule parallel workers."""
 
-    return normalize_execution_mode(mode) == "full"
+    return execution_mode_policy(mode).parallel_enabled
 
 
 def _index_for_value(options: list[tuple[str, str]], value: str) -> int:
@@ -130,7 +133,7 @@ if _PYSIDE_AVAILABLE:
             self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
             self._language = normalize_language(language)
             self._t = Translator(self._language)
-            self._mode = "solo"
+            self._mode = "auto"
             self._building = True
 
             outer = QHBoxLayout(self)
@@ -210,7 +213,7 @@ if _PYSIDE_AVAILABLE:
         ) -> None:
             del privacy_mode, role_models, query_refiner_enabled, worker_pool
             self._building = True
-            self._mode = normalize_execution_mode(execution_mode)
+            self._mode = _visible_execution_mode(execution_mode)
             btn = self._mode_buttons.get(self._mode)
             if btn is not None:
                 btn.setChecked(True)
@@ -223,7 +226,7 @@ if _PYSIDE_AVAILABLE:
             self.settings_button.setEnabled(enabled)
 
         def _on_mode_clicked(self, mode: str) -> None:
-            self._mode = normalize_execution_mode(mode)
+            self._mode = _visible_execution_mode(mode)
             self._refresh_summary()
             if not self._building:
                 self.execution_mode_changed.emit(self._mode)

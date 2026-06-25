@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 
-EXECUTION_MODES = {"solo", "serial", "full"}
-DEFAULT_EXECUTION_MODE = "solo"
+CANONICAL_EXECUTION_MODES = {"auto"}
+LEGACY_EXECUTION_MODES = {"solo", "serial", "full"}
+EXECUTION_MODES = CANONICAL_EXECUTION_MODES | LEGACY_EXECUTION_MODES
+DEFAULT_EXECUTION_MODE = "auto"
+
+
+@dataclass(frozen=True)
+class ExecutionModePolicy:
+    canonical_mode: str = "auto"
+    legacy_mode: str = ""
+    fast_single_agent: bool = False
+    parallel_enabled: bool = True
+    supervisor_enabled: bool = True
 
 
 def normalize_execution_mode(value: str) -> str:
@@ -14,8 +26,52 @@ def normalize_execution_mode(value: str) -> str:
     return DEFAULT_EXECUTION_MODE
 
 
+def execution_mode_policy(value: str) -> ExecutionModePolicy:
+    mode = normalize_execution_mode(value)
+    if mode == "solo":
+        return ExecutionModePolicy(
+            canonical_mode="auto",
+            legacy_mode="solo",
+            fast_single_agent=True,
+            parallel_enabled=False,
+            supervisor_enabled=False,
+        )
+    if mode == "serial":
+        return ExecutionModePolicy(
+            canonical_mode="auto",
+            legacy_mode="serial",
+            fast_single_agent=False,
+            parallel_enabled=False,
+            supervisor_enabled=True,
+        )
+    if mode == "full":
+        return ExecutionModePolicy(
+            canonical_mode="auto",
+            legacy_mode="full",
+            fast_single_agent=False,
+            parallel_enabled=True,
+            supervisor_enabled=True,
+        )
+    return ExecutionModePolicy(
+        canonical_mode="auto",
+        legacy_mode="",
+        fast_single_agent=False,
+        parallel_enabled=True,
+        supervisor_enabled=True,
+    )
+
+
+def canonical_execution_mode(value: str) -> str:
+    return execution_mode_policy(value).canonical_mode
+
+
+def effective_runtime_mode(value: str) -> str:
+    policy = execution_mode_policy(value)
+    return policy.legacy_mode or "full"
+
+
 def explicit_execution_mode_for_input(user_input: str) -> str:
-    """Return a per-turn mode only when the user explicitly asks for one."""
+    """Return a per-turn compatibility mode only when the user explicitly asks for one."""
 
     text = str(user_input or "").strip().lower()
     if not text:
@@ -23,7 +79,7 @@ def explicit_execution_mode_for_input(user_input: str) -> str:
     normalized = re.sub(r"\s+", " ", text)
     mode_word = "\u6a21\u5f0f"
     use_words = "\u7528|\u4f7f\u7528|\u5207\u5230|\u5207\u6362\u5230|\u4ee5|\u6309"
-    for mode in ("full", "serial", "solo"):
+    for mode in ("full", "serial", "solo", "auto"):
         if re.search(rf"(^|\s|/){mode}\s*({mode_word}|mode)(\b|$)", normalized):
             return mode
         if re.search(rf"({use_words}|run with|use)\s*{mode}\b", normalized):
@@ -34,20 +90,20 @@ def explicit_execution_mode_for_input(user_input: str) -> str:
 
 
 def should_use_solo_mode(user_input: str, execution_mode: str) -> bool:
-    return normalize_execution_mode(execution_mode) == "solo"
+    del user_input, execution_mode
+    return False
 
 
 def runtime_route_for_input(user_input: str, execution_mode: str) -> str:
-    mode = normalize_execution_mode(execution_mode)
-    if mode == "solo":
-        return "solo"
-    return "serial"
+    del user_input, execution_mode
+    return "dynamic"
 
 
 def execution_mode_label_zh(mode: str) -> str:
     labels = {
-        "solo": "\u5355\u6a21\u578b\u5de5\u5177 Agent",
-        "serial": "\u591a Agent \u4e32\u884c",
-        "full": "\u9ad8\u7ea7\u5e76\u884c\u591a Agent",
+        "auto": "\u81ea\u52a8\u6267\u884c",
+        "solo": "\u81ea\u52a8\u6267\u884c\uff08solo \u517c\u5bb9\uff09",
+        "serial": "\u81ea\u52a8\u6267\u884c\uff08serial \u517c\u5bb9\uff09",
+        "full": "\u81ea\u52a8\u6267\u884c\uff08full \u517c\u5bb9\uff09",
     }
     return labels.get(normalize_execution_mode(mode), labels[DEFAULT_EXECUTION_MODE])

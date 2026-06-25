@@ -142,25 +142,21 @@ def test_top_mode_area_is_compact_status_chip(app, tmp_path):
     assert len(mode_tooltip) > len(mode_chip.text())
 
 
-def test_bottom_mode_switch_updates_top_mode_chip(app, tmp_path):
+def test_unified_mode_is_the_only_visible_mode_control(app, tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     window = MainWindow(workspace=tmp_path, chat_session=session)
     window.show()
     app.processEvents()
 
     mode_chip = window.findChild(QLabel, "TopModeChip")
-    serial_button = next(
-        button for button in window.control_bar.findChildren(QPushButton, "SegButton")
-        if button.property("mode_id") == "serial"
-    )
-    previous_text = mode_chip.text()
+    mode_buttons = window.control_bar.findChildren(QPushButton, "SegButton")
+    button_modes = [button.property("mode_id") for button in mode_buttons]
 
-    serial_button.click()
-    app.processEvents()
-
-    assert mode_chip.property("mode_id") == "serial"
-    assert mode_chip.text() != previous_text
+    assert mode_chip.property("mode_id") == "auto"
+    assert button_modes == ["auto"]
+    assert all(mode not in button_modes for mode in ("solo", "serial", "full"))
     assert len(mode_chip.text()) <= 8
+
 
 
 def test_chat_rows_use_direct_output_canvas_without_tinted_stripes(app, tmp_path):

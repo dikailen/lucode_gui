@@ -17,6 +17,7 @@ from runtime.execution.inline_context import _inline_project_file_context, _late
 from runtime.execution.pipeline import PipelineRunState
 from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.task_runner import (
+    _emit_task_memory_provided,
     _friendly_task_error,
     _max_turns_for_task,
     _readonly_fast_path_result,
@@ -24,6 +25,7 @@ from runtime.execution.task_runner import (
     _run_agent_kwargs,
     _task_prompt,
     _task_failure_output,
+    _task_memory_pack_for_task,
     _task_scoped_hooks,
     _task_status_label,
     _with_verification_report,
@@ -58,8 +60,8 @@ async def _run_single_agent(
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
-        _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
+        _record_flywheel_safely(flywheel, run_state, audit)
         return format_final_report(output, audit), audit
     if _can_fast_path_git_status(task):
         output = _run_git_status_fast_path(project_root, task)
@@ -68,8 +70,8 @@ async def _run_single_agent(
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
-        _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
+        _record_flywheel_safely(flywheel, run_state, audit)
         return format_final_report(output, audit), audit
     if _can_fast_path_git_diff(task):
         output = _run_git_diff_fast_path(project_root, task)
@@ -78,8 +80,8 @@ async def _run_single_agent(
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
-        _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
+        _record_flywheel_safely(flywheel, run_state, audit)
         return format_final_report(output, audit), audit
 
     fast_path = _readonly_fast_path_result(project_root, task, run_context=getattr(run_state, "run_context", None))
@@ -89,8 +91,8 @@ async def _run_single_agent(
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
-        _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
+        _record_flywheel_safely(flywheel, run_state, audit)
         return format_final_report(output, audit), audit
 
     workspace_context = _latest_workspace_context(project_root, task)
@@ -104,6 +106,8 @@ async def _run_single_agent(
     )
     _emit_new_inline_read_events(run_state, task, inline_snapshot_ids_before)
     shared_context = _single_shared_context(run_state, task)
+    task_memory_pack = _task_memory_pack_for_task(run_state, task)
+    _emit_task_memory_provided(run_state, task, task_memory_pack)
     if inline_context:
         agent = factory.create_direct_answer_agent(
             task.model,
@@ -129,7 +133,9 @@ async def _run_single_agent(
                     _task_prompt(
                         refined_request,
                         task.instruction,
-                        workspace_context=f"{shared_context}\n\n{workspace_context}\n\n{inline_context}",
+                        workspace_context=f"{workspace_context}\n\n{inline_context}",
+                        shared_context=shared_context,
+                        task_memory_pack=task_memory_pack,
                     ),
                     scoped_hooks,
                     **run_agent_kwargs,
@@ -156,8 +162,8 @@ async def _run_single_agent(
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
-        _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
+        _record_flywheel_safely(flywheel, run_state, audit)
         return format_final_report(output, audit), audit
 
     agent = await _create_task_agent(factory, task, execution_mode=execution_mode)
@@ -183,6 +189,7 @@ async def _run_single_agent(
                     task.instruction,
                     workspace_context=workspace_context,
                     shared_context=shared_context,
+                    task_memory_pack=task_memory_pack,
                 ),
                 scoped_hooks,
                 **run_agent_kwargs,
@@ -209,8 +216,8 @@ async def _run_single_agent(
     run_state.record_task_result(task, output)
     if show_plan:
         _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
-    _record_flywheel_safely(flywheel, run_state)
     audit = audit_execution(plan, run_state, output)
+    _record_flywheel_safely(flywheel, run_state, audit)
     return format_final_report(output, audit), audit
 
 

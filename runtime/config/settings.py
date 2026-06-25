@@ -31,7 +31,7 @@ class RuntimeSettings:
     )
     allowed_worker_models: list[str] = field(default_factory=list)
     privacy_mode: str = "local_first"
-    execution_mode: str = "solo"
+    execution_mode: str = "auto"
 
     def worker_model_pool(self, model_registry=None) -> list[str]:
         """Whitelist of models the supervisor may assign to workers.
@@ -64,7 +64,7 @@ class RuntimeSettings:
                 default_priorities["final_synthesizer"],
             ),
             privacy_mode=normalize_privacy_mode(os.environ.get("AGENTS_PRIVACY_MODE") or "local_first"),
-            execution_mode=normalize_execution_mode(os.environ.get("AGENTS_EXECUTION_MODE") or "solo"),
+            execution_mode=normalize_execution_mode(os.environ.get("AGENTS_EXECUTION_MODE") or "auto"),
         )
         return _apply_lucode_config_overrides(settings)
 

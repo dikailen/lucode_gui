@@ -86,6 +86,7 @@ async def preview_plan(
     allowed_worker_models=None,
     project_root: Path | str | None = None,
     run_context=None,
+    memory_pack=None,
 ) -> tuple[object, PlannerResult]:
     """Run query refinement and planner preview without creating execution Agents."""
 
@@ -118,6 +119,9 @@ async def preview_plan(
     ]
     if scout_context:
         context_lines.append(scout_context + "\n\n")
+    rendered_memory = _render_memory_pack(memory_pack)
+    if rendered_memory:
+        context_lines.append(rendered_memory + "\n\n")
     context_lines.extend(
         [
             f"原始问题：{refined.raw_user_input}\n",
@@ -138,9 +142,53 @@ async def preview_plan(
         ]
     )
     plan = parse_planner_result(planner_result.final_output, fallback_user_input=fallback_context)
+    _store_memory_resolver_interface(plan, memory_pack)
 
     return refined, plan
 
+
+def _store_memory_resolver_interface(plan: PlannerResult, memory_pack) -> None:
+    if memory_pack is None:
+        return
+    memory_interface = dict(getattr(plan, "memory_interface", {}) or {})
+    existing_resolver = dict(memory_interface.get("memory_resolver") or {})
+    adopter = getattr(memory_pack, "apply_memory_interface", None)
+    if callable(adopter):
+        try:
+            adopter(existing_resolver)
+        except Exception:
+            pass
+    usage_recorder = getattr(memory_pack, "record_usage", None)
+    if callable(usage_recorder):
+        try:
+            usage_recorder([entry.id for entry in getattr(memory_pack, "entries", []) if getattr(entry, "id", "")], source="planner_provided")
+            usage_recorder(getattr(memory_pack, "adopted_entry_ids", []) or [], source="planner_adopted")
+        except Exception:
+            pass
+    exporter = getattr(memory_pack, "to_memory_interface", None)
+    if not callable(exporter):
+        return
+    try:
+        payload = exporter()
+    except Exception:
+        return
+    if not isinstance(payload, dict) or not payload:
+        return
+    memory_interface["memory_resolver"] = payload
+    plan.memory_interface = memory_interface
+
+def _render_memory_pack(memory_pack) -> str:
+    if memory_pack is None:
+        return ""
+    if isinstance(memory_pack, str):
+        return sanitize_text(memory_pack).strip()
+    renderer = getattr(memory_pack, "render_for_planner", None)
+    if not callable(renderer):
+        return ""
+    try:
+        return sanitize_text(str(renderer() or "")).strip()
+    except Exception:
+        return ""
 
 def scout_project_context_for_planning(
     request_text: str,
@@ -292,11 +340,47 @@ def format_plan_preview(refined, plan: PlannerResult) -> str:
         lines.append("知识图谱预留接口：")
         lines.append(f"- 是否建议检索记忆：{memory.get('should_query_memory', False)}")
         lines.append(f"- 检索提示：{memory.get('query_hint', '无')}")
+        resolver = dict(memory.get("memory_resolver") or {})
+        if resolver:
+            lines.append("记忆解析器：")
+            lines.append(f"- 已提供：{_format_memory_ids(resolver.get('provided_entry_ids'))}")
+            lines.append(f"- 候选：{_format_memory_ids(resolver.get('candidate_entry_ids'))}")
+            lines.append(f"- 已忽略：{_format_memory_ids(resolver.get('ignored_entry_ids'))}")
+            lines.append(f"- 已采纳：{_format_memory_ids(resolver.get('adopted_entry_ids'))}")
+            lines.append(f"- 任务绑定：{_format_memory_bindings(resolver.get('task_bindings'))}")
+            lines.append(f"- 采纳原因：{_format_memory_reasons(resolver.get('adoption_reasons'))}")
 
     lines.append("")
     lines.append("说明：这是预览模式，只展示调度计划，不会创建动态 Agent，也不会调用 MCP 执行任务。")
     return "\n".join(lines)
 
+
+def _format_memory_ids(values) -> str:
+    ids = [str(item) for item in list(values or []) if str(item).strip()]
+    return ", ".join(ids) if ids else "无"
+
+def _format_memory_bindings(value) -> str:
+    if not isinstance(value, dict):
+        return "无"
+    parts = []
+    for task_id, entry_ids in value.items():
+        clean_task_id = str(task_id or "").strip()
+        ids = _format_memory_ids(entry_ids)
+        if clean_task_id and ids != "无":
+            parts.append(f"{clean_task_id} -> {ids}")
+    return "；".join(parts) if parts else "无"
+
+
+def _format_memory_reasons(value) -> str:
+    if not isinstance(value, dict):
+        return "无"
+    parts = []
+    for entry_id, reason in value.items():
+        clean_entry_id = str(entry_id or "").strip()
+        clean_reason = str(reason or "").strip()
+        if clean_entry_id and clean_reason:
+            parts.append(f"{clean_entry_id}: {clean_reason}")
+    return "；".join(parts) if parts else "无"
 
 def format_execution_plan(refined, plan: PlannerResult, validation: PlanValidation) -> str:
     lines = [

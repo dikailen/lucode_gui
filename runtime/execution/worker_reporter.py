@@ -20,6 +20,7 @@ def build_worker_report(task, output: str, *, run_state=None) -> WorkerReport:
     blockers = _blockers_for_task(task_id, run_state)
     evidence_refs = _evidence_refs(task_id, run_state, files_read=files_read, files_written=files_written)
     claimed_artifacts = _claimed_artifacts_from_output(output)
+    memory_artifacts = _memory_context_artifacts(task_id, run_state)
     return WorkerReport(
         task_id=task_id,
         status=status,
@@ -29,7 +30,7 @@ def build_worker_report(task, output: str, *, run_state=None) -> WorkerReport:
         files_written=files_written,
         tool_calls=tool_calls,
         blockers=blockers,
-        artifacts=claimed_artifacts,
+        artifacts=_unique_artifact_strings([*claimed_artifacts, *memory_artifacts]),
     )
 
 
@@ -184,6 +185,22 @@ def _claimed_artifacts_from_output(output: str) -> list[str]:
         if key and value:
             artifacts.append(f"{key}: {value}")
     return _unique_artifact_strings(artifacts)
+
+
+def _memory_context_artifacts(task_id: str, run_state) -> list[str]:
+    entry_ids: list[str] = []
+    for event in _events_for_task(task_id, run_state):
+        if str(getattr(event, "event_type", "") or "") != "TaskMemoryProvided":
+            continue
+        payload = dict(getattr(event, "payload", {}) or {})
+        for entry_id in list(payload.get("entry_ids") or []):
+            clean = str(entry_id or "").strip()
+            if clean:
+                entry_ids.append(clean)
+    entry_ids = _unique_strings(entry_ids)
+    if not entry_ids:
+        return []
+    return ["memory_context_provided: " + ", ".join(entry_ids)]
 
 
 def _parse_worker_report_block(output: str) -> list[tuple[str, str]]:

@@ -181,7 +181,7 @@ def parse_writable_config_command(command: str) -> tuple[str, str] | None:
     if len(parts) != 2:
         return None
     name, value = parts[0].lower(), parts[1].lower()
-    if name == "/mode" and value in {"solo", "serial", "full"}:
+    if name == "/mode" and value in {"auto", "solo", "serial", "full"}:
         return ("mode", value)
     if name == "/refiner" and value in {"on", "off"}:
         return ("refiner", value)
@@ -199,7 +199,7 @@ def apply_writable_config_command(
     if parsed is None:
         return (
             "无法识别这个配置切换命令。\n"
-            "可用命令：/mode solo、/mode serial、/mode full、/refiner on、/refiner off、"
+            "可用命令：/mode auto、/refiner on、/refiner off、"
             "/models select provider/model [fallback...]、/models role <role> provider/model [...]",
             False,
         )
@@ -816,16 +816,16 @@ def _render_privacy(settings: RuntimeSettings) -> str:
 
 def _render_mode(settings: RuntimeSettings) -> str:
     return _render_lucode_panel(
-        "执行模式状态",
+        "统一 Agent Loop 状态",
         [
-            f"当前模式：{execution_mode_label_zh(settings.execution_mode)}",
+            f"当前执行：{execution_mode_label_zh(settings.execution_mode)}",
             "",
-            "可选模式：solo / serial / full",
-            "solo：默认单模型工具 Agent，可以读写文件、联网、跑命令和测试，但不创建多 Agent。",
-            "serial：显式多 Agent 串行工程模式，由主脑规划，多专家按顺序处理。",
-            "full：显式高级并行多 Agent，只有通过安全门的批次才允许并行。",
-            "",
-            "说明：输入 /mode solo、/mode serial 或 /mode full 可立即切换并写入 .lucode/config.toml。",
+            "主入口：auto（统一 Agent Loop）",
+            "兼容值：solo / serial / full 仍可读取和写入，用于迁移旧配置。",
+            "solo 兼容：auto + fast_single_agent，保留快速单 Agent 策略。",
+            "serial 兼容：auto + parallel_enabled=False，由 Scheduler 保守串行。",
+            "full 兼容：auto + parallel_enabled=True，允许无冲突任务并行。",
+            "说明：新配置请使用 /mode auto；旧命令 /mode solo、/mode serial、/mode full 暂时保留兼容。",
         ],
     )
 
@@ -943,7 +943,7 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
         return "\n".join(
             [
                 f"/mode 切换请求：{value}",
-                "当前 /mode 支持直接切换：/mode solo、/mode serial、/mode full。",
+                "当前 /mode 主入口：/mode auto；solo、serial、full 仅作为旧配置兼容值保留。",
             ]
         )
     if command_name == "/models":
@@ -957,8 +957,8 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
         return "\n".join(
             [
                 f"/model 检测到可能的执行模式：{value}",
-                "如果你要切换 solo / serial / full，请使用 /mode 命令。",
-                f"正确命令：/mode {value}",
+                "如果你要切换统一执行入口，请使用 /mode auto；solo / serial / full 仅是兼容值。",
+                "推荐命令：/mode auto",
             ]
         )
     return "\n".join(

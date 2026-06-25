@@ -2,19 +2,30 @@ from __future__ import annotations
 
 from lucode.gui.chat_session import GuiChatSession
 from lucode.gui.control_panel import (
+    compact_execution_mode_label,
+    execution_mode_label,
     execution_mode_options,
     privacy_mode_options,
     query_refiner_available_for_mode,
     role_options,
     roles_for_mode,
 )
+from lucode.gui.i18n import Translator
 
 
 def test_execution_mode_options_cover_known_modes():
     keys = [key for key, _label in execution_mode_options()]
-    assert keys == ["solo", "serial", "full"]
+    assert keys == ["auto"]
     assert all(label for _key, label in execution_mode_options())
 
+
+def test_auto_mode_labels_and_tooltips_are_unified():
+    assert execution_mode_label("solo", "zh") == "\u81ea\u52a8\u6267\u884c"
+    assert execution_mode_label("full", "en") == "Auto execution"
+    assert compact_execution_mode_label("serial", "zh") == "\u81ea\u52a8"
+    assert compact_execution_mode_label("full", "en") == "Auto"
+    assert Translator("zh")("control.mode_tip.auto").startswith("\u7edf\u4e00 Agent Loop")
+    assert Translator("en")("control.mode_tip.auto").startswith("Unified Agent Loop")
 
 def test_privacy_mode_options_cover_known_modes():
     keys = [key for key, _label in privacy_mode_options()]
@@ -26,14 +37,8 @@ def test_role_options_follow_role_order():
     assert keys == ["query_refiner", "orchestrator", "executor", "final_synthesizer"]
 
 
-def test_solo_mode_uses_only_executor():
-    rows = roles_for_mode("solo")
-    assert [r for r, _u in rows] == ["executor"]
-    assert all(u == "always" for _r, u in rows)
-
-
-def test_serial_and_full_use_planner_executor_and_conditional_synthesizer():
-    for mode in ("serial", "full"):
+def test_auto_and_legacy_modes_use_unified_loop_roles():
+    for mode in ("auto", "solo", "serial", "full"):
         rows = roles_for_mode(mode)
         roles = [r for r, _u in rows]
         assert roles == ["orchestrator", "executor", "final_synthesizer"]
@@ -43,12 +48,17 @@ def test_serial_and_full_use_planner_executor_and_conditional_synthesizer():
         assert usage["final_synthesizer"] == "conditional"
 
 
-def test_unknown_mode_falls_back_to_solo_roles():
-    assert [r for r, _u in roles_for_mode("bogus")] == ["executor"]
+def test_unknown_mode_falls_back_to_auto_roles():
+    assert [r for r, _u in roles_for_mode("bogus")] == [
+        "orchestrator",
+        "executor",
+        "final_synthesizer",
+    ]
 
 
-def test_query_refiner_unavailable_in_solo_only():
-    assert query_refiner_available_for_mode("solo") is False
+def test_query_refiner_available_in_unified_loop():
+    assert query_refiner_available_for_mode("auto") is True
+    assert query_refiner_available_for_mode("solo") is True
     assert query_refiner_available_for_mode("serial") is True
     assert query_refiner_available_for_mode("full") is True
 
@@ -65,9 +75,8 @@ def test_set_execution_mode_normalizes_and_persists(tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     assert session.set_execution_mode("FULL") == "full"
     assert session.settings.execution_mode == "full"
-    # unknown falls back to solo default
-    assert session.set_execution_mode("bogus") == "solo"
-    assert session.settings.execution_mode == "solo"
+    assert session.set_execution_mode("bogus") == "auto"
+    assert session.settings.execution_mode == "auto"
 
 
 def test_set_privacy_mode_normalizes_and_persists(tmp_path):

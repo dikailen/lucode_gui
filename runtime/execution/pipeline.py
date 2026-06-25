@@ -131,6 +131,8 @@ class PipelineRunState:
     event_bus: ExecutionEventBus = field(default_factory=ExecutionEventBus)
     output_controller: OutputController = field(default_factory=OutputController)
     model_labels: dict[str, str] = field(default_factory=dict)
+    memory_pack: Any | None = None
+    worker_reports: list[Any] = field(default_factory=list)
 
     @classmethod
     def create(
@@ -142,6 +144,8 @@ class PipelineRunState:
         output_controller: OutputController | None = None,
         event_bus: ExecutionEventBus | None = None,
         run_context: RunContextStore | None = None,
+        memory_pack: Any | None = None,
+        worker_reports: list[Any] | None = None,
     ) -> "PipelineRunState":
         controller = output_controller or OutputController(mode=mode, route=plan.route_type)
         controller.configure(mode=mode, route=plan.route_type)
@@ -167,6 +171,8 @@ class PipelineRunState:
             run_context=run_context or (RunContextStore(project_root) if project_root else None),
             event_bus=event_bus or ExecutionEventBus(),
             output_controller=controller,
+            memory_pack=memory_pack,
+            worker_reports=list(worker_reports or []),
         )
 
     def record_gate(self, decision: GateDecision) -> None:
@@ -251,6 +257,7 @@ class PipelineRunState:
             "errors": list(self.errors),
             "run_context": self.run_context.render_for_task() if self.run_context else "",
             "events": [event.to_dict() for event in self.event_bus.snapshot()],
+            "worker_reports": [_worker_report_to_dict(report) for report in self.worker_reports],
             "output": self.output_controller.snapshot().to_dict(),
         }
 
@@ -478,6 +485,24 @@ def _run_configured_verification_commands(project_root: Path) -> list[dict[str, 
         )
     return reports
 
+
+def _worker_report_to_dict(report: Any) -> dict[str, Any]:
+    if hasattr(report, "to_dict"):
+        try:
+            value = report.to_dict()
+            return dict(value) if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+    if isinstance(report, dict):
+        return dict(report)
+    return {
+        "task_id": str(getattr(report, "task_id", "") or ""),
+        "status": str(getattr(report, "status", "") or ""),
+        "summary": str(getattr(report, "summary", "") or ""),
+        "files_read": list(getattr(report, "files_read", []) or []),
+        "files_written": list(getattr(report, "files_written", []) or []),
+        "tool_calls": list(getattr(report, "tool_calls", []) or []),
+    }
 
 def _gate_to_dict(decision: GateDecision) -> dict[str, Any]:
     return {
