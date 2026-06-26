@@ -1,193 +1,122 @@
-# Lucode 0.1.0
+# Lucode GUI
 
-Lucode 是一个中文优先、项目本地优先的终端代码代理。它把模型连接、多脑调度、Skill、MCP 工具、命令安全审批、会话记忆和终端交互整合到一个 CLI 工作台里，适合在本地项目中做代码阅读、项目分析、修复规划、受控编辑和多 Agent 协作。
+Lucode GUI 是 Lucode 的实验版图形工作台。它把 GUI 会话、模型配置、MCP / 工具接入、工具审批、任务执行状态和项目经验回路放在同一个本地工作区里，用来探索更适合长期项目协作的 Agent Loop。
 
-当前版本是 **Python / conda 首发版**。建议先在 Python 3.11+ 环境中安装使用；npm wrapper 和独立 exe 不属于本次发布入口。
+> 当前版本仍是实验版：界面、配置入口和部分 Agent 编排策略还在快速迭代中，不建议把它当成稳定发行版或生产级自动化工具。
 
-## 适合做什么
+## 界面预览
 
-- 阅读和总结项目结构、配置、README、Git 状态和 diff。
-- 按 `solo`、`serial`、`full` 三种模式处理不同复杂度任务。
-- 连接 DeepSeek、OpenAI、OpenRouter、DashScope、SiliconFlow、MiMo、本地 Ollama / LM Studio / llama.cpp，以及自定义 OpenAI-compatible 中转。
-- 为前置优化脑、主脑规划脑、执行专家脑和汇总脑分别选择模型。
-- 使用内置 Skill 和 MCP 工具完成代码定位、只读文件分析、受控编辑、命令执行和审计。
-- 保存 JSONL 会话，并通过 `/resume` 恢复上下文。
+GUI 当前以“会话 + 设置面板 + 执行控制”为核心。模式入口已经收敛到 `自动`，旧的 `solo / serial / full` 不再作为 GUI 主切换项展示。
+
+![Lucode GUI 设置界面](docs/images/lucode-gui-settings.png)
+
+核心执行链路围绕“记忆解析 -> 主脑规划 -> 契约门控 -> 能力绑定 -> 调度执行 -> 审查修复 -> 经验蒸馏 -> 经验回流”展开。
+
+![Lucode 当前核心 Agent Loop 与项目经验回路](docs/images/lucode-agent-loop.png)
+
+## 这是什么
+
+Lucode 的目标不是只做一个聊天窗口，而是做一个面向本地项目的 Agent 工作台：
+
+- 中文优先，项目本地优先。
+- 同时保留 CLI 和 GUI，两者共享运行时能力。
+- 使用统一 Agent Loop 处理直接回答、单 Agent 任务和多 Agent 任务图。
+- 支持模型注册表、角色模型选择、MCP 管理和工具审批。
+- 通过项目经验库记录可复用的验证命令、路径映射、工具经验、项目事实和失败教训。
+- 让后续任务可以从同一项目里的历史经验中获益，而不是每轮都从零开始。
+
+## 当前可用能力
+
+- GUI 会话：创建会话、输入任务、查看执行状态。
+- 设置面板：配置模型、隐私、接入、语言、快捷键等入口。
+- 统一执行模式：GUI 主入口显示为 `自动`，由运行时根据任务类型选择 direct answer、single agent 或 task graph。
+- 能力绑定：根据任务需要绑定文件、代码、Git、命令、网页、搜索、MCP 等能力。
+- 调度器：不再把 `serial` 当成独立用户模式，而是在有依赖、写冲突、资源锁或并行关闭时采用保守串行策略。
+- 工具审批循环：对命令、文件写入、高风险工具调用等动作进行审批和恢复。
+- Run Blackboard：本轮运行中持续记录工具输出、文件快照、worker report 和 verification report。
+- 项目经验回路：Experience Distiller 从成功和失败运行中提炼高确定性经验，写入 ExperienceStore。
+
+## 核心 Agent Loop
+
+当前主流程可以概括为：
+
+```text
+用户输入
+  -> GUI / CLI 会话
+  -> 运行设置 + 模型注册表 + MCP 管理
+  -> Memory Resolver 记忆解析器
+  -> Query Refiner 可选优化
+  -> Orchestrator Planner 主脑规划
+  -> Execution Contract + Gate 执行契约与门控
+  -> Capability Resolver 能力解析
+  -> Tool / MCP Binder 工具绑定
+  -> Scheduler 调度器
+  -> Worker Agents 执行
+  -> Tool Approval Loop 工具审批循环
+  -> Run Blackboard 本轮黑板
+  -> Lead Review / Final Audit 审查
+  -> Experience Distiller 经验蒸馏
+  -> ExperienceStore 项目经验库
+  -> 回流到下一轮 Memory Resolver
+```
+
+记忆注入遵循保守策略：高置信经验可以自动进入 Planner；失败教训默认只作为 Planner 候选，必须被 Planner 显式采纳并绑定到具体 task，才会进入 Worker 上下文。
 
 ## 快速开始
 
-### 1. 准备环境
-
-需要 Python 3.11+。推荐使用 conda：
+需要 Python 3.11+。GUI 依赖是可选依赖，建议这样安装：
 
 ```powershell
-conda create -n lucode python=3.11
-conda activate lucode
+python -m pip install -e ".[gui]"
+```
+
+在项目目录启动 GUI：
+
+```powershell
+python -m lucode.gui --workspace .
+```
+
+如果只想使用 CLI：
+
+```powershell
 python -m pip install -e .
-lucode doctor
-```
-
-`lucode doctor` 用于检查入口、依赖和基础配置状态。
-
-### 2. 初始化工作区
-
-在你的项目目录执行：
-
-```powershell
-lucode init
-```
-
-Lucode 会在当前项目下创建 `.lucode/` 工作区，用于保存项目配置、权限策略、Skill、MCP 和会话数据。
-
-### 3. 启动聊天
-
-```powershell
 lucode chat
 ```
 
-进入聊天后可以直接输入自然语言任务，也可以输入 `/` 打开命令菜单。
+本仓库不依赖本地批处理脚本启动。`run_gui.bat` 属于个人机器上的便捷入口，不应提交到仓库。
 
-### 4. 连接模型
+## 配置与隐私
 
-推荐在聊天中使用：
+Lucode 会区分用户级配置和项目级配置：
 
-```text
-/connect
-```
+- 用户级凭据通常保存到用户目录下的 Lucode 配置位置。
+- 项目级配置、会话、记忆和临时运行数据保存在当前工作区。
+- 不要提交 `.env`、`.lucode/`、`.agent_cache/`、`.agent_runs/`、`.agent_quarantine/` 或任何包含 API key 的文件。
 
-也可以用 CLI 方式添加 Provider：
+常见 Provider、模型和角色配置可以在 GUI 设置面板中调整，也可以继续通过 CLI 命令管理。
+
+## 实验版边界
+
+- GUI 仍在打磨中，布局、面板开关和设置入口会继续调整。
+- `solo / serial / full` 仍可能存在于兼容层或旧配置中，但 GUI 主流程已经收敛到统一自动执行。
+- 项目经验回路已经具备规则蒸馏、置信度、去重、使用记录和保守注入机制；真实 LLM 表达压缩与更多可视化管理入口仍属于后续增强。
+- ComfyUI、内置网页、内置命令窗口和插件化能力是后续方向，不代表当前仓库已经完整内置。
+- 这是本地优先的开发实验项目，不提供 npm wrapper、独立 exe 或云端托管承诺。
+
+## 开发验证
+
+常用检查命令：
 
 ```powershell
-lucode connect deepseek --api-key <你的 key>
-lucode connect openai --api-key <你的 key>
-lucode connect my_proxy --custom --homepage https://proxy.example.com --base-url https://api.proxy.example.com/v1 --model gpt-5.2 --api-key <你的 key>
+python -m py_compile lucode\gui\__main__.py lucode\gui\control_panel.py
+python -m pytest tests\test_gui_control_panel.py tests\test_gui_layout_shell.py -q
 ```
 
-API key 保存到用户级 `~/.lucode/auth.json`。项目模型和 Provider 配置保存到当前项目的 `.lucode/config.toml`。不要把密钥写进仓库。
+推送前至少应检查 Git 状态、暂存差异和敏感信息，避免把本地配置、密钥或机器专用脚本提交到远端。
 
-## 三种执行模式
-
-| 模式 | 适合场景 | 行为 |
-| --- | --- | --- |
-| `solo` | 简单问答、小范围阅读、轻量任务 | 单 Agent 直接处理 |
-| `serial` | 需要分步分析、逐步校验的任务 | 主脑规划后串行执行 |
-| `full` | 复杂项目分析、可并行拆解的任务 | 主脑拆分任务，多 Worker 并行处理后汇总 |
-
-切换方式：
-
-```text
-/mode solo
-/mode serial
-/mode full
-```
-
-## 模型和能力检查
-
-Lucode 使用多脑模型配置：
-
-| 脑位 | 用途 |
-| --- | --- |
-| 前置优化脑 | 优化用户输入、补齐任务边界 |
-| 主脑规划脑 | 拆解任务、选择模式和工具 |
-| 执行专家脑 | 阅读文件、定位代码、执行子任务 |
-| 汇总脑 | 汇总多 Agent 结果，输出最终回答 |
-
-常用命令：
-
-```text
-/models              打开多脑模型调音台
-/models available    查看模型状态
-/models roles        查看四脑配置
-/models probe force  强制重新检查模型能力
-```
-
-`/models available` 会区分：
-
-- 最近检查：最近一次接口检查结果。
-- 运行判断：当前是否可尝试运行。
-- 接口能力：OpenAI-compatible 参数是否被接口接受。
-- 模型行为：是否实际观察到 chat、JSON、tool_calls、stream 等行为。
-
-模型能力检查不是绝对证明。不同厂商和中转对 tools、JSON、stream 的实现不完全一致，结果应理解为“最近检查”和“能力推断”。
-
-## 常用命令
-
-```text
-/status              查看当前运行状态
-/config              查看配置概览
-/mode                查看或切换执行模式
-/models              打开模型调音台
-/connect             连接或删除 Provider
-/skills              查看当前项目 Skills
-/skills_all          查看全部 Skills
-/mcp                 查看当前项目 MCP
-/mcp_all             查看全部 MCP
-/tools               查看核心工具状态
-/audit               查看工具审批和事件审计
-/resume              恢复会话
-/new                 开始新对话
-Ctrl-C               运行中中断当前轮，不退出程序
-/exit                退出
-```
-
-## 安全和审批
-
-Lucode 默认不会绕过危险操作。涉及写文件、运行命令、删除文件、修改 Git 历史、发布等动作时，会走命令分析、权限策略或人工审批。
-
-内置安全能力包括：
-
-- 只读任务优先走 fast path，减少无谓工具调用。
-- 高风险命令会被拒绝或要求确认。
-- 写入前可触发备份和审计记录。
-- `/audit` 可查看最近工具调用和审批事件。
-
-## 会话和本地文件
-
-Lucode 会在项目目录下使用 `.lucode/` 保存项目级状态：
-
-```text
-.lucode/
-  config.toml
-  permissions.toml
-  skills/
-  mcp/
-  memory/
-  sessions/
-```
-
-常见本地缓存：
-
-```text
-.agent_cache/
-.agent_runs/
-.agent_quarantine/
-```
-
-这些目录用于本机运行状态、缓存和临时材料，不应该提交到发布分支。
-
-## 项目结构
-
-```text
-lucode/              CLI 入口、聊天循环和终端交互
-runtime/             Agent、配置、执行、安全、工具、UI 和工作区逻辑
-planning/            任务规划、计划解析和计划校验
-catalog_system/      Provider、模型、Skill、MCP catalog 加载和刷新
-catalogs/            内置 catalog JSON
-mcp_servers/         内置 MCP 工具服务器
-skills/              内置 Skill
-main.py              本地 Python 入口
-pyproject.toml       Python 包配置
-```
-
-## 当前边界
-
-- 当前发布入口是 Python / conda，不提供 npm 或 exe 安装承诺。
-- Provider 以 OpenAI-compatible 接口为主；非兼容原生 SDK 适配属于后续路线。
-- 模型能力检查是最近检查和能力推断，不代表永久、绝对支持。
-- 终端 UI 在 Windows Terminal、PowerShell、CMD、PyCharm Terminal 中可能有显示差异；不支持时会回退到普通文本。
-- CLI fast path 主要覆盖只读任务；写入和危险命令仍走审批。
-
-## 版本
+## 仓库状态
 
 - 当前版本：`0.1.0`
 - Python 要求：`>=3.11`
-- License：`UNLICENSED`
+- GUI 依赖：`PySide6`、`qasync`
+- 许可证：`UNLICENSED`
