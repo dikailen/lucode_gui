@@ -49,6 +49,8 @@ class SessionSidebar(QFrame):
         self._enabled = True
         self._active_tab = "chats"
         self._collapsed = False
+        self._activity_session_id = ""
+        self._activity_state = ""
         self._language = 'zh'
         self._t = Translator(self._language)
         self._items_by_session_id: dict[str, Any] = {}
@@ -143,10 +145,12 @@ class SessionSidebar(QFrame):
         utility_layout = QHBoxLayout(self.utility_bar)
         utility_layout.setContentsMargins(0, 0, 0, 0)
         utility_layout.setSpacing(8)
-        self.sidebar_settings_button = QPushButton(self._t('control.settings_tip'))
+        self.sidebar_settings_button = QPushButton("\u2699")
         self.sidebar_settings_button.setObjectName("SidebarSettingsButton")
+        self.sidebar_settings_button.setToolTip(self._t('control.settings_tip'))
         self.sidebar_settings_button.clicked.connect(self.settings_requested.emit)
-        utility_layout.addWidget(self.sidebar_settings_button, 1)
+        utility_layout.addWidget(self.sidebar_settings_button)
+        utility_layout.addStretch(1)
         self.sidebar_toggle_button = QPushButton("<")
         self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
         self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
@@ -173,7 +177,8 @@ class SessionSidebar(QFrame):
         self.skills_tab.setText(self._t('sidebar.skills'))
         self.mcp_tab.setText(self._t('sidebar.mcp'))
         self.search_box.setPlaceholderText(self._t('sidebar.search'))
-        self.sidebar_settings_button.setText(self._t('control.settings_tip'))
+        self.sidebar_settings_button.setText("\u2699")
+        self.sidebar_settings_button.setToolTip(self._t('control.settings_tip'))
         self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
         self.rail_settings_button.setToolTip(self._t('control.settings_tip'))
         self.rail_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
@@ -215,6 +220,12 @@ class SessionSidebar(QFrame):
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
         self._apply_enabled_state()
+
+    def set_session_activity(self, session_id: str, state: str = "") -> None:
+        self._activity_session_id = str(session_id or "").strip()
+        self._activity_state = str(state or "").strip().lower()
+        if self._active_tab == "chats":
+            self.refresh()
 
     def set_collapsed(self, collapsed: bool) -> None:
         self._collapsed = bool(collapsed)
@@ -331,7 +342,14 @@ class SessionSidebar(QFrame):
             return
         self.empty_label.hide()
         for item in items:
-            row = _SessionRow(item, selected=_item_session_id(item) == self._selected_session_id, language=self._language)
+            session_id = _item_session_id(item)
+            activity_state = self._activity_state if session_id and session_id == self._activity_session_id else ""
+            row = _SessionRow(
+                item,
+                selected=session_id == self._selected_session_id,
+                language=self._language,
+                activity_state=activity_state,
+            )
             row.session_selected.connect(self._on_session_selected)
             row.delete_requested.connect(self._on_delete_requested)
             self.list_layout.addWidget(row)
@@ -382,7 +400,15 @@ class _SessionRow(QFrame):
     session_selected = Signal(str)
     delete_requested = Signal(str)
 
-    def __init__(self, item, *, selected: bool = False, language: str = 'zh', parent: QWidget | None = None):
+    def __init__(
+        self,
+        item,
+        *,
+        selected: bool = False,
+        language: str = 'zh',
+        activity_state: str = "",
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setObjectName("SessionRow")
         self.session_id = _item_session_id(item)
@@ -420,6 +446,14 @@ class _SessionRow(QFrame):
         self.row_button.setProperty("session_id", self.session_id)
         self.row_button.clicked.connect(lambda: self.session_selected.emit(self.session_id))
         self.row_button.hide()
+
+        self.activity_dot = QLabel("\u25cf")
+        self.activity_dot.setObjectName("SessionActivityDot")
+        self.activity_dot.setProperty("session_id", self.session_id)
+        self.activity_dot.setProperty("state", str(activity_state or ""))
+        self.activity_dot.setToolTip(self._t('main.status.running') if activity_state else "")
+        self.activity_dot.setVisible(bool(activity_state))
+        layout.addWidget(self.activity_dot)
 
         self.delete_button = QPushButton("x")
         self.delete_button.setObjectName("SessionDeleteButton")

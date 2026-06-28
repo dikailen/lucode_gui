@@ -24,7 +24,7 @@ from catalog_system.model_catalog import clear_model_catalog_cache
 from lucode.gui.approval import GuiApprovalSession, LatestApprovalContext
 from lucode.gui.answer_stream import AnswerStreamState
 from lucode.gui.chat_session import GuiChatSession
-from lucode.gui.control_panel import ControlBar, compact_execution_mode_label, execution_mode_label
+from lucode.gui.control_panel import ControlBar
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
 from lucode.gui.session_sidebar import SessionSidebar
@@ -127,7 +127,7 @@ class MainWindow(QMainWindow):
         self.session_sidebar.new_session_requested.connect(self._start_new_session)
         self.session_sidebar.session_selected.connect(self._resume_selected_session)
         self.session_sidebar.session_deleted.connect(self._on_sidebar_session_deleted)
-        self.session_sidebar.settings_requested.connect(self._open_settings_dialog)
+        self.session_sidebar.settings_requested.connect(self._toggle_settings_panel)
         self.session_sidebar.collapse_requested.connect(self._toggle_session_sidebar)
         self.sidebar_toggle_button = self.session_sidebar.sidebar_toggle_button
         self.main_splitter.addWidget(self.session_sidebar)
@@ -156,6 +156,8 @@ class MainWindow(QMainWindow):
         self.top_status_chip = QLabel()
         self.top_status_chip.setObjectName("TopStatusChip")
         header_layout.addWidget(self.top_status_chip)
+        self.top_status_chip.hide()
+        self.top_status_chip.setObjectName("")
 
         self.top_mode_host = QWidget(header)
         self.top_mode_host.setObjectName("TopModeHost")
@@ -171,12 +173,17 @@ class MainWindow(QMainWindow):
         self.top_mode_chip.setAlignment(Qt.AlignCenter)
         mode_layout.addWidget(self.top_mode_chip)
         header_layout.addWidget(self.top_mode_host)
+        self.top_mode_host.hide()
+        self.top_mode_host.setObjectName("")
+        self.top_mode_chip.setObjectName("")
 
         self.top_settings_button = QPushButton("⚙")
         self.top_settings_button.setObjectName("TopSettingsButton")
         self.top_settings_button.setToolTip(self._t('control.settings_tip'))
         self.top_settings_button.clicked.connect(self._open_settings_dialog)
         header_layout.addWidget(self.top_settings_button)
+        self.top_settings_button.hide()
+        self.top_settings_button.setObjectName("")
         root_layout.addWidget(header)
 
         self.control_bar = ControlBar(language=self.language)
@@ -253,27 +260,21 @@ class MainWindow(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(8)
-        toolbar_layout.addWidget(self.control_bar)
         toolbar_layout.addStretch(1)
 
         self.composer_tool_buttons: list[QPushButton] = []
-        for text, name in (("+", "Attach"), ("F", "Files"), ("</>", "Code"), (">_", "Terminal")):
-            button = QPushButton(text, toolbar)
-            button.setObjectName("ComposerToolButton")
-            button.setProperty("toolRole", name)
-            self.composer_tool_buttons.append(button)
-            toolbar_layout.addWidget(button)
+        self.model_display_button = QPushButton(toolbar)
+        self.model_display_button.setObjectName("ComposerModelButton")
+        self.model_display_button.clicked.connect(self._open_settings_models_page)
+        toolbar_layout.addWidget(self.model_display_button)
 
-        self.send_button = QPushButton(self._t('main.send'), toolbar)
-        self.send_button.setObjectName("SendButton")
-        self.send_button.clicked.connect(self.send_current_message)
-        toolbar_layout.addWidget(self.send_button)
-
-        self.stop_button = QPushButton(self._t('main.stop'), toolbar)
-        self.stop_button.setObjectName("StopButton")
-        self.stop_button.clicked.connect(self.stop_current_turn)
-        self.stop_button.setEnabled(False)
-        toolbar_layout.addWidget(self.stop_button)
+        self.action_button = QPushButton("\u2191", toolbar)
+        self.action_button.setObjectName("ComposerActionButton")
+        self.action_button.setProperty("running", False)
+        self.action_button.clicked.connect(self._on_action_button_clicked)
+        toolbar_layout.addWidget(self.action_button)
+        self.send_button = self.action_button
+        self.stop_button = self.action_button
         composer_layout.addWidget(toolbar)
 
         self.status = QStatusBar()
@@ -291,7 +292,7 @@ class MainWindow(QMainWindow):
         self.settings_panel.set_language(self.language)
         self.input_box.set_language(self.language)
         self.control_bar.set_language(self.language)
-        self._refresh_top_mode_buttons()
+        self._refresh_header_controls()
         self.session_sidebar.refresh()
 
     def _init_control_bar(self) -> None:
@@ -312,7 +313,7 @@ class MainWindow(QMainWindow):
             query_refiner_enabled=bool(settings.query_refiner_enabled),
             worker_pool=list(getattr(settings, "allowed_worker_models", []) or []),
         )
-        self._sync_top_mode_buttons(settings.execution_mode)
+        self._refresh_model_display()
         self.settings_dialog.set_initial(
             execution_mode=settings.execution_mode,
             privacy_mode=settings.privacy_mode,
@@ -323,7 +324,7 @@ class MainWindow(QMainWindow):
         self.control_bar.execution_mode_changed.connect(self._on_execution_mode_changed)
         self.control_bar.settings_requested.connect(self._open_settings_dialog)
         self.settings_dialog.privacy_mode_changed.connect(self.chat_session.set_privacy_mode)
-        self.settings_dialog.role_model_changed.connect(self.chat_session.set_model_for_role)
+        self.settings_dialog.role_model_changed.connect(self._on_role_model_changed)
         self.settings_dialog.query_refiner_toggled.connect(self.chat_session.set_query_refiner_enabled)
         self.settings_dialog.worker_pool_changed.connect(self.chat_session.set_allowed_worker_models)
         self.settings_dialog.provider_manager_requested.connect(self._open_provider_manager)
@@ -331,17 +332,49 @@ class MainWindow(QMainWindow):
         self.settings_dialog.language_changed.connect(self._on_language_changed)
 
 
-    def _sync_top_mode_buttons(self, mode: str) -> None:
-        normalized = str(mode or self.mode or "").strip()
-        compact_label = compact_execution_mode_label(normalized, self.language)
-        full_label = execution_mode_label(normalized, self.language)
-        self.top_mode_chip.setText(compact_label)
-        self.top_mode_chip.setProperty("mode_id", normalized)
-        self.top_mode_chip.setToolTip(f"{self._t('main.status.mode')}: {full_label}")
+    def _refresh_header_controls(self) -> None:
+        self._refresh_model_display()
+        self._refresh_action_button()
 
-    def _refresh_top_mode_buttons(self) -> None:
-        self.top_settings_button.setToolTip(self._t('control.settings_tip'))
-        self._sync_top_mode_buttons(self.mode)
+    def _refresh_model_display(self) -> None:
+        if not hasattr(self, "model_display_button"):
+            return
+        model_id = _first_or_empty(getattr(self.chat_session.settings, "orchestrator_model_priority", []))
+        label = self._model_display_label(model_id)
+        self.model_display_button.setText(_compact_model_label(label))
+        self.model_display_button.setToolTip(f"{self._t('role.orchestrator')}: {label}")
+        self.model_display_button.setProperty("model_id", model_id)
+
+    def _model_display_label(self, model_id: str) -> str:
+        clean = str(model_id or "").strip()
+        if not clean:
+            return self._t('widgets.unassigned')
+        for item_id, label in self.chat_session.list_configured_models():
+            if item_id == clean:
+                return str(label or clean)
+        return clean
+
+    def _refresh_action_button(self) -> None:
+        if not hasattr(self, "action_button"):
+            return
+        running = bool(self.action_button.property("running"))
+        self.action_button.setText("\u25a0" if running else "\u2191")
+        self.action_button.setToolTip(self._t('main.stop') if running else self._t('main.send'))
+        style = self.action_button.style()
+        style.unpolish(self.action_button)
+        style.polish(self.action_button)
+        self.action_button.update()
+
+    def _on_action_button_clicked(self) -> None:
+        if self.turn_guard.is_running:
+            self.stop_current_turn()
+        else:
+            self.send_current_message()
+
+    def _set_sidebar_turn_activity(self, state: str = "") -> None:
+        session_id = str(self.chat_session.current_session_id or "").strip()
+        if hasattr(self.session_sidebar, "set_session_activity"):
+            self.session_sidebar.set_session_activity(session_id, state)
 
     def _on_language_changed(self, language: str) -> None:
         self.language = language
@@ -352,14 +385,18 @@ class MainWindow(QMainWindow):
         self.settings_dialog.set_language(language)
         self.settings_panel.set_language(language)
         self.control_bar.set_language(language)
-        self._refresh_top_mode_buttons()
+        self._refresh_header_controls()
         self.approval_session.language = language
-        self.send_button.setText(self._t('main.send'))
-        self.stop_button.setText(self._t('main.stop'))
         if self.session_title_label.text() in {'新会话', 'New chat'}:
             self.session_title_label.setText(self._t('main.new_chat'))
         self.empty_state.setText(self._t('main.empty'))
         self.set_status_i18n(self._status_state, self._status_event_key)
+
+    def _toggle_settings_panel(self) -> None:
+        if self.settings_panel.isVisible() and self.settings_panel.current_view() == "settings":
+            self.settings_panel.close_panel()
+            return
+        self._open_settings_dialog()
 
     def _open_settings_dialog(self) -> None:
         self.settings_panel.show_settings()
@@ -377,6 +414,12 @@ class MainWindow(QMainWindow):
         models = self.chat_session.list_configured_models()
         self.control_bar.set_models(models)
         self.settings_dialog.set_models(models)
+        self._refresh_model_display()
+
+    def _on_role_model_changed(self, role: str, model_id: str) -> None:
+        self.chat_session.set_model_for_role(role, model_id)
+        if str(role or "").strip() == "orchestrator":
+            self._refresh_model_display()
 
     def _on_execution_mode_changed(self, mode: str) -> None:
         self.mode = self.chat_session.set_execution_mode(mode)
@@ -386,7 +429,7 @@ class MainWindow(QMainWindow):
             privacy_mode=self.chat_session.settings.privacy_mode,
             role_models={},
         )
-        self._sync_top_mode_buttons(self.mode)
+        self._refresh_header_controls()
         self.set_status("idle" if self.turn_guard.can_start_new_turn else "running", self.event_label.text())
 
     def _toggle_session_sidebar(self) -> None:
@@ -451,6 +494,7 @@ class MainWindow(QMainWindow):
         self._turn_start = time.monotonic()
         self._show_thinking(self._t('main.event.thinking'))
         self.set_running(True)
+        self._set_sidebar_turn_activity("running")
         self.set_status_i18n("running", "main.event.processing")
         self.work_task_id = turn_id
         self.work_task = asyncio.create_task(self._run_turn(turn_id, text))
@@ -465,6 +509,7 @@ class MainWindow(QMainWindow):
         if self.work_task is not None and not self.work_task.done():
             self.work_task.cancel()
         self.set_stopping()
+        self._set_sidebar_turn_activity("stopping")
 
     def add_message(self, role: str, text: str) -> MessageBubble:
         self._hide_empty_state()
@@ -622,36 +667,33 @@ class MainWindow(QMainWindow):
         self._thinking_indicator = None
 
     def set_running(self, running: bool) -> None:
-        self.top_settings_button.setEnabled(not running)
-        self.send_button.setEnabled(not running)
-        self.stop_button.setEnabled(running)
+        self.action_button.setProperty("running", bool(running))
+        self.action_button.setEnabled(True)
+        self._refresh_action_button()
+        self.model_display_button.setEnabled(not running)
         self.input_box.setEnabled(not running)
         self.control_bar.set_enabled(not running)
-        for button in self.composer_tool_buttons:
-            button.setEnabled(not running)
         self.settings_panel.set_enabled(not running)
         self.session_sidebar.set_enabled(not running)
 
     def set_stopping(self) -> None:
-        self.top_settings_button.setEnabled(False)
-        self.send_button.setEnabled(False)
-        self.stop_button.setEnabled(False)
+        self.action_button.setProperty("running", True)
+        self.action_button.setEnabled(False)
+        self._refresh_action_button()
+        self.model_display_button.setEnabled(False)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
-        for button in self.composer_tool_buttons:
-            button.setEnabled(False)
         self.settings_panel.set_enabled(False)
         self.session_sidebar.set_enabled(False)
         self.set_status_i18n("stopped", "main.event.stopping")
 
     def set_approval_waiting(self) -> None:
-        self.top_settings_button.setEnabled(False)
-        self.send_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        self.action_button.setProperty("running", True)
+        self.action_button.setEnabled(True)
+        self._refresh_action_button()
+        self.model_display_button.setEnabled(False)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
-        for button in self.composer_tool_buttons:
-            button.setEnabled(False)
         self.settings_panel.set_enabled(False)
         self.session_sidebar.set_enabled(False)
         self.set_status_i18n("running", "main.event.approval")
@@ -671,12 +713,6 @@ class MainWindow(QMainWindow):
         self.state_label.setText(f"{labels.get(state, state)} · {self._t('main.status.mode')} {self.mode}")
         self.state_label.setStyleSheet(status_style(state))
         self.event_label.setText(event)
-        self.top_status_chip.setText(f"\u25cf {labels.get(state, state)}")
-        self.top_status_chip.setProperty("state", state)
-        style = self.top_status_chip.style()
-        style.unpolish(self.top_status_chip)
-        style.polish(self.top_status_chip)
-        self.top_status_chip.update()
 
     def handle_runtime_event(self, event: dict) -> None:
         if self._closing:
@@ -720,6 +756,7 @@ class MainWindow(QMainWindow):
             if self.work_area is not None:
                 elapsed = max(0.0, time.monotonic() - self._turn_start) if self._turn_start else None
                 self.work_area.collapse_done(elapsed)
+            self._set_sidebar_turn_activity("")
             self.session_sidebar.refresh()
             if self.turn_guard.is_running and not self.turn_guard.is_stopping:
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -749,12 +786,14 @@ class MainWindow(QMainWindow):
                 if not self._finalize_stream_answer(result.final_output):
                     self.add_answer_block(result.final_output)
             self.mode = result.execution_mode or self.mode
+            self._refresh_header_controls()
             if result.stopped:
                 self.set_status_i18n("stopped", "main.event.stopped")
             elif result.failed:
                 self.show_failed_state(result.final_output)
             else:
                 self.set_status_i18n("idle", "main.event.completed")
+            self._set_sidebar_turn_activity("")
             self.session_sidebar.refresh()
             current_id = str(self.chat_session.current_session_id or "").strip()
             if current_id:
@@ -771,6 +810,7 @@ class MainWindow(QMainWindow):
                 self.work_task_id = 0
                 if not self._closing:
                     self.set_running(False)
+                    self._set_sidebar_turn_activity("")
 
     def _hide_empty_state(self) -> None:
         if self.empty_state.isVisible():
@@ -823,6 +863,13 @@ def _first_or_empty(values) -> str:
         if text:
             return text
     return ""
+
+
+def _compact_model_label(value: str, limit: int = 32) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)] + "…"
 
 
 def _title_from_messages(messages: list[dict[str, str]]) -> str:

@@ -261,6 +261,27 @@ def test_sidebar_session_rows_are_compact_list_items(app):
     assert all("\n" not in button.text() for button in buttons)
 
 
+def test_sidebar_shows_running_dot_only_for_active_session(app):
+    store = FakeSessionStore()
+    sidebar = SessionSidebar()
+    sidebar.set_session_store(store)
+    sidebar.select_session("s1")
+    sidebar.set_session_activity("s1", "running")
+    sidebar.refresh()
+
+    dots = sidebar.findChildren(QLabel, "SessionActivityDot")
+    visible = [dot for dot in dots if dot.isVisible()]
+
+    assert len(visible) == 1
+    assert visible[0].property("state") == "running"
+    assert visible[0].property("session_id") == "s1"
+
+    sidebar.set_session_activity("", "idle")
+    sidebar.refresh()
+
+    assert not [dot for dot in sidebar.findChildren(QLabel, "SessionActivityDot") if dot.isVisible()]
+
+
 
 
 def test_sidebar_collapsed_mode_keeps_icon_rail_visible(app):

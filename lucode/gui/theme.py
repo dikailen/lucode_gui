@@ -325,6 +325,21 @@ QLabel#SessionRowMeta {
   font-size: 11px;
 }
 
+QLabel#SessionActivityDot {
+  color: $success;
+  font-size: 12px;
+  min-width: 10px;
+  max-width: 10px;
+}
+
+QLabel#SessionActivityDot[state="stopping"] {
+  color: $warning;
+}
+
+QLabel#SessionActivityDot[state="failed"] {
+  color: $danger;
+}
+
 QPushButton#SessionDeleteButton {
   background: transparent;
   border: none;
@@ -477,13 +492,17 @@ QPushButton#SidebarSettingsButton,
 QPushButton#SidebarToggleButton {
   background: transparent;
   border: none;
-  border-radius: $radius_small;
-  padding: 4px 8px;
+  border-radius: 13px;
+  padding: 0;
   color: $text_muted;
+  min-width: 30px;
+  max-width: 30px;
+  min-height: 30px;
+  max-height: 30px;
 }
 
 QPushButton#SidebarSettingsButton {
-  text-align: left;
+  text-align: center;
 }
 
 QPushButton#SidebarSettingsButton:hover,
@@ -599,6 +618,58 @@ QPushButton#ComposerToolButton:disabled {
   color: $text_muted;
   background: $surface;
   border-color: $border_subtle;
+}
+
+QPushButton#ComposerModelButton {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: 13px;
+  padding: 6px 12px;
+  color: $text;
+  max-width: 230px;
+  min-height: 28px;
+  max-height: 34px;
+}
+
+QPushButton#ComposerModelButton:hover {
+  background: $surface_raised;
+  border-color: $primary_hover;
+}
+
+QPushButton#ComposerModelButton:disabled {
+  color: $text_muted;
+  background: $surface;
+  border-color: $border_subtle;
+}
+
+QPushButton#ComposerActionButton {
+  background: $primary;
+  border: 1px solid $primary;
+  border-radius: 18px;
+  color: $surface;
+  font-size: 17px;
+  min-width: 36px;
+  max-width: 36px;
+  min-height: 36px;
+  max-height: 36px;
+  padding: 0;
+}
+
+QPushButton#ComposerActionButton:hover {
+  background: $primary_hover;
+  border-color: $primary_hover;
+}
+
+QPushButton#ComposerActionButton[running="true"] {
+  background: $text;
+  border-color: $text;
+  color: $surface;
+}
+
+QPushButton#ComposerActionButton:disabled {
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $text_muted;
 }
 
 QPushButton#ToggleButton:checked {

@@ -95,8 +95,9 @@ def test_main_window_shows_failed_state_and_recovery_actions(app, tmp_path):
 
     assert panel is not None
     assert "provider request timed out" in panel.findChild(QLabel, "RunFailedReason").text()
-    assert window.send_button.isEnabled()
-    assert not window.stop_button.isEnabled()
+    assert window.action_button.isEnabled()
+    assert window.action_button.text() == "\u2191"
+    assert window.action_button.property("running") is False
     assert window.input_box.isEnabled()
     assert window.findChild(QPushButton, "RunFailedRetryButton") is not None
     assert window.findChildren(AnswerBlock, "AnswerBlock") == []

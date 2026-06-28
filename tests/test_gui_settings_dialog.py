@@ -306,7 +306,7 @@ def test_main_window_settings_button_opens_embedded_panel(app, tmp_path):
     window = MainWindow(workspace=tmp_path, chat_session=session)
     window.show()
     app.processEvents()
-    button = window.control_bar.findChild(QPushButton, "SettingsButton")
+    button = window.session_sidebar.findChild(QPushButton, "SidebarSettingsButton")
     splitter = window.findChild(QSplitter, "MainSplitter")
     settings_host = window.findChild(QFrame, "SettingsPanelHost")
 
@@ -326,7 +326,7 @@ def test_main_window_settings_button_opens_embedded_panel(app, tmp_path):
     assert window.settings_panel.parentWidget() is settings_host
     assert window.findChild(SettingsDialog, "SettingsDialog") is None
 
-    window.settings_panel.close_button.click()
+    button.click()
     app.processEvents()
 
     assert not settings_host.isVisible()
@@ -364,14 +364,16 @@ def test_main_window_language_switch_refreshes_and_persists(app, tmp_path):
 
     assert window.settings_dialog.current_language() == "en"
     assert window.input_box.placeholderText() == "Type a message, Enter to send, Shift+Enter for newline"
-    assert window.send_button.text() == "Send"
-    assert window.stop_button.text() == "Stop"
+    assert window.action_button.text() == "\u2191"
+    assert window.action_button.toolTip() == "Send"
+    assert window.model_display_button.toolTip().startswith("Supervisor planner:")
     assert window.session_sidebar.new_session_button.text() == "+ New chat"
     assert window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").text() == "Skills"
 
     restored = MainWindow(workspace=tmp_path, chat_session=GuiChatSession(workspace=tmp_path))
 
     assert restored.settings_dialog.current_language() == "en"
-    assert restored.send_button.text() == "Send"
-    assert restored.control_bar.summary_label.text().startswith("Mode ")
-    assert restored.control_bar.settings_button.toolTip() == "Settings"
+    assert restored.action_button.text() == "\u2191"
+    assert restored.action_button.toolTip() == "Send"
+    assert restored.model_display_button.toolTip().startswith("Supervisor planner:")
+    assert restored.session_sidebar.sidebar_settings_button.toolTip() == "Settings"

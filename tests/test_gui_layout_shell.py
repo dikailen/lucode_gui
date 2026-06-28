@@ -86,9 +86,7 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     splitter = window.findChild(QSplitter, "MainSplitter")
     sidebar = window.findChild(SessionSidebar, "SessionSidebar")
     chat_header = window.findChild(QFrame, "ChatHeader")
-    status_chip = window.findChild(QLabel, "TopStatusChip")
     mode_host = window.findChild(QWidget, "TopModeHost")
-    gear = window.findChild(QPushButton, "TopSettingsButton")
 
     settings_host = window.findChild(QFrame, "SettingsPanelHost")
 
@@ -96,15 +94,15 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     assert sidebar is not None
     assert settings_host is not None
     assert chat_header is not None
-    assert status_chip is not None
-    assert mode_host is not None
-    assert gear is not None
+    assert mode_host is None
+    assert window.findChild(QLabel, "TopStatusChip") is None
+    assert window.findChild(QPushButton, "TopSettingsButton") is None
 
     assert 286 <= sidebar.width() <= 304
     assert 60 <= chat_header.height() <= 68
     assert window.status.isHidden()
 
-    gear.click()
+    window.session_sidebar.sidebar_settings_button.click()
     app.processEvents()
 
     sizes = splitter.sizes()
@@ -115,7 +113,7 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     assert window.settings_panel.parentWidget() is settings_host
 
 
-def test_top_mode_area_is_compact_status_chip(app, tmp_path):
+def test_top_mode_area_is_removed_from_header(app, tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     window = MainWindow(workspace=tmp_path, chat_session=session)
     window.resize(1600, 1000)
@@ -126,20 +124,9 @@ def test_top_mode_area_is_compact_status_chip(app, tmp_path):
     mode_chip = window.findChild(QLabel, "TopModeChip")
     top_mode_buttons = window.findChildren(QPushButton, "TopModeButton")
 
-    assert mode_host is not None
-    assert mode_chip is not None
-    assert mode_chip.parentWidget() is mode_host
+    assert mode_host is None
+    assert mode_chip is None
     assert top_mode_buttons == []
-    assert mode_host.maximumWidth() <= 124
-    assert mode_chip.maximumWidth() <= 116
-    assert mode_chip.maximumHeight() <= 34
-    assert mode_chip.property("mode_id") == session.settings.execution_mode
-    assert ":" not in mode_chip.text()
-    assert "Agent" not in mode_chip.text()
-    assert len(mode_chip.text()) <= 8
-    mode_tooltip = mode_chip.toolTip()
-    assert mode_tooltip
-    assert len(mode_tooltip) > len(mode_chip.text())
 
 
 def test_unified_mode_is_the_only_visible_mode_control(app, tmp_path):
@@ -148,14 +135,12 @@ def test_unified_mode_is_the_only_visible_mode_control(app, tmp_path):
     window.show()
     app.processEvents()
 
-    mode_chip = window.findChild(QLabel, "TopModeChip")
     mode_buttons = window.control_bar.findChildren(QPushButton, "SegButton")
     button_modes = [button.property("mode_id") for button in mode_buttons]
 
-    assert mode_chip.property("mode_id") == "auto"
+    assert window.findChild(QLabel, "TopModeChip") is None
     assert button_modes == ["auto"]
     assert all(mode not in button_modes for mode in ("solo", "serial", "full"))
-    assert len(mode_chip.text()) <= 8
 
 
 
