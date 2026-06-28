@@ -6,6 +6,7 @@ __pycache__/
 .codex-snapshot-*
 .codex-sandbox-debug/
 .idea/
+canvas/
 .agent_quarantine/
 .agent_runs/
 .agent_cache/
