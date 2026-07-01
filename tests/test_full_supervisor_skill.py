@@ -25,4 +25,6 @@ def test_full_supervisor_skill_loads_as_prompt():
     text = load_skill("full_supervisor")
 
     assert "主管" in text
+    assert "统一 Agent Loop" in text
+    assert "full 模式" not in text
     assert "--- SKILL START ---" in text

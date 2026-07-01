@@ -81,7 +81,7 @@ class GuiChatSession:
             model_id = str(item.get("id") or "")
             if not model_id:
                 continue
-            label = str(item.get("display_name_zh") or model_id)
+            label = str(item.get("model_name") or item.get("display_name_zh") or model_id)
             models.append((model_id, label))
         return models
 
@@ -316,5 +316,5 @@ def _record_session_turn(
 
 def _format_gui_turn_exception(exc: Exception) -> str:
     if exc.__class__.__name__ == "MaxTurnsExceeded":
-        return "本轮超过最大模型/工具调用次数，已停止。请缩小任务范围，或切换到 serial/solo 模式。"
+        return "本轮超过最大模型/工具调用次数，已停止。请缩小任务范围，或降低并行、工具调用和上下文复杂度后重试。"
     return format_turn_error(exc)

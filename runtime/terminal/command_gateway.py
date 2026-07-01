@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 
 from runtime.safety.command_analyzer import analyze_command
 from runtime.safety.permissions import evaluate_permission, load_effective_permissions
@@ -52,7 +53,7 @@ class CommandGateway:
             permission_reason=permission.reason,
         )
 
-    def run(self, request: CommandRequest) -> CommandResult:
+    def run(self, request: CommandRequest, *, cancel_event: Event | None = None) -> CommandResult:
         started_at = datetime.now()
         decision = self.evaluate(request)
         cwd_error = self._validate_cwd(request.cwd)
@@ -90,9 +91,14 @@ class CommandGateway:
             analysis.argv,
             cwd=cwd,
             timeout_seconds=request.timeout_seconds,
+            cancel_event=cancel_event,
         )
         ended_at = datetime.now()
-        status = _status_from_execution(sandbox_result.returncode, timed_out=sandbox_result.timed_out)
+        status = _status_from_execution(
+            sandbox_result.returncode,
+            timed_out=sandbox_result.timed_out,
+            cancelled=sandbox_result.cancelled,
+        )
         return CommandResult(
             command=request.command,
             cwd=cwd,
@@ -128,7 +134,9 @@ class CommandGateway:
         return (self.workspace_root / candidate).resolve()
 
 
-def _status_from_execution(returncode: int, *, timed_out: bool) -> CommandStatus:
+def _status_from_execution(returncode: int, *, timed_out: bool, cancelled: bool = False) -> CommandStatus:
+    if cancelled:
+        return CommandStatus.CANCELLED
     if timed_out or returncode == 124:
         return CommandStatus.TIMEOUT
     if returncode == 0:

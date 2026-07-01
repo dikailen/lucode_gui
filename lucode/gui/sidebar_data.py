@@ -27,8 +27,6 @@ SKILL_ORDER = (
     "project_explorer",
     "final_synthesizer",
     "skill_creator",
-    "solo_executor_contract",
-    "serial_executor_contract",
 )
 
 SKILL_TITLES = {
@@ -36,8 +34,6 @@ SKILL_TITLES = {
     "project_explorer": "项目探索",
     "final_synthesizer": "最终汇总",
     "skill_creator": "技能创建",
-    "solo_executor_contract": "单脑执行",
-    "serial_executor_contract": "串行执行",
 }
 
 MCP_ALIASES = {

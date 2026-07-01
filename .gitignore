@@ -42,8 +42,18 @@ skills/task-router/
 /cs.md
 /run_lucode_conda.bat
 /run_gui.bat
+/run_desktop.bat
+/run_desktop_dev.bat
+/.tmp_gui/
 
 # Local planning / review notes kept outside the product repository.
 计划文档/
 后续改进计划1期.md
 多脑模型调音台修改计划执行表.md
+
+# Desktop React/Electron workspace: keep manifests, ignore generated artifacts.
+!/desktop/package.json
+!/desktop/package-lock.json
+/desktop/node_modules/
+/desktop/dist/
+/desktop/dist-electron/

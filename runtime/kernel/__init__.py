@@ -227,5 +227,5 @@ def _format_turn_timeout_message(timeout_seconds: float) -> str:
     return (
         f"本轮任务已超过整轮超时限制（AGENTS_TURN_TIMEOUT_SECONDS={timeout_seconds:g}s），"
         "系统已停止等待并进入恢复路径。\n"
-        "你可以缩小任务范围、切换到 serial/solo，或调大 AGENTS_TURN_TIMEOUT_SECONDS 后重试。"
+        "你可以缩小任务范围、降低工具调用复杂度，或调大 AGENTS_TURN_TIMEOUT_SECONDS 后重试。"
     )

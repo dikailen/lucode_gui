@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 
 from lucode.gui.i18n import Translator, normalize_language
 from lucode.gui.provider_manager import ProviderManagerDialog
@@ -12,6 +12,7 @@ from lucode.gui.settings_dialog import SettingsContent
 
 class SettingsSidePanel(QFrame):
     providers_changed = Signal()
+    close_requested = Signal()
 
     def __init__(
         self,
@@ -25,8 +26,9 @@ class SettingsSidePanel(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("SettingsSidePanel")
-        self.setMinimumWidth(436)
-        self.setMaximumWidth(436)
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.workspace_root = Path(workspace_root)
         self.user_home = Path(user_home)
         self.privacy_mode = str(privacy_mode or "local_first")
@@ -35,8 +37,8 @@ class SettingsSidePanel(QFrame):
         self.settings_content = settings_content
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 24, 18, 18)
-        root.setSpacing(18)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
 
         header = QFrame(self)
         header.setObjectName("SettingsPanelHeader")
@@ -121,10 +123,7 @@ class SettingsSidePanel(QFrame):
         self.show()
 
     def close_panel(self) -> None:
-        self.hide()
-        container = self.parentWidget()
-        if container is not None:
-            container.hide()
+        self.close_requested.emit()
 
     def set_language(self, language: str) -> None:
         normalized = normalize_language(language)
@@ -161,7 +160,7 @@ class SettingsSidePanel(QFrame):
         index = splitter.indexOf(splitter_item)
         if index < 0 or len(sizes) <= index:
             return
-        target = max(self.maximumWidth(), splitter_item.minimumWidth())
+        target = max(620, splitter_item.minimumWidth())
         if sizes[index] >= target:
             return
         available = sum(sizes)

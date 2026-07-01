@@ -44,10 +44,16 @@ QMainWindow {
   background: $bg;
 }
 
-QWidget#ChatPane {
+QWidget#ChatPane,
+QWidget#ChatWorkspacePage {
   background: $surface;
   border-left: 1px solid $border_subtle;
   border-right: 1px solid $border_subtle;
+}
+
+QStackedWidget#MainWorkspaceStack {
+  background: $surface;
+  border-left: 1px solid $border_subtle;
 }
 
 QLabel {
@@ -240,8 +246,7 @@ QLabel#SidebarRailLogo {
 }
 
 QPushButton#SidebarRailChats,
-QPushButton#SidebarRailSkills,
-QPushButton#SidebarRailMcp {
+QPushButton#SidebarRailPlugins {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 14px;
@@ -252,16 +257,14 @@ QPushButton#SidebarRailMcp {
 }
 
 QPushButton#SidebarRailChats:hover,
-QPushButton#SidebarRailSkills:hover,
-QPushButton#SidebarRailMcp:hover {
+QPushButton#SidebarRailPlugins:hover {
   background: $surface_raised;
   border-color: $border_subtle;
   color: $text;
 }
 
 QPushButton#SidebarRailChats:checked,
-QPushButton#SidebarRailSkills:checked,
-QPushButton#SidebarRailMcp:checked {
+QPushButton#SidebarRailPlugins:checked {
   background: $user_surface;
   border-color: $border;
   color: $primary;
@@ -342,14 +345,22 @@ QLabel#SessionActivityDot[state="failed"] {
 
 QPushButton#SessionDeleteButton {
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   color: $text_muted;
   border-radius: 8px;
-  padding: 1px 4px;
+  padding: 0;
   font-size: 11px;
 }
 
 QPushButton#SessionDeleteButton:hover {
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $danger;
+}
+
+QPushButton#SessionDeleteButton[confirming="true"] {
+  background: #fef2f2;
+  border-color: #fecaca;
   color: $danger;
 }
 
@@ -366,8 +377,7 @@ QPushButton#SidebarNewSessionButton:hover {
 }
 
 QPushButton#SidebarTabChats,
-QPushButton#SidebarTabSkills,
-QPushButton#SidebarTabMcp {
+QPushButton#SidebarTabPlugins {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 9px;
@@ -377,23 +387,22 @@ QPushButton#SidebarTabMcp {
 }
 
 QPushButton#SidebarTabChats:hover,
-QPushButton#SidebarTabSkills:hover,
-QPushButton#SidebarTabMcp:hover {
+QPushButton#SidebarTabPlugins:hover {
   color: $text;
   background: $surface_raised;
   border-color: $border_subtle;
 }
 
 QPushButton#SidebarTabChats:checked,
-QPushButton#SidebarTabSkills:checked,
-QPushButton#SidebarTabMcp:checked {
+QPushButton#SidebarTabPlugins:checked {
   color: $primary;
   background: $user_surface;
   border-color: transparent;
 }
 
 QLabel#SkillPanelTitle,
-QLabel#McpPanelTitle {
+QLabel#McpPanelTitle,
+QLabel#PluginSectionTitle {
   color: $text_muted;
   font-size: $font_size_small;
   font-weight: 600;
@@ -411,9 +420,10 @@ QPushButton#SkillCardButton {
   background: transparent;
   border: none;
   border-radius: $radius_small;
-  padding: 8px;
+  padding: 6px 8px;
   text-align: left;
   color: $text;
+  font-size: 12px;
 }
 
 QPushButton#SkillCardButton:hover {
@@ -505,6 +515,13 @@ QPushButton#SidebarSettingsButton {
   text-align: center;
 }
 
+QPushButton#SidebarSettingsButton[withLabel="true"] {
+  min-width: 74px;
+  max-width: 92px;
+  text-align: left;
+  padding: 0 10px;
+}
+
 QPushButton#SidebarSettingsButton:hover,
 QPushButton#SidebarToggleButton:hover {
   color: $text;
@@ -532,6 +549,31 @@ QPushButton#SidebarRailToggleButton:hover {
 QFrame#ComposerToolbar {
   background: transparent;
   border: none;
+}
+
+QPushButton#ComposerTerminalButton,
+QPushButton#ComposerBrowserButton {
+  background: #f8fafc;
+  border: 1px solid $border_subtle;
+  border-radius: 8px;
+  min-width: 34px;
+  max-width: 34px;
+  min-height: 30px;
+  max-height: 30px;
+  padding: 0;
+}
+
+QPushButton#ComposerTerminalButton:hover,
+QPushButton#ComposerBrowserButton:hover {
+  background: $surface_raised;
+  border-color: $primary_hover;
+}
+
+QPushButton#ComposerTerminalButton[activeTool="true"],
+QPushButton#ComposerBrowserButton[activeTool="true"] {
+  background: $user_surface;
+  border-color: $primary;
+  color: $primary;
 }
 
 QFrame#ControlBar QLabel#FieldLabel {
@@ -624,11 +666,12 @@ QPushButton#ComposerModelButton {
   background: $surface;
   border: 1px solid $border_subtle;
   border-radius: 13px;
-  padding: 6px 12px;
+  padding: 6px 14px;
   color: $text;
-  max-width: 230px;
+  max-width: 280px;
   min-height: 28px;
   max-height: 34px;
+  text-align: left;
 }
 
 QPushButton#ComposerModelButton:hover {
@@ -698,14 +741,28 @@ QFrame#RoleRow QLabel#RoleHint {
 }
 
 QComboBox {
-  background: $surface_raised;
+  background: $surface;
   border: 1px solid $border_subtle;
   border-radius: $radius_small;
-  padding: 5px 10px;
+  padding: 5px 34px 5px 12px;
+  min-height: 22px;
 }
 
 QComboBox:hover {
   border-color: $primary_hover;
+}
+
+QComboBox::drop-down {
+  subcontrol-origin: padding;
+  subcontrol-position: top right;
+  width: 26px;
+  border: none;
+  background: transparent;
+}
+
+QComboBox::down-arrow {
+  width: 8px;
+  height: 8px;
 }
 
 QComboBox QAbstractItemView {
@@ -1168,15 +1225,103 @@ QPushButton#GearButton:checked {
   color: $text;
 }
 
-QFrame#SettingsPanelHost {
+QFrame#SettingsPanelHost,
+QFrame#SettingsWorkspacePage {
   background: $surface;
   border: none;
 }
 
 QFrame#SettingsSidePanel {
   background: $surface;
+  border: none;
+  border-radius: 0;
+}
+
+QFrame#PluginWorkspacePage {
+  background: $surface;
+  border: none;
+}
+
+QLabel#PluginWorkspaceTitle {
+  color: $text;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+QFrame#PluginWorkspaceSection {
+  background: transparent;
   border: 1px solid $border_subtle;
-  border-radius: 18px;
+  border-radius: 6px;
+}
+
+QFrame#PluginWorkspaceSection[dropActive="true"] {
+  border-color: $primary_hover;
+  background: $user_surface;
+}
+
+QFrame#PluginWorkspaceSection QLabel#PluginSectionTitle {
+  background: $surface;
+  padding: 8px 0 8px 0;
+}
+
+QLabel#SkillDropHint,
+QLabel#McpDropHint {
+  color: $text_muted;
+  font-size: 11px;
+}
+
+QFrame#PluginWorkspaceBody {
+  background: transparent;
+  border: none;
+}
+
+QFrame#PluginWorkspaceSection QFrame#SkillCardRow,
+QFrame#PluginWorkspaceSection QFrame#McpStatusRow {
+  background: $surface;
+  border: none;
+  border-bottom: 1px solid $border_subtle;
+  border-radius: 0;
+}
+
+QFrame#PluginWorkspaceSection QLabel#SkillRowTitle,
+QFrame#PluginWorkspaceSection QLabel#McpName,
+QFrame#PluginWorkspaceSection QLabel#McpStatus,
+QFrame#PluginWorkspaceSection QLabel#McpDetail {
+  font-size: 12px;
+}
+
+QFrame#PluginWorkspaceSection QLabel#SkillRowTitle,
+QFrame#PluginWorkspaceSection QLabel#McpName {
+  color: $text;
+  font-weight: 600;
+}
+
+QFrame#PluginWorkspaceSection QLabel#SkillRowDescription,
+QFrame#PluginWorkspaceSection QLabel#McpDetail {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QFrame#PluginWorkspaceSection QLabel#SkillRowChips {
+  color: $text_muted;
+  font-size: 11px;
+}
+
+QFrame#PluginWorkspaceSection QPushButton#SkillDeleteButton {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_pill;
+  padding: 3px 10px;
+  color: $text_muted;
+  font-size: 11px;
+  min-height: 20px;
+  max-height: 24px;
+}
+
+QFrame#PluginWorkspaceSection QPushButton#SkillDeleteButton:hover {
+  background: $surface;
+  border-color: $border;
+  color: $text;
 }
 
 QFrame#SettingsPanelHeader {
@@ -1226,7 +1371,7 @@ QWidget#SettingsContent QPushButton#SettingsTabAbout {
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  padding: 8px 0 11px 0;
+  padding: 6px 0 9px 0;
   text-align: center;
   color: $text_muted;
   min-width: 44px;
@@ -1263,11 +1408,34 @@ QWidget#SettingsContent QLabel#SettingsPageTitleAbout {
   color: $text;
   font-size: 16px;
   font-weight: 600;
+  padding-bottom: 2px;
 }
 
 QWidget#SettingsContent QLabel#SettingsDescription,
 QWidget#SettingsContent QLabel#PrivacyModeHint,
 QWidget#SettingsContent QLabel#FieldLabel {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QWidget#SettingsContent QLabel#RoleHintMuted {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QWidget#SettingsContent QFrame[settingsSection="true"] {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: 8px;
+}
+
+QWidget#SettingsContent QLabel#SettingsSectionTitle {
+  color: $text;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+QWidget#SettingsContent QLabel#SettingsSectionDescription {
   color: $text_muted;
   font-size: $font_size_small;
 }
@@ -1300,7 +1468,8 @@ QWidget#SettingsContent QStackedWidget#SettingsContentStack {
 }
 
 QWidget#SettingsContent QFrame#RoleRow,
-QWidget#SettingsContent QFrame#WorkerPoolRow {
+QWidget#SettingsContent QFrame#WorkerPoolRow,
+QWidget#SettingsContent QFrame#RefinerRow {
   background: transparent;
   border: none;
   border-bottom: 1px solid $border_subtle;
@@ -1316,30 +1485,45 @@ QWidget#SettingsContent QFrame#RoleRow QComboBox {
   background: $surface;
   border: 1px solid $border_subtle;
   border-radius: $radius_small;
-  padding: 5px 10px;
+  padding: 5px 34px 5px 12px;
 }
 
-QWidget#SettingsContent QCheckBox#WorkerPoolChip {
+QWidget#SettingsContent QPushButton#QueryRefinerToggle {
   background: $surface;
   border: 1px solid $border_subtle;
-  border-radius: $radius_small;
-  padding: 6px 10px;
+  border-radius: $radius_pill;
+  padding: 6px 14px;
+  color: $text_muted;
+}
+
+QWidget#SettingsContent QPushButton#QueryRefinerToggle:hover {
+  border-color: $primary_hover;
   color: $text;
 }
 
-QWidget#SettingsContent QCheckBox#WorkerPoolChip:hover {
-  border-color: $primary_hover;
-}
-
-QWidget#SettingsContent QCheckBox#WorkerPoolChip:checked {
+QWidget#SettingsContent QPushButton#QueryRefinerToggle:checked {
   background: $user_surface;
   border-color: $primary;
   color: $primary;
 }
 
-QWidget#SettingsContent QCheckBox#WorkerPoolChip::indicator {
-  width: 14px;
-  height: 14px;
+QWidget#SettingsContent QPushButton#WorkerPoolChip {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_pill;
+  padding: 5px 12px;
+  color: $text;
+  text-align: center;
+}
+
+QWidget#SettingsContent QPushButton#WorkerPoolChip:hover {
+  border-color: $primary_hover;
+}
+
+QWidget#SettingsContent QPushButton#WorkerPoolChip:checked {
+  background: $primary;
+  border-color: $primary;
+  color: $surface;
 }
 """
 )

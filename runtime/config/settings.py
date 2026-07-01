@@ -1,5 +1,7 @@
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from catalog_system.model_catalog import load_model_catalog
 from runtime.config.execution_mode import normalize_execution_mode
@@ -43,7 +45,12 @@ class RuntimeSettings:
         return [item for item in pool if item]
 
     @classmethod
-    def from_env(cls) -> "RuntimeSettings":
+    def from_env(
+        cls,
+        *,
+        workspace_root: Path | str | None = None,
+        user_home: Path | str | None = None,
+    ) -> "RuntimeSettings":
         default_priorities = _dynamic_default_priorities()
         settings = cls(
             query_refiner_enabled=_env_bool("AGENTS_QUERY_REFINER_ENABLED", False),
@@ -63,10 +70,11 @@ class RuntimeSettings:
                 "AGENTS_FINAL_SYNTHESIZER_MODEL_PRIORITY",
                 default_priorities["final_synthesizer"],
             ),
+            allowed_worker_models=_env_list("AGENTS_ALLOWED_WORKER_MODELS", []),
             privacy_mode=normalize_privacy_mode(os.environ.get("AGENTS_PRIVACY_MODE") or "local_first"),
             execution_mode=normalize_execution_mode(os.environ.get("AGENTS_EXECUTION_MODE") or "auto"),
         )
-        return _apply_lucode_config_overrides(settings)
+        return _apply_lucode_config_overrides(settings, workspace_root=workspace_root, user_home=user_home)
 
     def model_priority_for(self, role: str) -> list[str]:
         try:
@@ -124,9 +132,14 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return values or list(default)
 
 
-def _apply_lucode_config_overrides(settings: RuntimeSettings) -> RuntimeSettings:
+def _apply_lucode_config_overrides(
+    settings: RuntimeSettings,
+    *,
+    workspace_root: Path | str | None = None,
+    user_home: Path | str | None = None,
+) -> RuntimeSettings:
     try:
-        config = load_effective_lucode_config()
+        config = load_effective_lucode_config(workspace_root=workspace_root, user_home=user_home)
     except Exception:
         return settings
 
@@ -142,6 +155,9 @@ def _apply_lucode_config_overrides(settings: RuntimeSettings) -> RuntimeSettings
         query_refiner_enabled = _config_bool(query_refiner_section.get("enabled"))
     if query_refiner_enabled is not None and not _env_has("AGENTS_QUERY_REFINER_ENABLED"):
         settings.query_refiner_enabled = query_refiner_enabled
+    worker_pool = _config_string_list(config.get("allowed_worker_models"))
+    if worker_pool and not _env_has("AGENTS_ALLOWED_WORKER_MODELS"):
+        settings.allowed_worker_models = worker_pool
 
     available_ids = _configured_runtime_model_ids()
     default_refs = model_refs_from_config(config)
@@ -180,6 +196,23 @@ def _apply_lucode_config_overrides(settings: RuntimeSettings) -> RuntimeSettings
             settings.final_synthesizer_model_priority = list(default_ids)
 
     return settings
+
+
+def _config_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    cleaned: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned
 
 
 def _env_has(name: str) -> bool:

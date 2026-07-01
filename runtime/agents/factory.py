@@ -1,3 +1,5 @@
+import re
+
 from catalog_system.model_catalog import ModelRegistry
 from planning.planner_schema import PlannedTask
 from runtime.capabilities.resolver import CapabilityResolver
@@ -13,6 +15,46 @@ class AgentFactory:
         self.model_registry = model_registry
         self.mcp_manager = mcp_manager
         self.capability_resolver = capability_resolver or CapabilityResolver()
+
+    def _configured_model_label(self, model_id: str) -> str:
+        try:
+            info = self.model_registry.get_model_info(model_id)
+        except Exception:
+            info = {}
+        if not isinstance(info, dict):
+            info = {}
+        for key in ("display_name_zh", "display_name", "model_name", "provider_ref"):
+            label = self._clean_model_label(info.get(key))
+            if label:
+                return label
+        return self._clean_model_label(model_id)
+
+    @staticmethod
+    def _clean_model_label(value) -> str:
+        text = str(value or "").strip()
+        if not text or text.lower() == "model":
+            return ""
+        if "_" in text or text.lower().endswith("_model"):
+            text = re.sub(r"_model$", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"_+", "-", text)
+            text = re.sub(r"(?<=\d)-(?=\d)", ".", text)
+        return text.strip()
+
+    def _current_model_identity_context(self, model_id: str, role_label: str) -> str:
+        label = self._configured_model_label(model_id)
+        if not label:
+            return (
+                "## 当前模型信息\n"
+                "- 当前没有可展示的底层模型名。用户询问模型身份时，"
+                "只说明你由 Lucode 当前配置的模型驱动，不要猜测底层模型品牌。\n\n"
+            )
+        return (
+            "## 当前模型信息\n"
+            f"- 当前本轮{role_label}使用的模型：{label}。\n"
+            "- 用户询问“你是什么模型”“当前使用哪个模型”“底层模型是什么”时，"
+            "可以如实回答这个系统提供的模型名。\n"
+            "- 不要凭空猜测未提供的模型品牌，不要把 Lucode 平台角色和底层模型名混为一谈。\n\n"
+        )
 
     async def create_task_agent(self, task: PlannedTask, execution_mode: str = ""):
         model_info = self.model_registry.get_model_info(task.model)
@@ -178,7 +220,7 @@ class AgentFactory:
                         )
                     return (
                         "\n\n## 本次工具预算\n"
-                        "- full 主管模式：可以先在内部判断读取顺序，但用户可见最终输出只写已经拿到的事实、摘要和限制。\n"
+                        "- 任务图主管策略：可以先在内部判断读取顺序，但用户可见最终输出只写已经拿到的事实、摘要和限制。\n"
                         "- `locate_code` 最多调用 1 次。\n"
                         "- `get_file_outline` 最多调用 1 次。\n"
                         "- `read_file` / `read_multiple_files` 合计最多 4 次；读取到足够上下文后停止。\n"
@@ -312,7 +354,7 @@ class AgentFactory:
             return ""
         return (
             "\n## WorkerReport\n"
-            "full 主管模式下，请在最终回答末尾保留一个简短的 Markdown WorkerReport 块，供主管收口审查：\n"
+            "受主管调度的任务图中，请在最终回答末尾保留一个简短的 Markdown WorkerReport 块，供主管收口审查：\n"
             "- 正文必须是本任务已经完成后的实际结果，不要只写“我会先读取/正在获取/接下来分析”这类执行计划或过程状态。\n"
             "- 如果工具预算不足或没有拿到真实内容，正文要明确说明“未能形成有效结果”和缺失原因，不要把准备步骤包装成结果。\n"
             "- 完成内容: 用一句话说明本任务实际完成了什么。\n"
@@ -327,9 +369,9 @@ class AgentFactory:
         instructions = (
             "你是动态多智能体系统的主脑。当前问题不需要创建专家 Agent。"
             "请根据用户问题直接用中文回答，简洁、自然、准确。默认不要使用 emoji。"
-            "介绍自己时统一自称“动态多智能体助手”或“主脑规划器”，"
-            "不要自称 Claude、Claude Code、Anthropic、ChatGPT、OpenAI 模型"
-            "或其它未由用户指定的底层模型品牌。\n\n"
+            "介绍平台身份时可以说自己是 Lucode 智能助手；"
+            "介绍底层模型时只能使用系统明确提供的当前模型名。\n\n"
+            + self._current_model_identity_context(model_id, "直接回答")
             + self._direct_answer_mode_context(execution_mode)
             + f"回答要求：{instruction}"
         )
@@ -340,22 +382,14 @@ class AgentFactory:
         )
 
     def _direct_answer_mode_context(self, execution_mode: str = "") -> str:
-        mode = str(execution_mode or "").strip().lower()
-        if mode == "serial":
-            return (
-                "当前模式：serial。当前问题被判定为直接回答，不需要创建任务 Agent。"
-                "不要声称创建了 Supervisor、Worker、Lead Reviewer 或并行团队；"
-                "不要把 serial 模式描述成 full 团队模式。"
-                "不要自称 Claude、Claude Code、Anthropic、ChatGPT、OpenAI 模型或任何用户没有明确指定的底层模型品牌；"
-                "当用户询问你是什么模型时，只能说明你是 Lucode 当前配置的模型驱动的执行 Agent，"
-                "不要猜测底层模型品牌。\n\n"
-            )
-        if mode == "full":
-            return (
-                "当前模式：full。当前问题已被判定为直接回答，不需要创建 worker、并行团队或主管审查。"
-                "可以说明 full 模式具备主管和团队执行能力，但不要声称本轮已经启动这些角色。\n\n"
-            )
-        return ""
+        del execution_mode
+        return (
+            "本轮被判定为直接回答，不需要创建任务图、Worker、主管审查或并行团队。"
+            "不要声称已经启动这些角色。"
+            "不要自称系统没有明确提供的 Claude、Claude Code、Anthropic、ChatGPT、OpenAI 模型或其它底层模型品牌；"
+            "如果当前模型名本身包含这些品牌或模型族，可以按系统提供的当前模型名如实回答。"
+            "如果系统没有提供当前配置的模型名，不要猜测底层模型品牌。\n\n"
+        )
 
     def create_solo_agent(self, model_id: str, mcp_servers=None):
         servers = list(mcp_servers or [])
@@ -363,15 +397,17 @@ class AgentFactory:
             model_info = self.model_registry.get_model_info(model_id)
             if not model_info.get("supports_tools", True):
                 raise ValueError(
-                    "当前是 solo 单模型工具 Agent 模式，但所选模型不支持 tools/function calling："
+                    "当前快速单 Agent 需要 MCP 工具，但所选模型不支持 tools/function calling："
                     f"{model_id}（{model_info.get('model_name') or '未知模型名'}）。"
-                    "请换用支持工具调用的模型，或不要给 solo 挂载 MCP 工具。"
+                    "请换用支持工具调用的模型，或不要为本次任务挂载 MCP 工具。"
                 )
         Agent = agent_class()
         return Agent(
             name="solo_agent",
             instructions=sanitize_text(
                 load_skill("solo_executor_contract")
+                + "\n\n"
+                + self._current_model_identity_context(model_id, "快速单 Agent")
             ),
             model=self.model_registry.get_model(model_id),
             mcp_servers=servers,
@@ -390,7 +426,11 @@ class AgentFactory:
         Agent = agent_class()
         return Agent(
             name="full_supervisor_agent",
-            instructions=sanitize_text(load_skill("full_supervisor")),
+            instructions=sanitize_text(
+                load_skill("full_supervisor")
+                + "\n\n"
+                + self._current_model_identity_context(model_id, "主管 Agent")
+            ),
             model=self.model_registry.get_model(model_id),
             mcp_servers=list(readonly_servers or []),
         )

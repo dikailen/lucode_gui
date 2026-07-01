@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -14,6 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback when to
     import tomli as tomllib  # type: ignore
 
 from runtime.config.execution_mode import EXECUTION_MODES, normalize_execution_mode
+from runtime.safety.privacy import normalize_privacy_mode
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -126,10 +128,114 @@ def save_auth(data: dict[str, Any], user_home: Path | str | None = None) -> Path
     return path
 
 
+def provider_api_key_value(provider_auth: dict[str, Any] | None) -> str:
+    if not isinstance(provider_auth, dict):
+        return ""
+    encrypted = provider_auth.get("api_key_encrypted")
+    if isinstance(encrypted, dict):
+        try:
+            return _decode_secret_payload(encrypted)
+        except Exception:
+            return ""
+    legacy = provider_auth.get("api_key")
+    return str(legacy or "").strip()
+
+
+def _encode_secret_payload(secret: str) -> dict[str, str]:
+    value = str(secret or "")
+    if os.name == "nt":
+        return {
+            "scheme": "windows_dpapi_v1",
+            "value": _windows_protect_secret(value),
+        }
+    return {
+        "scheme": "local_base64_v1",
+        "value": base64.b64encode(value.encode("utf-8")).decode("ascii"),
+    }
+
+
+def _decode_secret_payload(payload: dict[str, Any]) -> str:
+    scheme = str(payload.get("scheme") or "").strip()
+    value = str(payload.get("value") or "")
+    if not value:
+        return ""
+    if scheme == "windows_dpapi_v1":
+        return _windows_unprotect_secret(value).strip()
+    if scheme == "local_base64_v1":
+        return base64.b64decode(value.encode("ascii")).decode("utf-8").strip()
+    return ""
+
+
+def _windows_protect_secret(secret: str) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    data = secret.encode("utf-8")
+    buffer = ctypes.create_string_buffer(data)
+    input_blob = DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+    output_blob = DataBlob()
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    ok = crypt32.CryptProtectData(
+        ctypes.byref(input_blob),
+        None,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(output_blob),
+    )
+    if not ok:
+        raise OSError(ctypes.get_last_error(), "CryptProtectData failed")
+    try:
+        encrypted = ctypes.string_at(output_blob.pbData, output_blob.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
+    return base64.b64encode(encrypted).decode("ascii")
+
+
+def _windows_unprotect_secret(encoded: str) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    data = base64.b64decode(encoded.encode("ascii"))
+    buffer = ctypes.create_string_buffer(data)
+    input_blob = DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+    output_blob = DataBlob()
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    ok = crypt32.CryptUnprotectData(
+        ctypes.byref(input_blob),
+        None,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(output_blob),
+    )
+    if not ok:
+        raise OSError(ctypes.get_last_error(), "CryptUnprotectData failed")
+    try:
+        decrypted = ctypes.string_at(output_blob.pbData, output_blob.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
+    return decrypted.decode("utf-8")
+
+
 def provider_has_api_key(provider_id: str, user_home: Path | str | None = None) -> bool:
     provider_id = normalize_provider_id(provider_id)
     provider_auth = (load_auth(user_home).get("providers") or {}).get(provider_id) or {}
-    return bool(str(provider_auth.get("api_key") or "").strip())
+    return bool(provider_api_key_value(provider_auth))
 
 
 def connect_provider(
@@ -192,7 +298,7 @@ def connect_provider(
     if api_key and not resolved_local:
         auth = load_auth(user_home=user_home)
         auth_providers = dict(auth.get("providers") or {})
-        auth_providers[provider_id] = {"api_key": str(api_key)}
+        auth_providers[provider_id] = {"api_key_encrypted": _encode_secret_payload(str(api_key))}
         auth["providers"] = auth_providers
         save_auth(auth, user_home=user_home)
 
@@ -369,6 +475,24 @@ def set_query_refiner_enabled(enabled: bool, *, workspace_root: Path | str | Non
     return config
 
 
+def set_privacy_mode(mode: str, *, workspace_root: Path | str | None = None) -> dict[str, Any]:
+    config = load_lucode_config(workspace_root=workspace_root)
+    config["privacy"] = normalize_privacy_mode(mode)
+    save_lucode_config(config, workspace_root=workspace_root)
+    return config
+
+
+def set_allowed_worker_models(
+    model_ids: list[str] | tuple[str, ...] | str | None,
+    *,
+    workspace_root: Path | str | None = None,
+) -> dict[str, Any]:
+    config = load_lucode_config(workspace_root=workspace_root)
+    config["allowed_worker_models"] = _dedupe_strings(model_ids or [])
+    save_lucode_config(config, workspace_root=workspace_root)
+    return config
+
+
 def prune_model_refs_from_config(
     config: dict[str, Any],
     *,
@@ -476,7 +600,7 @@ def configured_provider_model_definitions(
         models = _as_string_list(provider_config.get("models") or [])
         if not models:
             continue
-        api_key = str((auth_providers.get(provider_id) or {}).get("api_key") or "")
+        api_key = provider_api_key_value(auth_providers.get(provider_id) or {})
         base_url = str(provider_config.get("base_url") or "").strip()
         local = bool(provider_config.get("local"))
         compatible_type = str(provider_config.get("compatible_type") or provider_config.get("backend_type") or "openai_compatible")

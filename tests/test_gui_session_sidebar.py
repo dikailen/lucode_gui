@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,11 +15,16 @@ pytestmark = pytest.mark.skipif(not HAS_PYSIDE, reason="PySide6 is not installed
 if HAS_PYSIDE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+    from PySide6.QtCore import QObject, QEvent, Qt  # noqa: E402
+    from PySide6.QtTest import QTest  # noqa: E402
     from PySide6.QtWidgets import (  # noqa: E402
         QApplication,
+        QDialog,
         QLabel,
         QFrame,
         QLineEdit,
+        QComboBox,
+        QMenu,
         QMessageBox,
         QPushButton,
         QSizePolicy,
@@ -27,7 +33,7 @@ if HAS_PYSIDE:
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.main_window import MainWindow  # noqa: E402
     from lucode.gui.session_sidebar import SessionSidebar  # noqa: E402
-    from lucode.gui.widgets import AnswerBlock, MessageBubble  # noqa: E402
+    from lucode.gui.widgets import AnswerBlock, MessageBubble, WorkArea  # noqa: E402
 
 
 @dataclass
@@ -134,20 +140,102 @@ def test_sidebar_renders_history_and_filters_with_search(app):
     assert "第二段对话" in buttons[0].text()
 
 
-def test_sidebar_delete_calls_store_and_refreshes(app, monkeypatch):
+def test_new_session_does_not_orphan_session_rows_as_top_level_widgets(app, tmp_path):
+    workspace = _isolated_workspace(tmp_path)
+    window = MainWindow(workspace=workspace, chat_session=GuiChatSession(workspace=workspace))
+    window.show()
+    app.processEvents()
+
+    window.session_sidebar.new_session_button.click()
+    app.processEvents()
+
+    orphan_rows = [
+        widget
+        for widget in app.topLevelWidgets()
+        if widget is not window
+        and widget.objectName() == "SessionRow"
+        and widget.parentWidget() is None
+        and widget.isVisible()
+    ]
+    assert orphan_rows == []
+
+
+def test_session_activity_dot_does_not_show_as_top_level_widget(app):
+    class TopLevelShowWatcher(QObject):
+        def __init__(self):
+            super().__init__()
+            self.seen: list[str] = []
+
+        def eventFilter(self, obj, event):
+            if (
+                event.type() == QEvent.Show
+                and isinstance(obj, QLabel)
+                and obj.objectName() == "SessionActivityDot"
+                and obj.parentWidget() is None
+            ):
+                self.seen.append(obj.objectName())
+            return False
+
     store = FakeSessionStore()
     sidebar = SessionSidebar()
     sidebar.set_session_store(store)
     sidebar.refresh()
-    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    app.processEvents()
+
+    watcher = TopLevelShowWatcher()
+    app.installEventFilter(watcher)
+    try:
+        sidebar.set_session_activity("s1", "running")
+        app.processEvents()
+    finally:
+        app.removeEventFilter(watcher)
+
+    assert watcher.seen == []
+
+
+def test_sidebar_delete_uses_inline_confirmation_then_store_and_refreshes(app, monkeypatch):
+    store = FakeSessionStore()
+    sidebar = SessionSidebar()
+    sidebar.set_session_store(store)
+    sidebar.refresh()
+    prompts = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: prompts.append(True) or QMessageBox.Yes)
 
     delete_buttons = sidebar.findChildren(QPushButton, "SessionDeleteButton")
     assert delete_buttons
     delete_buttons[0].click()
     app.processEvents()
 
+    assert store.deleted == []
+    assert prompts == []
+    assert delete_buttons[0].text() == "确认"
+
+    delete_buttons[0].click()
+    app.processEvents()
+
     assert store.deleted == ["s1"]
+    assert prompts == []
     assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 1
+
+
+def test_sidebar_session_row_click_does_not_trigger_delete_prompt(app, monkeypatch):
+    store = FakeSessionStore()
+    sidebar = SessionSidebar()
+    sidebar.set_session_store(store)
+    sidebar.refresh()
+
+    prompts = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: prompts.append(True) or QMessageBox.No)
+
+    row_button = sidebar.findChildren(QPushButton, "SessionRowButton")[0]
+    selected = []
+    sidebar.session_selected.connect(selected.append)
+
+    row_button.click()
+    app.processEvents()
+
+    assert selected == ["s1"]
+    assert prompts == []
 
 
 def test_sidebar_refresh_preserves_disabled_state(app):
@@ -169,37 +257,26 @@ def test_sidebar_refresh_preserves_disabled_state(app):
     assert all(not row.isEnabled() for row in rows)
 
 
-def test_sidebar_switches_between_chats_skills_and_mcp(app):
+def test_sidebar_plugin_button_is_navigation_not_list_replacement(app):
     store = FakeSessionStore()
     sidebar = SessionSidebar()
     sidebar.set_session_store(store)
     sidebar.refresh()
+    requested = []
+    sidebar.plugins_requested.connect(lambda: requested.append(True))
 
     assert sidebar.findChild(QPushButton, "SidebarTabChats").isChecked()
     assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 2
 
-    sidebar.findChild(QPushButton, "SidebarTabSkills").click()
+    sidebar.findChild(QPushButton, "SidebarTabPlugins").click()
     app.processEvents()
 
-    assert sidebar.findChild(QPushButton, "SidebarTabSkills").isChecked()
-    assert sidebar.findChild(QLabel, "SkillPanelTitle").text() == "技能库"
-    skill_cards = sidebar.findChildren(QPushButton, "SkillCardButton")
-    assert [button.property("skill_id") for button in skill_cards[:4]] == [
-        "code_engineer",
-        "project_explorer",
-        "final_synthesizer",
-        "skill_creator",
-    ]
-
-    sidebar.findChild(QPushButton, "SidebarTabMcp").click()
-    app.processEvents()
-
-    assert sidebar.findChild(QPushButton, "SidebarTabMcp").isChecked()
-    assert sidebar.findChild(QLabel, "McpPanelTitle").text() == "MCP 服务"
-    mcp_rows = sidebar.findChildren(QFrame, "McpStatusRow")
-    statuses = {row.property("mcp_id"): row.property("status") for row in mcp_rows}
-    assert statuses["filesystem"] == "已连接"
-    assert statuses["image_draw"] == "离线"
+    assert requested == [True]
+    assert sidebar.findChild(QPushButton, "SidebarTabPlugins").isChecked()
+    assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 2
+    assert sidebar.findChild(QLabel, "PluginWorkspaceTitle") is None
+    assert sidebar.findChildren(QPushButton, "SkillCardButton") == []
+    assert sidebar.findChildren(QFrame, "McpStatusRow") == []
 
     sidebar.findChild(QPushButton, "SidebarTabChats").click()
     app.processEvents()
@@ -229,13 +306,16 @@ def test_sidebar_uses_vertical_nav_before_new_chat(app):
     search_index = full_layout.indexOf(search)
 
     assert 0 < nav_index < new_index < search_index
-    for button_name in ("SidebarTabChats", "SidebarTabSkills", "SidebarTabMcp"):
+    assert sidebar.findChild(QPushButton, "SidebarTabSkills") is None
+    assert sidebar.findChild(QPushButton, "SidebarTabMcp") is None
+    for button_name in ("SidebarTabChats", "SidebarTabPlugins"):
         button = sidebar.findChild(QPushButton, button_name)
         assert button is not None
         assert button.parentWidget() is nav
         assert button.property("sidebarNavItem") is True
         assert button.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
         assert button.maximumHeight() <= 40
+    assert "设置" in sidebar.findChild(QPushButton, "SidebarSettingsButton").text()
 
 
 def test_sidebar_session_rows_are_compact_list_items(app):
@@ -302,6 +382,8 @@ def test_sidebar_collapsed_mode_keeps_icon_rail_visible(app):
     assert not sidebar.search_box.isVisible()
     assert not sidebar.scroll.isVisible()
 
+    assert sidebar.findChild(QPushButton, "SidebarRailSkills") is None
+    assert sidebar.findChild(QPushButton, "SidebarRailMcp") is None
     sidebar.findChild(QPushButton, "SidebarRailChats").click()
     sidebar.set_collapsed(False)
     app.processEvents()
@@ -318,10 +400,10 @@ def test_sidebar_tab_switch_marks_transition_state(app):
     sidebar = SessionSidebar()
     sidebar.refresh()
 
-    sidebar.findChild(QPushButton, "SidebarTabSkills").click()
+    sidebar.findChild(QPushButton, "SidebarTabPlugins").click()
     app.processEvents()
 
-    assert sidebar.property("activeTab") == "skills"
+    assert sidebar.property("activeTab") == "plugins"
     assert sidebar.property("transitioning") is False
 def test_main_window_new_session_clears_messages_and_title(app, tmp_path):
     workspace = _isolated_workspace(tmp_path)
@@ -369,6 +451,106 @@ def test_main_window_select_session_restores_messages_and_context(app, tmp_path)
     assert answers[0].content_label.text() == "旧回答"
 
 
+def test_main_window_select_session_title_uses_stable_history_title(app, tmp_path):
+    workspace = _isolated_workspace(tmp_path)
+    session = GuiChatSession(workspace=workspace)
+    store = FakeSessionStore()
+    store.items = [FakeHistoryItem("s1", "第一条旧标题", message_count=4)]
+    store.messages["s1"] = [
+        {"role": "user", "content": "第一条旧标题"},
+        {"role": "assistant", "content": "旧回答"},
+        {"role": "user", "content": "最新问的问题"},
+        {"role": "assistant", "content": "最新回答"},
+    ]
+    store.recent_turns["s1"] = [
+        {"role": "user", "content": "最新问的问题"},
+        {"role": "assistant", "content": "最新回答"},
+    ]
+    session.session_store = store
+    session.history_browser = store
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    window.session_sidebar.session_selected.emit("s1")
+    app.processEvents()
+
+    assert window.session_title_label.text() == "第一条旧标题"
+
+
+def test_history_row_mouse_click_defers_resume_until_event_unwinds(app, tmp_path, monkeypatch):
+    class PopupWatcher(QObject):
+        def __init__(self):
+            super().__init__()
+            self.seen: list[str] = []
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Show and isinstance(obj, (QDialog, QMessageBox, QMenu)):
+                self.seen.append(f"{obj.metaObject().className()}:{obj.objectName()}")
+            return False
+
+    workspace = _isolated_workspace(tmp_path)
+    session = GuiChatSession(workspace=workspace)
+    store = FakeSessionStore()
+    session.session_store = store
+    session.history_browser = store
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.resize(1600, 1000)
+    window.show()
+    app.processEvents()
+
+    prompts = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: prompts.append(True) or QMessageBox.No)
+    rows = window.session_sidebar.findChildren(QFrame, "SessionRow")
+    assert rows
+
+    watcher = PopupWatcher()
+    app.installEventFilter(watcher)
+    try:
+        QTest.mousePress(rows[0], Qt.LeftButton, Qt.NoModifier, rows[0].rect().center())
+        assert session.current_session_id is None
+        QTest.mouseRelease(rows[0], Qt.LeftButton, Qt.NoModifier, rows[0].rect().center())
+        app.processEvents()
+        app.processEvents()
+    finally:
+        app.removeEventFilter(watcher)
+
+    assert session.current_session_id == "s1"
+    assert window.empty_state.isHidden()
+    assert prompts == []
+    assert watcher.seen == []
+
+
+def test_history_row_click_does_not_refresh_sidebar_with_empty_intermediate_selection(app, tmp_path, monkeypatch):
+    workspace = _isolated_workspace(tmp_path)
+    session = GuiChatSession(workspace=workspace)
+    store = FakeSessionStore()
+    session.session_store = store
+    session.history_browser = store
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.resize(1600, 1000)
+    window.show()
+    app.processEvents()
+
+    refresh_selections: list[str] = []
+    original_refresh = window.session_sidebar.refresh
+
+    def recording_refresh():
+        refresh_selections.append(window.session_sidebar._selected_session_id)
+        return original_refresh()
+
+    monkeypatch.setattr(window.session_sidebar, "refresh", recording_refresh)
+    rows = window.session_sidebar.findChildren(QFrame, "SessionRow")
+    assert rows
+
+    QTest.mouseClick(rows[0], Qt.LeftButton, Qt.NoModifier, rows[0].rect().center())
+    app.processEvents()
+    app.processEvents()
+
+    assert session.current_session_id == "s1"
+    assert refresh_selections == ["s1"]
+
+
 def test_main_window_ignores_session_select_while_turn_is_running(app, tmp_path):
     workspace = _isolated_workspace(tmp_path)
     session = GuiChatSession(workspace=workspace)
@@ -385,6 +567,30 @@ def test_main_window_ignores_session_select_while_turn_is_running(app, tmp_path)
 
     assert session.current_session_id == "existing"
     assert window.session_title_label.text() == "新会话"
+
+
+def test_main_window_chat_tab_returns_from_settings_and_restores_session_title(app, tmp_path):
+    workspace = _isolated_workspace(tmp_path)
+    session = GuiChatSession(workspace=workspace)
+    store = FakeSessionStore()
+    session.session_store = store
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    window.session_sidebar.session_selected.emit("s1")
+    app.processEvents()
+    assert window.session_title_label.text() == "第一段对话"
+
+    window.session_sidebar.sidebar_settings_button.click()
+    app.processEvents()
+    assert window.workspace_stack.currentWidget() is window.settings_workspace_page
+
+    window.session_sidebar.findChild(QPushButton, "SidebarTabChats").click()
+    app.processEvents()
+
+    assert window.workspace_stack.currentWidget() is window.chat_workspace_page
+    assert window.session_title_label.text() == "第一段对话"
 
 
 def test_turn_ended_refreshes_sidebar(app, tmp_path):
@@ -438,6 +644,39 @@ def test_answer_delta_creates_and_appends_answer_block(app, tmp_path):
     assert answers[0].content_label.text() == "Hello world"
 
 
+def test_direct_answer_planning_event_restores_zero_task_work_area(app, tmp_path):
+    workspace = _isolated_workspace(tmp_path)
+    session = GuiChatSession(workspace=workspace)
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+    turn_id = window.turn_guard.start()
+    window.work_task_id = turn_id
+    window._show_thinking("思考中")
+
+    window.handle_runtime_event(
+        {
+            "event_type": "PlanningCompleted",
+            "payload": {
+                "route_type": "direct_answer",
+                "tasks": [],
+            },
+        }
+    )
+    app.processEvents()
+    window._turn_start = time.monotonic()
+    window.handle_runtime_event({"event_type": "TurnEnded", "payload": {"status": "completed"}})
+    app.processEvents()
+
+    areas = window.message_host.findChildren(WorkArea)
+    assert window.work_area is not None
+    assert areas == [window.work_area]
+    assert window.work_area.header.text().startswith("▸ 已完成 · ")
+    assert window.work_area.header.text().endswith(" 秒")
+    assert window.work_area.findChild(QLabel, "PlanGroupLabel").text() == "规划完成 · 直接回答 · 0 个任务"
+    assert window.work_area.findChild(QLabel, "PlanEmpty").text() == "暂无执行任务"
+
+
 def test_run_turn_updates_streamed_answer_instead_of_adding_duplicate(app, tmp_path):
     from lucode.gui.chat_session import GuiTurnResult
 
@@ -485,6 +724,7 @@ def test_run_turn_completion_refreshes_sidebar_after_history_write(app, tmp_path
     store = FakeSessionStore()
     store.items = []
     session.session_store = store
+    session.history_browser = store
     window = MainWindow(workspace=workspace, chat_session=session)
     window.session_sidebar.set_session_store(store)
     window.show()
@@ -497,6 +737,37 @@ def test_run_turn_completion_refreshes_sidebar_after_history_write(app, tmp_path
     buttons = window.session_sidebar.findChildren(QPushButton, "SessionRowButton")
     assert len(buttons) == 1
     assert "新问题" in buttons[0].text()
+
+
+def test_run_turn_title_keeps_stable_history_title(app, tmp_path):
+    class RecordingGuiChatSession(GuiChatSession):
+        async def run_turn(self, user_input: str):
+            self.current_session_id = "s1"
+            self.recent_turns = [
+                {"role": "user", "content": "第一条旧问题"},
+                {"role": "assistant", "content": "旧回答"},
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": "回答"},
+            ]
+            from lucode.gui.chat_session import GuiTurnResult
+
+            return GuiTurnResult(final_output="回答", execution_mode=self.settings.execution_mode)
+
+    workspace = _isolated_workspace(tmp_path)
+    session = RecordingGuiChatSession(workspace=workspace)
+    store = FakeSessionStore()
+    store.items = [FakeHistoryItem("s1", "第一条旧问题", message_count=4)]
+    session.session_store = store
+    session.history_browser = store
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    turn_id = window.turn_guard.start()
+    asyncio.run(window._run_turn(turn_id, "最新问的问题"))
+    app.processEvents()
+
+    assert window.session_title_label.text() == "第一条旧问题"
 
 
 def test_run_turn_refreshes_title_while_sidebar_is_on_skills(app, tmp_path):
@@ -517,7 +788,7 @@ def test_run_turn_refreshes_title_while_sidebar_is_on_skills(app, tmp_path):
     window = MainWindow(workspace=workspace, chat_session=session)
     window.show()
     app.processEvents()
-    window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").click()
+    window.session_sidebar.findChild(QPushButton, "SidebarTabPlugins").click()
     app.processEvents()
 
     turn_id = window.turn_guard.start()
@@ -525,7 +796,7 @@ def test_run_turn_refreshes_title_while_sidebar_is_on_skills(app, tmp_path):
     app.processEvents()
 
     assert window.session_title_label.text() == "Fresh title"
-    assert window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").isChecked()
+    assert window.session_sidebar.findChild(QPushButton, "SidebarTabPlugins").isChecked()
 
 
 def test_sidebar_uses_history_facade_for_real_gui_session_store(app, tmp_path):

@@ -302,8 +302,8 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
     is_code = bool(code_tasks) or _contains_any(text, CODE_MARKERS)
     code_text = "\n".join([refined_request, *(_task_text(task) for task in code_tasks)]).lower()
     declared_write_intent = any(getattr(task, "write_intent", []) for task in code_tasks)
-    edit_intent = bool(code_tasks) and (_contains_any(code_text, EDIT_MARKERS) or declared_write_intent)
-    test_intent = bool(code_tasks) and _contains_any(code_text, TEST_MARKERS)
+    edit_intent = bool(code_tasks) and (_contains_edit_intent(code_text) or declared_write_intent)
+    test_intent = bool(code_tasks) and _contains_test_execution_intent(code_text)
     needs_code_pipeline = plan.route_type in {"single_agent", "multi_agent"} and is_code
     should_verify = needs_code_pipeline and (edit_intent or test_intent)
 
@@ -329,9 +329,9 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
         task_text = _task_text(task).lower()
         task_edit_intent = bool(
             getattr(task, "write_intent", [])
-            or (task.skill_id == "code_engineer" and _contains_any(task_text, EDIT_MARKERS))
+            or (task.skill_id == "code_engineer" and _contains_edit_intent(task_text))
         )
-        task_test_intent = _contains_any(task_text, TEST_MARKERS)
+        task_test_intent = _contains_test_execution_intent(task_text)
         _append_unique(task.mcp, "code_locator")
         _append_unique(task.mcp, "project_filesystem_readonly")
         if edit_intent and task_edit_intent:
@@ -390,7 +390,7 @@ def should_verify_task(task: PlannedTask) -> bool:
         return False
     return (
         task.skill_id == "code_engineer"
-        and ("workspace_edit" in task.mcp or "command_runner" in task.mcp or _contains_any(text, EDIT_MARKERS))
+        and ("workspace_edit" in task.mcp or "command_runner" in task.mcp or _contains_edit_intent(text))
     )
 
 
@@ -606,6 +606,85 @@ def _contains_any(text: str, markers: set[str]) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _contains_edit_intent(text: str) -> bool:
+    return _contains_any(_without_negated_action_phrases(text), EDIT_MARKERS)
+
+
+def _contains_test_execution_intent(text: str) -> bool:
+    lowered = text.lower()
+    if not _contains_any(lowered, TEST_MARKERS):
+        return False
+    return not _is_verification_recommendation_only(lowered)
+
+
+def _without_negated_action_phrases(text: str) -> str:
+    lowered = text.lower()
+    patterns = [
+        r"不要\s*(?:修改|改动|改文件|编辑|写入|创建|删除|修复|提交|安装)",
+        r"不\s*(?:修改|改动|改文件|编辑|写入|创建|删除|修复|提交|安装)",
+        r"不需要\s*(?:修改|改动|改文件|编辑|写入|创建|删除|修复|提交|安装)",
+        r"无需\s*(?:修改|改动|改文件|编辑|写入|创建|删除|修复|提交|安装)",
+        r"do not\s+(?:modify|edit|write|create|delete|fix|repair|commit|install)",
+        r"don't\s+(?:modify|edit|write|create|delete|fix|repair|commit|install)",
+        r"no\s+(?:modification|edit|write|commit|install)",
+    ]
+    for pattern in patterns:
+        lowered = re.sub(pattern, " ", lowered)
+    return lowered
+
+
+def _is_verification_recommendation_only(text: str) -> bool:
+    lowered = text.lower()
+    recommendation_markers = [
+        "建议验证命令",
+        "建议的验证命令",
+        "下一步建议验证命令",
+        "列出建议验证命令",
+        "只列出验证命令",
+        "推荐验证命令",
+        "给出验证命令",
+        "输出验证命令",
+        "验证建议",
+        "verification commands to try",
+        "suggest verification command",
+        "suggested verification command",
+        "recommended verification command",
+        "recommend verification command",
+    ]
+    if not any(marker in lowered for marker in recommendation_markers):
+        return False
+
+    execution_markers = [
+        "运行测试",
+        "执行测试",
+        "运行验证",
+        "执行验证",
+        "运行 pytest",
+        "执行 pytest",
+        "run pytest",
+        "run tests",
+        "execute tests",
+        "execute pytest",
+    ]
+    stripped = _without_negated_run_phrases(lowered)
+    return not any(marker in stripped for marker in execution_markers)
+
+
+def _without_negated_run_phrases(text: str) -> str:
+    lowered = text.lower()
+    patterns = [
+        r"不要\s*(?:运行|执行)\s*(?:测试|验证|命令|pytest)?",
+        r"不\s*(?:运行|执行)\s*(?:测试|验证|命令|pytest)?",
+        r"不需要\s*(?:运行|执行)\s*(?:测试|验证|命令|pytest)?",
+        r"无需\s*(?:运行|执行)\s*(?:测试|验证|命令|pytest)?",
+        r"do not\s+(?:run|execute)\s*(?:tests?|verification|commands?|pytest)?",
+        r"don't\s+(?:run|execute)\s*(?:tests?|verification|commands?|pytest)?",
+    ]
+    for pattern in patterns:
+        lowered = re.sub(pattern, " ", lowered)
+    return lowered
+
+
 def _is_explicit_readonly_analysis(text: str) -> bool:
     lowered = text.lower()
     readonly_markers = [
@@ -614,17 +693,28 @@ def _is_explicit_readonly_analysis(text: str) -> bool:
         "不要改文件",
         "不要运行测试",
         "不要运行",
+        "不要提交",
+        "不要安装",
+        "不提交",
+        "不安装",
+        "无需修改",
+        "不需要修改",
         "只读",
         "read-only",
         "readonly",
         "do not modify",
         "do not edit",
         "do not run",
+        "do not commit",
+        "do not install",
     ]
     analysis_markers = [
         "分析",
         "检查",
         "查看",
+        "阅读",
+        "体检",
+        "排查",
         "覆盖",
         "总结",
         "analyze",

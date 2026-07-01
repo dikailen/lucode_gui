@@ -3,14 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -31,9 +30,11 @@ class SessionSidebar(QFrame):
     """Workbench sidebar for conversations, skills, and MCP status."""
 
     new_session_requested = Signal()
+    chats_requested = Signal()
     session_selected = Signal(str)
     session_deleted = Signal(str)
     settings_requested = Signal()
+    plugins_requested = Signal()
     collapse_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
@@ -53,9 +54,12 @@ class SessionSidebar(QFrame):
         self._activity_state = ""
         self._language = 'zh'
         self._t = Translator(self._language)
+        self._pending_delete_session_id = ""
         self._items_by_session_id: dict[str, Any] = {}
         self._skill_cards = load_default_skill_cards()
         self._mcp_rows = load_default_mcp_rows()
+        self._pending_tab = ""
+        self._pending_session_id = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 28, 12, 18)
@@ -71,12 +75,11 @@ class SessionSidebar(QFrame):
         self.icon_logo.setAlignment(Qt.AlignCenter)
         icon_layout.addWidget(self.icon_logo)
         self.rail_chats_button = self._make_rail_button("聊", "chats", "SidebarRailChats")
-        self.rail_skills_button = self._make_rail_button("技", "skills", "SidebarRailSkills")
-        self.rail_mcp_button = self._make_rail_button("M", "mcp", "SidebarRailMcp")
-        for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
+        self.rail_plugins_button = self._make_rail_button("插", "plugins", "SidebarRailPlugins")
+        for button in (self.rail_chats_button, self.rail_plugins_button):
             icon_layout.addWidget(button)
         icon_layout.addStretch(1)
-        self.rail_settings_button = QPushButton("S")
+        self.rail_settings_button = QPushButton("⚙")
         self.rail_settings_button.setObjectName("SidebarRailSettingsButton")
         self.rail_settings_button.clicked.connect(self.settings_requested.emit)
         icon_layout.addWidget(self.rail_settings_button)
@@ -95,8 +98,9 @@ class SessionSidebar(QFrame):
         layout.addWidget(self.full_content, 1)
 
         header = QHBoxLayout()
-        title = QLabel("Lucode")
+        title = QLabel("")
         title.setObjectName("SidebarTitle")
+        title.hide()
         header.addWidget(title)
         header.addStretch(1)
         full_layout.addLayout(header)
@@ -109,9 +113,8 @@ class SessionSidebar(QFrame):
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(6)
         self.chats_tab = self._make_tab_button(self._t('sidebar.chats'), "chats", "SidebarTabChats")
-        self.skills_tab = self._make_tab_button(self._t('sidebar.skills'), "skills", "SidebarTabSkills")
-        self.mcp_tab = self._make_tab_button(self._t('sidebar.mcp'), "mcp", "SidebarTabMcp")
-        for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
+        self.plugins_tab = self._make_tab_button(self._t('sidebar.plugins'), "plugins", "SidebarTabPlugins")
+        for button in (self.chats_tab, self.plugins_tab):
             nav_layout.addWidget(button)
             self.tab_group.addButton(button)
         self.chats_tab.setChecked(True)
@@ -145,9 +148,10 @@ class SessionSidebar(QFrame):
         utility_layout = QHBoxLayout(self.utility_bar)
         utility_layout.setContentsMargins(0, 0, 0, 0)
         utility_layout.setSpacing(8)
-        self.sidebar_settings_button = QPushButton("\u2699")
+        self.sidebar_settings_button = QPushButton(self._t('control.settings_tip'))
         self.sidebar_settings_button.setObjectName("SidebarSettingsButton")
         self.sidebar_settings_button.setToolTip(self._t('control.settings_tip'))
+        self.sidebar_settings_button.setProperty("withLabel", True)
         self.sidebar_settings_button.clicked.connect(self.settings_requested.emit)
         utility_layout.addWidget(self.sidebar_settings_button)
         utility_layout.addStretch(1)
@@ -174,27 +178,18 @@ class SessionSidebar(QFrame):
         self._t = Translator(self._language)
         self.new_session_button.setText(self._t('sidebar.new_chat'))
         self.chats_tab.setText(self._t('sidebar.chats'))
-        self.skills_tab.setText(self._t('sidebar.skills'))
-        self.mcp_tab.setText(self._t('sidebar.mcp'))
+        self.plugins_tab.setText(self._t('sidebar.plugins'))
         self.search_box.setPlaceholderText(self._t('sidebar.search'))
-        self.sidebar_settings_button.setText("\u2699")
+        self.sidebar_settings_button.setText(self._t('control.settings_tip'))
         self.sidebar_settings_button.setToolTip(self._t('control.settings_tip'))
         self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
         self.rail_settings_button.setToolTip(self._t('control.settings_tip'))
         self.rail_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
         self._sync_rail_buttons()
+        self._sync_delete_buttons()
         self.refresh()
 
     def refresh(self) -> None:
-        if self._active_tab == "skills":
-            self._refresh_session_cache()
-            self._render_skills()
-            return
-        if self._active_tab == "mcp":
-            self._refresh_session_cache()
-            self._render_mcp()
-            return
-
         self._refresh_session_cache()
         query = self.search_box.text().strip()
         items = []
@@ -212,6 +207,19 @@ class SessionSidebar(QFrame):
         self._selected_session_id = str(session_id or "")
         if self._active_tab == "chats":
             self.refresh()
+
+    def set_active_tab(self, tab_id: str) -> None:
+        normalized = str(tab_id or "").strip().lower()
+        if normalized not in {"chats", "plugins", "settings"}:
+            normalized = "chats"
+        self._active_tab = normalized
+        self.setProperty("activeTab", normalized)
+        self.tab_group.setExclusive(False)
+        self.chats_tab.setChecked(normalized == "chats")
+        self.plugins_tab.setChecked(normalized == "plugins")
+        self.tab_group.setExclusive(True)
+        self._sync_rail_buttons()
+        self._apply_enabled_state()
 
     def session_title(self, session_id: str) -> str:
         item = self._items_by_session_id.get(str(session_id or ""))
@@ -265,18 +273,21 @@ class SessionSidebar(QFrame):
         return button
 
     def _switch_tab(self, tab_id: str) -> None:
-        if tab_id not in {"chats", "skills", "mcp"}:
+        if tab_id not in {"chats", "plugins"}:
             return
+        self._pending_delete_session_id = ""
         self.setProperty("transitioning", True)
-        self._active_tab = tab_id
-        self.setProperty("activeTab", tab_id)
-        self.chats_tab.setChecked(tab_id == "chats")
-        self.skills_tab.setChecked(tab_id == "skills")
-        self.mcp_tab.setChecked(tab_id == "mcp")
-        self._sync_rail_buttons()
-        self.new_session_button.setVisible(tab_id == "chats")
-        self.search_box.setVisible(tab_id == "chats")
-        self.refresh()
+        self.set_active_tab(tab_id)
+        self._pending_tab = tab_id
+        QTimer.singleShot(0, self._finish_tab_switch)
+
+    def _finish_tab_switch(self) -> None:
+        tab_id = self._pending_tab
+        self._pending_tab = ""
+        if tab_id == "plugins":
+            self.plugins_requested.emit()
+        elif tab_id == "chats":
+            self.chats_requested.emit()
         self.setProperty("transitioning", False)
         self._apply_enabled_state()
 
@@ -287,23 +298,37 @@ class SessionSidebar(QFrame):
         self.sidebar_toggle_button.setEnabled(self._enabled)
         self.rail_settings_button.setEnabled(self._enabled)
         self.rail_toggle_button.setEnabled(self._enabled)
-        for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
+        for button in (self.chats_tab, self.plugins_tab):
             button.setEnabled(self._enabled)
-        for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
+        for button in (self.rail_chats_button, self.rail_plugins_button):
             button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SessionRowButton"):
             button.setEnabled(self._enabled)
+        delete_enabled = self._enabled and self._active_tab == "chats"
         for button in self.findChildren(QPushButton, "SessionDeleteButton"):
-            button.setEnabled(self._enabled)
+            button.setEnabled(delete_enabled)
+        self._sync_delete_buttons()
         for button in self.findChildren(QPushButton, "SkillCardButton"):
             button.setEnabled(self._enabled)
         for row in self.findChildren(QFrame, "SessionRow"):
             row.setEnabled(self._enabled)
 
+    def _sync_delete_buttons(self) -> None:
+        for button in self.findChildren(QPushButton, "SessionDeleteButton"):
+            session_id = str(button.property("session_id") or "")
+            confirming = bool(session_id and session_id == self._pending_delete_session_id)
+            button.setText(self._t('sidebar.delete_confirm') if confirming else self._t('sidebar.delete'))
+            button.setToolTip(self._t('sidebar.delete_prompt') if confirming else self._t('sidebar.delete'))
+            button.setProperty("confirming", confirming)
+            style = button.style()
+            style.unpolish(button)
+            style.polish(button)
+            button.update()
+
     def _sync_rail_buttons(self) -> None:
         self.rail_chats_button.setChecked(self._active_tab == "chats")
-        self.rail_skills_button.setChecked(self._active_tab == "skills")
-        self.rail_mcp_button.setChecked(self._active_tab == "mcp")
+        self.plugins_tab.setChecked(self._active_tab == "plugins")
+        self.rail_plugins_button.setChecked(self._active_tab == "plugins")
         self.sidebar_toggle_button.setText(">" if self._collapsed else "<")
         self.rail_toggle_button.setText(">" if self._collapsed else "<")
 
@@ -313,9 +338,10 @@ class SessionSidebar(QFrame):
             widget = item.widget()
             if widget is None:
                 continue
-            widget.setParent(None)
-            if widget is not self.empty_label:
-                widget.deleteLater()
+            widget.hide()
+            if widget is self.empty_label:
+                continue
+            widget.deleteLater()
 
     def _refresh_session_cache(self) -> None:
         if self._session_store is None or not hasattr(self._session_store, "list_items"):
@@ -356,36 +382,33 @@ class SessionSidebar(QFrame):
         self.list_layout.addStretch(1)
         self._apply_enabled_state()
 
-    def _render_skills(self) -> None:
-        self._clear_list_layout()
-        title = QLabel(self._t('sidebar.skill_library'))
-        title.setObjectName("SkillPanelTitle")
-        self.list_layout.addWidget(title)
-        for card in self._skill_cards:
-            self.list_layout.addWidget(_SkillCardRow(card))
-        self.list_layout.addStretch(1)
-        self._apply_enabled_state()
-
-    def _render_mcp(self) -> None:
-        self._clear_list_layout()
-        title = QLabel(self._t('sidebar.mcp_services'))
-        title.setObjectName("McpPanelTitle")
-        self.list_layout.addWidget(title)
-        for row in self._mcp_rows:
-            self.list_layout.addWidget(_McpStatusRow(row))
-        self.list_layout.addStretch(1)
-        self._apply_enabled_state()
-
     def _on_session_selected(self, session_id: str) -> None:
+        self._pending_delete_session_id = ""
+        self._sync_delete_buttons()
         self._selected_session_id = str(session_id or "")
-        self.session_selected.emit(self._selected_session_id)
+        self._pending_session_id = self._selected_session_id
+        self.setProperty("transitioning", True)
+        self._apply_enabled_state()
+        QTimer.singleShot(0, self._finish_session_selection)
+
+    def _finish_session_selection(self) -> None:
+        session_id = self._pending_session_id
+        self._pending_session_id = ""
+        if session_id:
+            self.session_selected.emit(session_id)
+        self.setProperty("transitioning", False)
+        self._apply_enabled_state()
 
     def _on_delete_requested(self, session_id: str) -> None:
+        if self.property("transitioning") is True or self._active_tab != "chats":
+            return
         if not session_id or self._session_store is None:
             return
-        answer = QMessageBox.question(self, self._t('sidebar.delete_title'), self._t('sidebar.delete_prompt'))
-        if answer != QMessageBox.Yes:
+        if self._pending_delete_session_id != session_id:
+            self._pending_delete_session_id = session_id
+            self._sync_delete_buttons()
             return
+        self._pending_delete_session_id = ""
         try:
             self._session_store.delete(session_id)
         except Exception:
@@ -417,6 +440,7 @@ class _SessionRow(QFrame):
         self.setMinimumHeight(34)
         self.setMaximumHeight(40)
         self.setCursor(Qt.PointingHandCursor)
+        self._press_select_pending = False
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -434,10 +458,17 @@ class _SessionRow(QFrame):
         self.title_label = QLabel(title)
         self.title_label.setObjectName("SessionRowTitle")
         self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setMaximumWidth(188)
+        self.title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.title_label.setToolTip(_item_full_title(item, language=language))
         text_host.addWidget(self.title_label)
         self.meta_label = QLabel(meta)
         self.meta_label.setObjectName("SessionRowMeta")
         self.meta_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.meta_label.setMinimumWidth(0)
+        self.meta_label.setMaximumWidth(188)
+        self.meta_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         text_host.addWidget(self.meta_label)
         layout.addLayout(text_host, 1)
 
@@ -447,78 +478,126 @@ class _SessionRow(QFrame):
         self.row_button.clicked.connect(lambda: self.session_selected.emit(self.session_id))
         self.row_button.hide()
 
-        self.activity_dot = QLabel("\u25cf")
+        self.activity_dot = QLabel("\u25cf", self)
         self.activity_dot.setObjectName("SessionActivityDot")
         self.activity_dot.setProperty("session_id", self.session_id)
         self.activity_dot.setProperty("state", str(activity_state or ""))
         self.activity_dot.setToolTip(self._t('main.status.running') if activity_state else "")
-        self.activity_dot.setVisible(bool(activity_state))
         layout.addWidget(self.activity_dot)
+        self.activity_dot.setVisible(bool(activity_state))
 
-        self.delete_button = QPushButton("x")
+        self.delete_button = QPushButton("🗑", self)
         self.delete_button.setObjectName("SessionDeleteButton")
         self.delete_button.setProperty("session_id", self.session_id)
         self.delete_button.setToolTip(self._t('sidebar.delete'))
-        self.delete_button.setMaximumWidth(22)
-        self.delete_button.setMinimumWidth(22)
+        self.delete_button.setText(self._t('sidebar.delete'))
+        self.delete_button.setMaximumWidth(68)
+        self.delete_button.setMinimumWidth(52)
+        self.delete_button.setMinimumHeight(26)
+        self.delete_button.setMaximumHeight(26)
         self.delete_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.delete_button.clicked.connect(lambda: self.delete_requested.emit(self.session_id))
         layout.addWidget(self.delete_button)
 
     def mousePressEvent(self, event) -> None:
+        if self.delete_button.geometry().contains(event.position().toPoint()):
+            self._press_select_pending = False
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.LeftButton:
-            self.session_selected.emit(self.session_id)
+            self._press_select_pending = True
             event.accept()
             return
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._press_select_pending:
+            self._press_select_pending = False
+            if self.rect().contains(event.position().toPoint()) and not self.delete_button.geometry().contains(event.position().toPoint()):
+                self.session_selected.emit(self.session_id)
+                event.accept()
+                return
+        self._press_select_pending = False
+        super().mouseReleaseEvent(event)
+
 
 class _SkillCardRow(QFrame):
-    def __init__(self, card: SkillCard, parent: QWidget | None = None):
+    delete_requested = Signal(str)
+
+    def __init__(self, card: SkillCard, *, deletable: bool = False, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("SkillCardRow")
+        self.setMinimumHeight(64)
+        self.setMaximumHeight(74)
+        self.setProperty("listRow", True)
+        self.setProperty("skill_id", card.id)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(4)
 
-        text = card.title
-        if card.description:
-            text = f"{text}\n{card.description}"
-        if card.chips:
-            text = f"{text}\n{'  '.join(card.chips)}"
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+        title = QLabel(card.title)
+        title.setObjectName("SkillRowTitle")
+        top.addWidget(title, 1)
 
-        self.card_button = QPushButton(text)
+        chips = QLabel("  ".join(str(chip) for chip in card.chips))
+        chips.setObjectName("SkillRowChips")
+        chips.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        top.addWidget(chips)
+        if deletable:
+            delete_button = QPushButton("删除")
+            delete_button.setObjectName("SkillDeleteButton")
+            delete_button.setProperty("skill_id", card.id)
+            delete_button.setCursor(Qt.PointingHandCursor)
+            delete_button.setFocusPolicy(Qt.NoFocus)
+            delete_button.clicked.connect(lambda _checked=False, value=card.id: self.delete_requested.emit(value))
+            top.addWidget(delete_button)
+        layout.addLayout(top)
+
+        description = QLabel(card.description)
+        description.setObjectName("SkillRowDescription")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self.card_button = QPushButton(card.title, self)
         self.card_button.setObjectName("SkillCardButton")
         self.card_button.setProperty("skill_id", card.id)
-        layout.addWidget(self.card_button)
+        self.card_button.hide()
 
 
 class _McpStatusRow(QFrame):
     def __init__(self, row: McpRow, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("McpStatusRow")
+        self.setMinimumHeight(56)
+        self.setMaximumHeight(66)
         self.setProperty("mcp_id", row.id)
         self.setProperty("status", row.status)
+        self.setProperty("listRow", True)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(3)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(10)
 
-        top = QHBoxLayout()
+        text_host = QVBoxLayout()
+        text_host.setContentsMargins(0, 0, 0, 0)
+        text_host.setSpacing(2)
         name = QLabel(row.title)
         name.setObjectName("McpName")
-        status = QLabel(row.status)
-        status.setObjectName("McpStatus")
-        top.addWidget(name, 1)
-        top.addWidget(status)
-        layout.addLayout(top)
-
+        text_host.addWidget(name)
         if row.detail:
             detail = QLabel(row.detail)
             detail.setObjectName("McpDetail")
             detail.setWordWrap(True)
-            layout.addWidget(detail)
+            text_host.addWidget(detail)
+        layout.addLayout(text_host, 1)
+
+        status = QLabel(row.status)
+        status.setObjectName("McpStatus")
+        layout.addWidget(status, 0, Qt.AlignRight | Qt.AlignVCenter)
 
 
 def _item_session_id(item) -> str:
@@ -528,12 +607,17 @@ def _item_session_id(item) -> str:
 
 
 def _item_title(item, *, language: str = 'zh') -> str:
+    text = _item_full_title(item, language=language)
+    return text[:34] + "..." if len(text) > 36 else text
+
+
+def _item_full_title(item, *, language: str = 'zh') -> str:
     if isinstance(item, dict):
         title = item.get("title") or item.get("last_user") or item.get("session_id") or ""
     else:
         title = getattr(item, "title", "") or getattr(item, "last_user", "") or getattr(item, "session_id", "")
     text = str(title or "").replace("\n", " ").strip()
-    return text[:34] + "..." if len(text) > 36 else text or Translator(language)('sidebar.untitled')
+    return text or Translator(language)('sidebar.untitled')
 
 
 def _item_meta(item, *, language: str = 'zh') -> str:

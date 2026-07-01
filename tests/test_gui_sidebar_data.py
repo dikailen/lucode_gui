@@ -6,16 +6,17 @@ from lucode.gui.sidebar_data import load_default_mcp_rows, load_default_skill_ca
 def test_load_default_skill_cards_contains_workbench_skills():
     cards = load_default_skill_cards()
     titles = [card.title for card in cards]
+    ids = [card.id for card in cards]
 
-    assert titles[:6] == [
+    assert titles == [
         "代码工程",
         "项目探索",
         "最终汇总",
         "技能创建",
-        "单脑执行",
-        "串行执行",
     ]
-    assert all("本地" in card.chips for card in cards[:6])
+    assert "solo_executor_contract" not in ids
+    assert "serial_executor_contract" not in ids
+    assert all("本地" in card.chips for card in cards)
 
 
 def test_load_default_mcp_rows_contains_core_and_image_draw_status():

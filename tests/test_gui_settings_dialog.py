@@ -13,7 +13,6 @@ if HAS_PYSIDE:
 
     from PySide6.QtWidgets import (  # noqa: E402
         QApplication,
-        QCheckBox,
         QComboBox,
         QFrame,
         QLabel,
@@ -26,7 +25,6 @@ if HAS_PYSIDE:
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.control_panel import ControlBar  # noqa: E402
     from lucode.gui.main_window import MainWindow  # noqa: E402
-    from lucode.gui.settings_panel import SettingsSidePanel  # noqa: E402
     from lucode.gui.settings_dialog import SettingsDialog  # noqa: E402
 
 
@@ -91,18 +89,18 @@ def test_settings_model_rows_are_compact_and_fixed_height(app):
     dialog = SettingsDialog(parent=None)
     dialog.resize(520, 760)
     dialog.set_models([
-        ("deepseek-v4-pro", "DeepSeek deepseek-v4-pro"),
-        ("mimo-v2-5-pro", "MiMo mimo-v2.5-pro"),
+        ("deepseek_v4_pro_model", "DeepSeek deepseek-v4-pro"),
+        ("mimo_v2_5_pro_model", "MiMo mimo-v2.5-pro"),
     ])
     dialog.set_initial(
         execution_mode="full",
         privacy_mode="local_first",
         role_models={
-            "orchestrator": "deepseek-v4-pro",
-            "executor": "deepseek-v4-pro",
-            "final_synthesizer": "mimo-v2-5-pro",
+            "orchestrator": "deepseek_v4_pro_model",
+            "executor": "deepseek_v4_pro_model",
+            "final_synthesizer": "mimo_v2_5_pro_model",
         },
-        worker_pool=["deepseek-v4-pro"],
+        worker_pool=["deepseek_v4_pro_model"],
     )
     dialog.show()
     app.processEvents()
@@ -111,7 +109,9 @@ def test_settings_model_rows_are_compact_and_fixed_height(app):
         row for row in dialog.findChildren(QFrame, "RoleRow")
         if row.property("roleModelRow") is True
     ]
+    refiner_row = dialog.findChild(QFrame, "RefinerRow")
     assert len(role_rows) >= 2
+    assert refiner_row is not None
     for row in role_rows:
         assert row.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
         assert row.maximumHeight() <= 76
@@ -122,60 +122,79 @@ def test_settings_model_rows_are_compact_and_fixed_height(app):
     assert orchestrator_combo is not None
     assert final_combo is not None
     assert refiner_toggle is not None
-    assert orchestrator_combo.maximumWidth() <= 230
-    assert final_combo.maximumWidth() <= 230
-    assert refiner_toggle.maximumWidth() <= 150
+    assert orchestrator_combo.maximumWidth() <= 250
+    assert final_combo.maximumWidth() <= 250
+    assert orchestrator_combo.currentText() == "deepseek-v4-pro"
+    assert "DeepSeek" not in orchestrator_combo.currentText()
+    assert "_" not in orchestrator_combo.currentText()
+    assert final_combo.currentText() == "mimo-v2.5-pro"
+    assert "MiMo" not in final_combo.currentText()
+    assert "_" not in final_combo.currentText()
+    assert refiner_toggle.maximumWidth() <= 110
     assert refiner_toggle.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+    assert refiner_toggle.text() == "已开启"
 
 
 def test_settings_worker_pool_uses_two_column_chip_grid(app):
     dialog = SettingsDialog(parent=None)
     dialog.resize(520, 760)
     dialog.set_models([
-        ("deepseek-v4-pro", "DeepSeek deepseek-v4-pro"),
-        ("deepseek-coder-pro", "DeepSeek deepseek-coder-pro"),
-        ("mimo-v2-5-pro", "MiMo mimo-v2.5-pro"),
-        ("mimo-coder-pro", "MiMo mimo-coder-pro"),
+        ("deepseek_v4_flash_model", "DeepSeek deepseek-v4-flash"),
+        ("deepseek_v4_pro_model", "DeepSeek deepseek-v4-pro"),
+        ("mimo_v2_5_model", "MiMo mimo-v2.5"),
+        ("mimo_v2_5_pro_model", "MiMo mimo-v2.5-pro"),
     ])
     dialog.set_initial(
         execution_mode="full",
         privacy_mode="local_first",
         role_models={
-            "orchestrator": "deepseek-v4-pro",
-            "executor": "deepseek-v4-pro",
-            "final_synthesizer": "mimo-v2-5-pro",
+            "orchestrator": "deepseek_v4_flash_model",
+            "executor": "deepseek_v4_flash_model",
+            "final_synthesizer": "mimo_v2_5_pro_model",
         },
-        worker_pool=["deepseek-v4-pro", "mimo-v2-5-pro"],
+        worker_pool=["deepseek_v4_flash_model", "mimo_v2_5_model"],
     )
     dialog.show()
     app.processEvents()
 
     pool_row = dialog.findChild(QFrame, "WorkerPoolRow")
     grid = dialog.findChild(QFrame, "WorkerPoolGrid")
-    chips = dialog.findChildren(QCheckBox, "WorkerPoolChip")
+    chips = dialog.findChildren(QPushButton, "WorkerPoolChip")
 
     assert pool_row is not None
     assert grid is not None
     assert grid.parentWidget() is pool_row
-    assert grid.property("columns") == 2
+    assert grid.property("columns") == 4
     assert pool_row.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
     assert pool_row.maximumHeight() <= 168
     assert len(chips) == 4
     assert all(chip.parentWidget() is grid for chip in chips)
-    assert all(chip.maximumWidth() <= 190 for chip in chips)
+    assert all(chip.maximumWidth() <= 168 for chip in chips)
+    assert all(chip.minimumWidth() == chip.maximumWidth() for chip in chips)
+    assert all(chip.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed for chip in chips)
     assert all(len(chip.text()) <= 24 for chip in chips)
-    assert {chip.property("model_id") for chip in chips if chip.isChecked()} == {
+    assert {chip.text() for chip in chips} == {
+        "deepseek-v4-flash",
         "deepseek-v4-pro",
-        "mimo-v2-5-pro",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+    }
+    assert all("DeepSeek" not in chip.text() and "MiMo" not in chip.text() for chip in chips)
+    assert all("_" not in chip.text() and "_model" not in chip.text() for chip in chips)
+    assert all(chip.isCheckable() for chip in chips)
+    assert all(chip.property("workerPoolChip") is True for chip in chips)
+    assert {chip.property("model_id") for chip in chips if chip.isChecked()} == {
+        "deepseek_v4_flash_model",
+        "mimo_v2_5_model",
     }
 
     emitted = []
     dialog.worker_pool_changed.connect(lambda value: emitted.append(value))
-    coder_chip = next(chip for chip in chips if chip.property("model_id") == "deepseek-coder-pro")
+    coder_chip = next(chip for chip in chips if chip.property("model_id") == "deepseek_v4_pro_model")
     coder_chip.click()
     app.processEvents()
 
-    assert "deepseek-coder-pro" in emitted[-1]
+    assert "deepseek_v4_pro_model" in emitted[-1]
 
 
 def test_settings_dialog_defaults_to_chinese_and_exposes_language_choice(app):
@@ -273,6 +292,36 @@ def test_settings_dialog_privacy_page_keeps_offline_control_and_hint(app):
     assert "offline" in hint.text().lower() or "离线" in hint.text()
 
 
+def test_settings_dialog_uses_compact_workspace_navigation_and_refiner_status(app):
+    dialog = SettingsDialog(parent=None)
+    dialog.set_initial(
+        execution_mode="auto",
+        privacy_mode="local_first",
+        role_models={"orchestrator": "", "executor": "", "final_synthesizer": ""},
+        query_refiner_enabled=False,
+        worker_pool=[],
+    )
+    dialog.show()
+    app.processEvents()
+
+    nav = dialog.findChild(QFrame, "SettingsNav")
+    refiner_row = dialog.findChild(QFrame, "RefinerRow")
+    refiner_toggle = dialog.findChild(QPushButton, "QueryRefinerToggle")
+    combo = dialog.findChild(QComboBox, "RoleModelCombo_orchestrator")
+    overview = dialog.findChild(QFrame, "SettingsSectionModelsOverview")
+    roles_section = dialog.findChild(QFrame, "SettingsSectionRoles")
+
+    assert nav is not None
+    assert nav.maximumHeight() <= 44
+    assert refiner_row is not None
+    assert refiner_toggle is not None
+    assert overview is not None
+    assert roles_section is not None
+    assert refiner_toggle.text() == "已关闭"
+    assert combo is not None
+    assert combo.maximumWidth() <= 250
+
+
 def test_settings_dialog_signals_still_update_chat_session(app, tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     dialog = SettingsDialog(parent=None)
@@ -308,33 +357,31 @@ def test_main_window_settings_button_opens_embedded_panel(app, tmp_path):
     app.processEvents()
     button = window.session_sidebar.findChild(QPushButton, "SidebarSettingsButton")
     splitter = window.findChild(QSplitter, "MainSplitter")
-    settings_host = window.findChild(QFrame, "SettingsPanelHost")
+    workspace_stack = window.findChild(QStackedWidget, "MainWorkspaceStack")
+    settings_page = window.findChild(QFrame, "SettingsWorkspacePage")
 
     assert button is not None
     assert splitter is not None
-    assert settings_host is not None
-    assert isinstance(window.settings_panel, SettingsSidePanel)
-    assert not window.settings_panel.isVisible()
-    assert splitter.sizes()[2] == 0
+    assert workspace_stack is not None
+    assert settings_page is not None
+    assert splitter.count() == 2
+    assert workspace_stack.currentWidget() is window.chat_workspace_page
 
     button.click()
     app.processEvents()
 
-    assert settings_host.isVisible()
-    assert window.settings_panel.isVisible()
-    assert window.settings_panel.current_view() == "settings"
-    assert window.settings_panel.parentWidget() is settings_host
+    assert workspace_stack.currentWidget() is settings_page
+    assert window.session_title_label.text() == "设置"
     assert window.findChild(SettingsDialog, "SettingsDialog") is None
 
     button.click()
     app.processEvents()
 
-    assert not settings_host.isVisible()
-    assert not window.settings_panel.isVisible()
-    assert splitter.sizes()[2] == 0
+    assert workspace_stack.currentWidget() is window.chat_workspace_page
+    assert window.session_title_label.text() == "新会话"
 
 
-def test_main_window_provider_manager_stays_inside_settings_panel(app, tmp_path):
+def test_main_window_provider_manager_stays_inside_settings_workspace(app, tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     window = MainWindow(workspace=tmp_path, chat_session=session)
     window.show()
@@ -345,7 +392,8 @@ def test_main_window_provider_manager_stays_inside_settings_panel(app, tmp_path)
     window.settings_dialog.provider_manager_button.click()
     app.processEvents()
 
-    assert window.settings_panel.isVisible()
+    workspace_stack = window.findChild(QStackedWidget, "MainWorkspaceStack")
+    assert workspace_stack.currentWidget() is window.settings_workspace_page
     assert window.settings_panel.current_view() == "providers"
     assert window.settings_panel.provider_content.isVisible()
 
@@ -353,6 +401,23 @@ def test_main_window_provider_manager_stays_inside_settings_panel(app, tmp_path)
     app.processEvents()
 
     assert window.settings_panel.current_view() == "settings"
+
+
+def test_main_window_settings_close_returns_to_chat_workspace(app, tmp_path):
+    session = GuiChatSession(workspace=tmp_path)
+    window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    window._open_settings_dialog()
+    app.processEvents()
+    assert window.workspace_stack.currentWidget() is window.settings_workspace_page
+
+    window.settings_panel.close_button.click()
+    app.processEvents()
+
+    assert window.workspace_stack.currentWidget() is window.chat_workspace_page
+    assert window.session_title_label.text() == "新会话"
 
 
 def test_main_window_language_switch_refreshes_and_persists(app, tmp_path):
@@ -368,7 +433,7 @@ def test_main_window_language_switch_refreshes_and_persists(app, tmp_path):
     assert window.action_button.toolTip() == "Send"
     assert window.model_display_button.toolTip().startswith("Supervisor planner:")
     assert window.session_sidebar.new_session_button.text() == "+ New chat"
-    assert window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").text() == "Skills"
+    assert window.session_sidebar.findChild(QPushButton, "SidebarTabPlugins").text() == "Plugins"
 
     restored = MainWindow(workspace=tmp_path, chat_session=GuiChatSession(workspace=tmp_path))
 

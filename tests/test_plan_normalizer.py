@@ -148,6 +148,65 @@ def test_validate_plan_has_no_route_side_effect(monkeypatch):
     assert plan.synthesis_instruction == "merge"
 
 
+def test_pipeline_gate_treats_suggest_verification_commands_as_readonly():
+    from runtime.execution.pipeline import apply_pipeline_gate
+
+    plan = PlannerResult(
+        route_type="multi_agent",
+        reason="项目体检",
+        refined_request="项目体检，不要修改任何文件，不要提交 git，不要安装依赖，最后给出下一步建议验证命令。",
+        tasks=[
+            _task(
+                "gui",
+                read_set=["lucode/gui"],
+                mcp=["project_filesystem_readonly", "code_locator"],
+            ),
+            _task(
+                "runtime",
+                read_set=["runtime"],
+                mcp=["project_filesystem_readonly", "code_locator"],
+            ),
+        ],
+        needs_synthesis=True,
+        synthesis_instruction="合并体检结论，并列出下一步建议验证命令。",
+    )
+    for task in plan.tasks:
+        task.title = "项目体检和建议验证命令"
+        task.instruction = "阅读相关文件，输出体检结论，并给出下一步建议验证命令。"
+
+    decision = apply_pipeline_gate(plan, plan.refined_request)
+
+    assert decision.should_verify is False
+    assert decision.test_intent is False
+    assert all("command_runner" not in task.mcp for task in plan.tasks)
+
+
+def test_pipeline_gate_keeps_command_runner_for_real_code_verification():
+    from runtime.execution.pipeline import apply_pipeline_gate
+
+    task = _task(
+        "fix",
+        write_intent=["runtime/foo.py"],
+        mcp=["project_filesystem_readonly", "code_locator", "workspace_edit"],
+    )
+    task.skill_id = "code_engineer"
+    task.title = "修复 runtime/foo.py 并运行 pytest 验证"
+    task.instruction = "修改 runtime/foo.py 后运行 pytest tests/test_foo.py 验证。"
+    plan = PlannerResult(
+        route_type="single_agent",
+        reason="代码修复",
+        refined_request="请修复 runtime/foo.py 并运行 pytest tests/test_foo.py 验证。",
+        tasks=[task],
+        needs_synthesis=False,
+    )
+
+    decision = apply_pipeline_gate(plan, plan.refined_request)
+
+    assert decision.should_verify is True
+    assert decision.test_intent is True
+    assert "command_runner" in task.mcp
+
+
 def test_dynamic_attempt_emits_plan_normalized_for_single_task_multi_agent(monkeypatch, tmp_path):
     from runtime.config.settings import RuntimeSettings
     from runtime.execution import dynamic

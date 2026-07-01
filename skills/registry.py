@@ -29,18 +29,18 @@ SKILLS = {
     },
     "full_supervisor": {
         "folder": "full-supervisor",
-        "description": "Full team mode supervisor role contract.",
+        "description": "Unified Agent Loop supervisor role contract.",
     },
     "full_worker_contract": {
         "folder": "full-worker-contract",
-        "description": "Full team mode worker role contract.",
+        "description": "Unified Agent Loop supervised worker role contract.",
     },
     "serial_executor_contract": {
         "folder": "serial-executor-contract",
-        "description": "Serial mode executor role contract.",
+        "description": "Conservative sequential scheduling executor contract.",
     },
     "solo_executor_contract": {
         "folder": "solo-executor-contract",
-        "description": "Solo mode executor role contract.",
+        "description": "Fast single-agent execution contract.",
     },
 }

@@ -80,7 +80,7 @@ def test_create_supervisor_agent_loads_full_supervisor_skill():
     assert agent.model == "model:supervisor-model"
     assert agent.mcp_servers == [server]
     assert "主管" in agent.instructions
-    assert "Full Supervisor Contract" in agent.instructions
+    assert "Unified Agent Loop Supervisor Contract" in agent.instructions
 
 
 def test_orchestrator_planner_skill_documents_memory_adoption_contract():

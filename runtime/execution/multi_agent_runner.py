@@ -949,7 +949,7 @@ def _render_supervisor_rework_prompt(
     ]
     return "\n".join(
         [
-            "你是 Lucode full 模式主管 Agent。请根据 WorkerReport 与 LeadReview findings 判断是否合格或需要返工。",
+            "你是 Lucode 统一 Agent Loop 的主管 Agent。请根据 WorkerReport 与 LeadReview findings 判断是否合格或需要返工。",
             "",
             "只允许输出 JSON，不要输出 Markdown：",
             '{"decision":"accept|rework","reason":"一句中文原因","rework":[{"task_id":"...","instruction":"..."}]}',
@@ -1159,7 +1159,7 @@ def _render_supervisor_approval_prompt(
     ]
     return "\n".join(
         [
-            "你是 Lucode full 模式主管 Agent。现在有 worker 申请越界或冲突写入，请裁决。",
+            "你是 Lucode 统一 Agent Loop 的主管 Agent。现在有 worker 申请越界或冲突写入，请裁决。",
             "",
             "只允许输出 JSON，不要输出 Markdown：",
             '{"decision":"approve|reject|serialize","reason":"一句中文原因"}',
@@ -1333,7 +1333,7 @@ def _render_supervisor_finalize_prompt(
     lead_rework_limits: list | None = None,
 ) -> str:
     lines = [
-        "你是 Lucode full 模式主管 Agent。请基于本轮 worker 结果生成面向用户的最终中文答案。",
+        "你是 Lucode 统一 Agent Loop 的主管 Agent。请基于本轮 worker 结果生成面向用户的最终中文答案。",
         "",
         "## 用户目标",
         str(refined_request or "").strip() or "未提供",

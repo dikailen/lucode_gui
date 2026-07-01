@@ -3,7 +3,6 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from lucode.gui.i18n import Translator, normalize_language
+from lucode.gui.model_display import display_model_name
 from lucode.gui.control_panel import (
     _index_for_value,
     privacy_mode_options,
@@ -44,6 +44,33 @@ def _compact_model_label(text: str, *, limit: int = 24) -> str:
     if len(label) <= limit:
         return label
     return label[: max(0, limit - 3)].rstrip() + "..."
+
+
+class _SettingsSection(QFrame):
+    def __init__(self, title: str, description: str = "", *, object_name: str = "SettingsSection", parent=None):
+        super().__init__(parent)
+        self.setObjectName(object_name)
+        self.setProperty("settingsSection", True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(8)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("SettingsSectionTitle")
+        layout.addWidget(self.title_label)
+
+        self.description_label = QLabel(description)
+        self.description_label.setObjectName("SettingsSectionDescription")
+        self.description_label.setWordWrap(True)
+        if description:
+            layout.addWidget(self.description_label)
+        else:
+            self.description_label.hide()
+
+        self.body_layout = QVBoxLayout()
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(8)
+        layout.addLayout(self.body_layout)
 
 
 class _RoleRow(QFrame):
@@ -75,9 +102,58 @@ class _RoleRow(QFrame):
         layout.addLayout(text_host, 1)
         self.combo = QComboBox()
         self.combo.setMinimumWidth(208)
-        self.combo.setMaximumWidth(224)
+        self.combo.setMaximumWidth(248)
+        self.combo.setMinimumHeight(34)
         self.combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         layout.addWidget(self.combo)
+
+
+class _RefinerRow(QFrame):
+    def __init__(self, *, language: str = "zh", parent=None):
+        super().__init__(parent)
+        self.setObjectName("RefinerRow")
+        self.setProperty("queryRefinerRow", True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(66)
+        self.setMaximumHeight(84)
+        self._t = Translator(language)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(12)
+
+        text_host = QVBoxLayout()
+        text_host.setContentsMargins(0, 0, 0, 0)
+        text_host.setSpacing(2)
+
+        name = QLabel(self._t("settings.refiner"))
+        name.setObjectName("RoleName")
+        text_host.addWidget(name)
+
+        description = QLabel(self._t("settings.refiner.description"))
+        description.setObjectName("RoleHintMuted")
+        description.setWordWrap(True)
+        text_host.addWidget(description)
+
+        layout.addLayout(text_host, 1)
+
+        self.toggle = QPushButton(self._t("settings.refiner.off"))
+        self.toggle.setObjectName("QueryRefinerToggle")
+        self.toggle.setCheckable(True)
+        self.toggle.setMinimumWidth(92)
+        self.toggle.setMaximumWidth(108)
+        self.toggle.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.toggle)
+
+    def set_checked(self, checked: bool) -> None:
+        self.toggle.setChecked(bool(checked))
+        self.toggle.setText(self._t("settings.refiner.on") if checked else self._t("settings.refiner.off"))
+
+    def set_language(self, language: str) -> None:
+        self._t = Translator(language)
+        self.findChild(QLabel, "RoleName").setText(self._t("settings.refiner"))
+        self.findChild(QLabel, "RoleHintMuted").setText(self._t("settings.refiner.description"))
+        self.set_checked(self.toggle.isChecked())
 
 
 class _WorkerPoolRow(QFrame):
@@ -88,17 +164,17 @@ class _WorkerPoolRow(QFrame):
         self.setObjectName("WorkerPoolRow")
         self.setProperty("workerPoolRow", True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(112)
-        self.setMaximumHeight(168)
+        self.setMinimumHeight(104)
+        self.setMaximumHeight(152)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 8, 0, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(7)
 
         self._t = Translator(language)
         header = QVBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(3)
-        name = QLabel(role_label('executor', language) + self._t('settings.worker_pool.name_suffix'))
+        name = QLabel(self._t('settings.worker_pool.name'))
         name.setObjectName("RoleName")
         header.addWidget(name)
         hint = QLabel(self._t('settings.worker_pool.hint'))
@@ -109,16 +185,15 @@ class _WorkerPoolRow(QFrame):
 
         self._checks_host = QFrame()
         self._checks_host.setObjectName("WorkerPoolGrid")
-        self._checks_host.setProperty("columns", 2)
+        self._columns = 4
+        self._checks_host.setProperty("columns", self._columns)
         self._checks_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._checks_layout = QGridLayout(self._checks_host)
         self._checks_layout.setContentsMargins(0, 0, 0, 0)
         self._checks_layout.setHorizontalSpacing(8)
         self._checks_layout.setVerticalSpacing(6)
-        self._checks_layout.setColumnStretch(0, 1)
-        self._checks_layout.setColumnStretch(1, 1)
         layout.addWidget(self._checks_host)
-        self._checks: list[QCheckBox] = []
+        self._checks: list[QPushButton] = []
 
     def set_models(self, models, selected) -> None:
         while self._checks_layout.count():
@@ -129,19 +204,21 @@ class _WorkerPoolRow(QFrame):
         self._checks = []
         selected_set = {str(item) for item in (selected or [])}
         for index, (model_id, text) in enumerate(models):
-            box = QCheckBox(_compact_model_label(text))
+            display_text = display_model_name(model_id, text)
+            box = QPushButton(_compact_model_label(display_text))
             box.setObjectName("WorkerPoolChip")
+            box.setCheckable(True)
             box.setProperty("model_id", model_id)
             box.setProperty("modelObjectName", f"WorkerPoolChip_{_object_suffix(model_id)}")
             box.setProperty("workerPoolChip", True)
             box.setToolTip(str(text))
             box.setChecked(model_id in selected_set)
-            box.setMinimumWidth(150)
-            box.setMaximumWidth(190)
+            box.setMinimumWidth(168)
+            box.setMaximumWidth(168)
             box.setMinimumHeight(30)
             box.setMaximumHeight(34)
-            box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self._checks_layout.addWidget(box, index // 2, index % 2)
+            box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self._checks_layout.addWidget(box, index // self._columns, index % self._columns)
             self._checks.append(box)
 
     def selected_models(self) -> list[str]:
@@ -182,10 +259,11 @@ class SettingsContent(QWidget):
         self._building = True
         self._role_rows: dict[str, _RoleRow] = {}
         self._pool_row: _WorkerPoolRow | None = None
+        self._refiner_row: _RefinerRow | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(14)
+        outer.setSpacing(10)
 
         self.title_label = QLabel(self._t('settings.title'))
         self.title_label.setObjectName("SettingsTitle")
@@ -194,16 +272,16 @@ class SettingsContent(QWidget):
 
         body = QVBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(16)
+        body.setSpacing(10)
         outer.addLayout(body, 1)
 
         nav = QFrame()
         nav.setObjectName("SettingsNav")
-        nav.setMaximumHeight(48)
+        nav.setMaximumHeight(42)
         nav.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         nav_layout = QHBoxLayout(nav)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(18)
+        nav_layout.setSpacing(14)
         body.addWidget(nav)
 
         self._tab_buttons: dict[str, QPushButton] = {}
@@ -229,6 +307,7 @@ class SettingsContent(QWidget):
         body.addWidget(self.content_stack, 1)
 
         self._pages: dict[str, QWidget] = {}
+        self._section_headers: dict[str, _SettingsSection] = {}
         self._build_models_page()
         self._build_privacy_page()
         self._build_providers_page()
@@ -238,19 +317,14 @@ class SettingsContent(QWidget):
 
         self.privacy_combo = QComboBox()
         self.privacy_combo.setObjectName("PrivacyModeCombo")
+        self.privacy_combo.setMinimumWidth(220)
+        self.privacy_combo.setMaximumWidth(260)
+        self.privacy_combo.setMinimumHeight(34)
         for key, text in privacy_mode_options(self._language):
             self.privacy_combo.addItem(text, key)
         self.privacy_combo.currentIndexChanged.connect(self._emit_privacy_mode)
         self._privacy_controls_layout.addWidget(self.privacy_combo)
-
-        self.refiner_toggle = QPushButton(self._t('settings.refiner'))
-        self.refiner_toggle.setObjectName("QueryRefinerToggle")
-        self.refiner_toggle.setCheckable(True)
-        self.refiner_toggle.setMaximumWidth(136)
-        self.refiner_toggle.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.refiner_toggle.toggled.connect(self._on_refiner_toggled)
-        self._models_actions_layout.addWidget(self.refiner_toggle)
-        self._models_actions_layout.addStretch(1)
+        self._privacy_controls_layout.addStretch(1)
 
         self.provider_manager_button = QPushButton(self._t('settings.provider.manage'))
         self.provider_manager_button.setObjectName("ProviderManagerButton")
@@ -264,13 +338,6 @@ class SettingsContent(QWidget):
         self.custom_provider_button.clicked.connect(self.custom_provider_requested.emit)
         self._providers_actions_layout.addWidget(self.custom_provider_button)
         self._providers_actions_layout.addStretch(1)
-
-        self.roles_host = QFrame()
-        self.roles_host.setObjectName("RolesHost")
-        self._roles_layout = QVBoxLayout(self.roles_host)
-        self._roles_layout.setContentsMargins(0, 0, 0, 0)
-        self._roles_layout.setSpacing(6)
-        self._models_page_layout.addWidget(self.roles_host, 1)
 
         self._select_page("Models")
 
@@ -288,42 +355,66 @@ class SettingsContent(QWidget):
 
     def _build_models_page(self) -> None:
         page, layout = self._new_page("Models", self._t('settings.tab.models'))
-        self.models_description = QLabel(self._t('settings.models.description'))
-        description = self.models_description
-        description.setObjectName("SettingsDescription")
-        description.setWordWrap(True)
-        layout.addWidget(description)
-        self._models_actions_layout = QHBoxLayout()
-        self._models_actions_layout.setSpacing(8)
-        layout.addLayout(self._models_actions_layout)
-        self._models_page_layout = layout
+        overview = _SettingsSection(
+            self._t('settings.tab.models'),
+            self._t('settings.models.description'),
+            object_name="SettingsSectionModelsOverview",
+        )
+        self._section_headers["models_overview"] = overview
+        self.models_description = overview.description_label
+        layout.addWidget(overview)
+        self._refiner_row = _RefinerRow(language=self._language)
+        self._refiner_row.toggle.toggled.connect(self._on_refiner_toggled)
+        overview.body_layout.addWidget(self._refiner_row)
+
+        role_section = _SettingsSection(
+            self._t('role.orchestrator'),
+            "",
+            object_name="SettingsSectionRoles",
+        )
+        self._section_headers["roles"] = role_section
+        self.roles_host = QFrame()
+        self.roles_host.setObjectName("RolesHost")
+        self._roles_layout = QVBoxLayout(self.roles_host)
+        self._roles_layout.setContentsMargins(0, 0, 0, 0)
+        self._roles_layout.setSpacing(4)
+        role_section.body_layout.addWidget(self.roles_host)
+        layout.addWidget(role_section, 1)
         self._add_page("Models", page)
 
     def _build_privacy_page(self) -> None:
         page, layout = self._new_page("Privacy", self._t('settings.tab.privacy'))
-        self.privacy_hint = QLabel(self._t('settings.privacy.description'))
+        section = _SettingsSection(
+            self._t('settings.privacy.label'),
+            self._t('settings.privacy.description'),
+            object_name="SettingsSectionPrivacy",
+        )
+        self._section_headers["privacy"] = section
+        self.privacy_hint = section.description_label
         self.privacy_hint.setObjectName("PrivacyModeHint")
-        self.privacy_hint.setWordWrap(True)
-        layout.addWidget(self.privacy_hint)
         self._privacy_controls_layout = QHBoxLayout()
         self._privacy_controls_layout.setSpacing(10)
         self.privacy_label = QLabel(self._t('settings.privacy.label'))
         self.privacy_label.setObjectName("FieldLabel")
         self._privacy_controls_layout.addWidget(self.privacy_label)
-        layout.addLayout(self._privacy_controls_layout)
+        section.body_layout.addLayout(self._privacy_controls_layout)
+        layout.addWidget(section)
         layout.addStretch(1)
         self._add_page("Privacy", page)
 
     def _build_providers_page(self) -> None:
         page, layout = self._new_page("Providers", self._t('settings.tab.providers'))
-        self.providers_description = QLabel(self._t('settings.providers.description'))
-        description = self.providers_description
-        description.setObjectName("SettingsDescription")
-        description.setWordWrap(True)
-        layout.addWidget(description)
+        section = _SettingsSection(
+            self._t('settings.tab.providers'),
+            self._t('settings.providers.description'),
+            object_name="SettingsSectionProviders",
+        )
+        self._section_headers["providers"] = section
+        self.providers_description = section.description_label
         self._providers_actions_layout = QHBoxLayout()
         self._providers_actions_layout.setSpacing(8)
-        layout.addLayout(self._providers_actions_layout)
+        section.body_layout.addLayout(self._providers_actions_layout)
+        layout.addWidget(section)
         layout.addStretch(1)
         self._add_page("Providers", page)
 
@@ -385,7 +476,7 @@ class SettingsContent(QWidget):
         page.setObjectName(f"SettingsPage{key}")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
         title = QLabel(title_text)
         title.setObjectName(f"SettingsPageTitle{key}")
         title.setProperty('page_key', key)
@@ -430,17 +521,26 @@ class SettingsContent(QWidget):
             title = page.findChild(QLabel, f'SettingsPageTitle{key}')
             if title is not None:
                 title.setText(self._t(f'settings.tab.{key.lower()}'))
-        self.refiner_toggle.setText(self._t('settings.refiner'))
+        if self._refiner_row is not None:
+            self._refiner_row.set_language(self._language)
         self.provider_manager_button.setText(self._t('settings.provider.manage'))
         self.provider_manager_button.setToolTip(self._t('settings.provider.manage_tip'))
         self.custom_provider_button.setText(self._t('settings.provider.custom'))
         self.custom_provider_button.setToolTip(self._t('settings.provider.custom_tip'))
         self.close_button.setText(self._t('settings.close'))
         self.models_description.setText(self._t('settings.models.description'))
+        if "models_overview" in self._section_headers:
+            self._section_headers["models_overview"].title_label.setText(self._t('settings.tab.models'))
         self.privacy_hint.setText(self._t('settings.privacy.description'))
         self.privacy_label.setText(self._t('settings.privacy.label'))
+        if "privacy" in self._section_headers:
+            self._section_headers["privacy"].title_label.setText(self._t('settings.privacy.label'))
         self._refresh_privacy_options()
         self.providers_description.setText(self._t('settings.providers.description'))
+        if "providers" in self._section_headers:
+            self._section_headers["providers"].title_label.setText(self._t('settings.tab.providers'))
+        if "roles" in self._section_headers:
+            self._section_headers["roles"].title_label.setText(self._t('role.orchestrator'))
         self.language_description.setText(self._t('settings.language.description'))
         self.language_zh_button.setText(self._t('settings.language.zh'))
         self.language_en_button.setText(self._t('settings.language.en'))
@@ -486,7 +586,8 @@ class SettingsContent(QWidget):
         self.privacy_combo.setCurrentIndex(
             _index_for_value(privacy_mode_options(self._language), normalize_privacy_mode(privacy_mode))
         )
-        self.refiner_toggle.setChecked(self._refiner_enabled)
+        if self._refiner_row is not None:
+            self._refiner_row.set_checked(self._refiner_enabled)
         self._building = False
         self._rebuild_role_rows()
 
@@ -496,7 +597,8 @@ class SettingsContent(QWidget):
 
     def set_enabled(self, enabled: bool) -> None:
         self.privacy_combo.setEnabled(enabled)
-        self.refiner_toggle.setEnabled(enabled)
+        if self._refiner_row is not None:
+            self._refiner_row.toggle.setEnabled(enabled)
         self.provider_manager_button.setEnabled(enabled)
         self.custom_provider_button.setEnabled(enabled)
         for row in self._role_rows.values():
@@ -531,7 +633,7 @@ class SettingsContent(QWidget):
             row = _RoleRow(role, label, usage, language=self._language)
             row.combo.setObjectName(f"RoleModelCombo_{role}")
             for model_id, text in self._models:
-                row.combo.addItem(text, model_id)
+                row.combo.addItem(display_model_name(model_id, text), model_id)
             target = self._role_models.get(role) or ""
             idx = row.combo.findData(target)
             row.combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -543,6 +645,8 @@ class SettingsContent(QWidget):
 
     def _on_refiner_toggled(self, checked: bool) -> None:
         self._refiner_enabled = bool(checked)
+        if self._refiner_row is not None:
+            self._refiner_row.set_checked(self._refiner_enabled)
         self._rebuild_role_rows()
         if not self._building:
             self.query_refiner_toggled.emit(self._refiner_enabled)

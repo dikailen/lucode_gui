@@ -74,6 +74,7 @@ class HistoryStore(SessionStore):
                 "created_at": summary.created_at,
                 "updated_at": summary.updated_at,
                 "message_count": summary.message_count,
+                "title": summary.title,
                 "last_user": summary.last_user,
                 "last_assistant": summary.last_assistant,
                 "indexed_at": _now_iso(),
@@ -351,6 +352,7 @@ class HistoryFacadeSessionView:
                     created_at=item.created_at,
                     updated_at=item.updated_at,
                     message_count=item.message_count,
+                    title=item.title,
                     last_user=item.last_user,
                     last_assistant=item.last_assistant,
                 )
@@ -374,7 +376,7 @@ class HistoryFacadeSessionView:
 
 
 def _history_item_from_summary(summary: SessionSummary, *, storage_kind: str) -> HistoryItem:
-    title = _short(summary.last_user or summary.last_assistant or summary.session_id, 42)
+    title = _short(summary.title or summary.last_user or summary.last_assistant or summary.session_id, 42)
     return HistoryItem(
         history_id=summary.session_id,
         session_id=summary.session_id,

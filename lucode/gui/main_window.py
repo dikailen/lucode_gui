@@ -5,17 +5,21 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QKeyEvent
+from PySide6.QtGui import QColor, QCloseEvent, QDragEnterEvent, QDropEvent, QFontMetrics, QKeyEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -27,7 +31,10 @@ from lucode.gui.chat_session import GuiChatSession
 from lucode.gui.control_panel import ControlBar
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
-from lucode.gui.session_sidebar import SessionSidebar
+from lucode.gui.model_display import compact_model_name, display_model_name
+from lucode.gui.plugin_state import PluginStateStore
+from lucode.gui.session_sidebar import SessionSidebar, _McpStatusRow, _SkillCardRow
+from lucode.gui.sidebar_data import load_default_mcp_rows, load_default_skill_cards
 from lucode.gui.settings_dialog import SettingsContent
 from lucode.gui.settings_panel import SettingsSidePanel
 from lucode.gui.stream_routing import classify_gui_stream_event
@@ -71,6 +78,68 @@ class ChatInput(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+class _PluginDropSection(QFrame):
+    files_dropped = Signal(str, list)
+
+    def __init__(self, role: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.role = role
+        self.setAcceptDrops(True)
+        self.setProperty("dropActive", False)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            self.setProperty("dropActive", True)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self.setProperty("dropActive", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self.setProperty("dropActive", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.files_dropped.emit(self.role, paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+
+class HeaderToolButton(QPushButton):
+    def __init__(self, icon_kind: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.icon_kind = icon_kind
+        self.setText("")
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = QColor("#6f7d92")
+        if self.underMouse():
+            color = QColor("#334155")
+        pen = QPen(color, 1.8)
+        painter.setPen(pen)
+        rect = self.rect().adjusted(7, 7, -7, -7)
+        painter.drawRoundedRect(rect, 3, 3)
+        if self.icon_kind == "terminal":
+            y = rect.bottom() - 4
+            painter.drawLine(rect.left() + 5, y, rect.left() + 12, y)
+        else:
+            x = rect.right() - 7
+            painter.drawLine(x, rect.top() + 3, x, rect.bottom() - 3)
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -112,6 +181,8 @@ class MainWindow(QMainWindow):
         self._status_event_key = "main.ready"
         self.work_task: asyncio.Task | None = None
         self.work_task_id = 0
+        self.plugin_state_store = PluginStateStore(self.workspace)
+        self.removed_skill_ids: set[str] = self.plugin_state_store.load_removed_skill_ids()
         self._turn_start: float = 0.0
         self._closing = False
 
@@ -125,22 +196,29 @@ class MainWindow(QMainWindow):
         self.session_sidebar = SessionSidebar()
         self.session_sidebar.set_session_store(self.chat_session.history_browser)
         self.session_sidebar.new_session_requested.connect(self._start_new_session)
+        self.session_sidebar.chats_requested.connect(self._show_chat_workspace)
         self.session_sidebar.session_selected.connect(self._resume_selected_session)
         self.session_sidebar.session_deleted.connect(self._on_sidebar_session_deleted)
         self.session_sidebar.settings_requested.connect(self._toggle_settings_panel)
+        self.session_sidebar.plugins_requested.connect(self._show_plugins_workspace)
         self.session_sidebar.collapse_requested.connect(self._toggle_session_sidebar)
         self.sidebar_toggle_button = self.session_sidebar.sidebar_toggle_button
         self.main_splitter.addWidget(self.session_sidebar)
 
-        chat_pane = QWidget()
-        chat_pane.setObjectName("ChatPane")
-        root_layout = QVBoxLayout(chat_pane)
-        root_layout.setContentsMargins(0, 0, 0, 16)
-        root_layout.setSpacing(0)
-        self.main_splitter.addWidget(chat_pane)
+        self.workspace_stack = QStackedWidget()
+        self.workspace_stack.setObjectName("MainWorkspaceStack")
+        self.main_splitter.addWidget(self.workspace_stack)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
         self.main_splitter.setSizes([294, 866])
+
+        chat_pane = QWidget()
+        chat_pane.setObjectName("ChatWorkspacePage")
+        self.chat_workspace_page = chat_pane
+        root_layout = QVBoxLayout(chat_pane)
+        root_layout.setContentsMargins(0, 0, 0, 16)
+        root_layout.setSpacing(0)
+        self.workspace_stack.addWidget(chat_pane)
 
         header = QFrame()
         header.setObjectName("ChatHeader")
@@ -151,7 +229,15 @@ class MainWindow(QMainWindow):
 
         self.session_title_label = QLabel(self._t('main.new_chat'))
         self.session_title_label.setObjectName("SessionTitleLabel")
+        self.session_title_label.setMinimumWidth(0)
+        self.session_title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         header_layout.addWidget(self.session_title_label, 1)
+
+        self.header_tool_buttons: list[QPushButton] = []
+        self.terminal_tool_button = self._make_header_tool_button("terminal", "终端", "ComposerTerminalButton", "terminal")
+        self.browser_tool_button = self._make_header_tool_button("browser", "浏览器", "ComposerBrowserButton", "browser")
+        header_layout.addWidget(self.terminal_tool_button)
+        header_layout.addWidget(self.browser_tool_button)
 
         self.top_status_chip = QLabel()
         self.top_status_chip.setObjectName("TopStatusChip")
@@ -188,13 +274,11 @@ class MainWindow(QMainWindow):
 
         self.control_bar = ControlBar(language=self.language)
         self.settings_dialog = SettingsContent(parent=self, show_footer=False)
-        self.settings_panel_host = QFrame()
-        self.settings_panel_host.setObjectName("SettingsPanelHost")
-        self.settings_panel_host.setMinimumWidth(0)
-        self.settings_panel_host.setMaximumWidth(460)
-        settings_panel_host_layout = QHBoxLayout(self.settings_panel_host)
-        settings_panel_host_layout.setContentsMargins(8, 14, 16, 14)
-        settings_panel_host_layout.setSpacing(0)
+        self.settings_workspace_page = QFrame()
+        self.settings_workspace_page.setObjectName("SettingsWorkspacePage")
+        settings_workspace_layout = QHBoxLayout(self.settings_workspace_page)
+        settings_workspace_layout.setContentsMargins(24, 18, 24, 18)
+        settings_workspace_layout.setSpacing(0)
 
         self.settings_panel = SettingsSidePanel(
             settings_content=self.settings_dialog,
@@ -202,13 +286,16 @@ class MainWindow(QMainWindow):
             user_home=self.chat_session.workspace_context.user_home,
             privacy_mode=self.chat_session.settings.privacy_mode,
             language=self.language,
-            parent=self.settings_panel_host,
+            parent=self.settings_workspace_page,
         )
         self.settings_panel.providers_changed.connect(self._refresh_configured_models)
-        settings_panel_host_layout.addWidget(self.settings_panel)
-        self.main_splitter.addWidget(self.settings_panel_host)
-        self.main_splitter.setStretchFactor(2, 0)
-        self.main_splitter.setSizes([294, 866, 0])
+        self.settings_panel.close_requested.connect(self._show_chat_workspace)
+        settings_workspace_layout.addWidget(self.settings_panel)
+        self.workspace_stack.addWidget(self.settings_workspace_page)
+
+        self.plugin_workspace_page = self._create_plugin_workspace()
+        self.workspace_stack.addWidget(self.plugin_workspace_page)
+        self.workspace_stack.setCurrentWidget(self.chat_workspace_page)
         self._init_control_bar()
 
         self.scroll_area = QScrollArea()
@@ -260,12 +347,12 @@ class MainWindow(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(8)
+
         toolbar_layout.addStretch(1)
 
-        self.composer_tool_buttons: list[QPushButton] = []
         self.model_display_button = QPushButton(toolbar)
         self.model_display_button.setObjectName("ComposerModelButton")
-        self.model_display_button.clicked.connect(self._open_settings_models_page)
+        self.model_display_button.clicked.connect(self._show_model_menu)
         toolbar_layout.addWidget(self.model_display_button)
 
         self.action_button = QPushButton("\u2191", toolbar)
@@ -294,6 +381,19 @@ class MainWindow(QMainWindow):
         self.control_bar.set_language(self.language)
         self._refresh_header_controls()
         self.session_sidebar.refresh()
+
+    def _make_header_tool_button(self, icon_kind: str, tooltip: str, object_name: str, tool_id: str) -> QPushButton:
+        button = HeaderToolButton(icon_kind)
+        button.setObjectName(object_name)
+        button.setToolTip(tooltip)
+        button.setProperty("headerTool", True)
+        button.setProperty("tool_id", tool_id)
+        button.setProperty("activeTool", False)
+        button.setFixedSize(34, 30)
+        button.setCursor(Qt.PointingHandCursor)
+        button.clicked.connect(lambda _checked=False, message=tooltip: self.set_status("idle", f"{message}入口已预留"))
+        self.header_tool_buttons.append(button)
+        return button
 
     def _init_control_bar(self) -> None:
         models = self.chat_session.list_configured_models()
@@ -341,7 +441,7 @@ class MainWindow(QMainWindow):
             return
         model_id = _first_or_empty(getattr(self.chat_session.settings, "orchestrator_model_priority", []))
         label = self._model_display_label(model_id)
-        self.model_display_button.setText(_compact_model_label(label))
+        self.model_display_button.setText(f"{compact_model_name(label)}  ▾")
         self.model_display_button.setToolTip(f"{self._t('role.orchestrator')}: {label}")
         self.model_display_button.setProperty("model_id", model_id)
 
@@ -351,7 +451,7 @@ class MainWindow(QMainWindow):
             return self._t('widgets.unassigned')
         for item_id, label in self.chat_session.list_configured_models():
             if item_id == clean:
-                return str(label or clean)
+                return display_model_name(item_id, label)
         return clean
 
     def _refresh_action_button(self) -> None:
@@ -393,19 +493,22 @@ class MainWindow(QMainWindow):
         self.set_status_i18n(self._status_state, self._status_event_key)
 
     def _toggle_settings_panel(self) -> None:
-        if self.settings_panel.isVisible() and self.settings_panel.current_view() == "settings":
-            self.settings_panel.close_panel()
+        if self.workspace_stack.currentWidget() is self.settings_workspace_page and self.settings_panel.current_view() == "settings":
+            self._show_chat_workspace()
             return
         self._open_settings_dialog()
 
     def _open_settings_dialog(self) -> None:
+        self._show_settings_workspace()
         self.settings_panel.show_settings()
 
     def _open_provider_manager(self) -> None:
+        self._show_settings_workspace()
         self.settings_panel.set_privacy_mode(self.chat_session.settings.privacy_mode)
         self.settings_panel.show_provider_manager()
 
     def _open_custom_provider_manager(self) -> None:
+        self._show_settings_workspace()
         self.settings_panel.set_privacy_mode(self.chat_session.settings.privacy_mode)
         self.settings_panel.show_provider_manager(custom=True)
 
@@ -437,9 +540,20 @@ class MainWindow(QMainWindow):
         self.session_sidebar.set_collapsed(collapsed)
         self.sidebar_toggle_button.setText("⟩" if collapsed else "⟨")
 
+        self._sync_splitter_sidebar_width(collapsed=collapsed)
+
+    def _sync_splitter_sidebar_width(self, *, collapsed: bool | None = None) -> None:
+        if collapsed is None:
+            collapsed = bool(self.session_sidebar.property("collapsed"))
+        sidebar_width = 64 if collapsed else 294
+        current_total = sum(self.main_splitter.sizes())
+        total = max(current_total, self.width(), sidebar_width + 320)
+        self.main_splitter.setSizes([sidebar_width, max(320, total - sidebar_width)])
+
     def _start_new_session(self) -> None:
         if not self.turn_guard.can_start_new_turn:
             return
+        self._show_chat_workspace()
         self.chat_session.new_session()
         self.session_sidebar.select_session("")
         self._clear_message_area()
@@ -451,7 +565,10 @@ class MainWindow(QMainWindow):
             return
         selected_id = str(session_id or "").strip()
         if not selected_id:
+            self._show_chat_workspace()
             return
+        self.workspace_stack.setCurrentWidget(self.chat_workspace_page)
+        self.session_sidebar.set_active_tab("chats")
         messages = self.chat_session.resume_session(selected_id)
         current_id = str(self.chat_session.current_session_id or "").strip()
         if not current_id:
@@ -467,9 +584,7 @@ class MainWindow(QMainWindow):
                 self.add_message("user", content)
             elif role == "assistant":
                 self.add_answer_block(content)
-        self.session_title_label.setText(
-            self.session_sidebar.session_title(current_id) or _title_from_messages(messages) or self._t('main.history')
-        )
+        self._set_session_title(self.session_sidebar.session_title(current_id) or self._t('main.history'))
         self.set_status_i18n("idle", "main.event.restored")
 
     def _on_sidebar_session_deleted(self, session_id: str) -> None:
@@ -614,7 +729,173 @@ class MainWindow(QMainWindow):
         self.set_status_i18n("idle", "main.event.retry_prefilled")
 
     def _open_settings_models_page(self) -> None:
+        self._show_settings_workspace()
         self.settings_panel.show_settings("Models")
+
+    def _show_chat_workspace(self) -> None:
+        self.workspace_stack.setCurrentWidget(self.chat_workspace_page)
+        self.session_sidebar.set_active_tab("chats")
+        self.session_sidebar.select_session(str(self.chat_session.current_session_id or ""))
+        title = str(self.session_sidebar.session_title(str(self.chat_session.current_session_id or "")) or "").strip()
+        if title:
+            self._set_session_title(title)
+            return
+        if not str(self.session_title_label.text() or "").strip() or self.session_title_label.text() in {"设置", "Settings", "插件", "Plugins"}:
+            self.session_title_label.setText(self._t('main.new_chat'))
+
+    def _show_settings_workspace(self) -> None:
+        self.workspace_stack.setCurrentWidget(self.settings_workspace_page)
+        self.session_sidebar.set_active_tab("settings")
+        self.session_title_label.setText(self._t('settings.title'))
+
+    def _show_plugins_workspace(self) -> None:
+        self.workspace_stack.setCurrentWidget(self.plugin_workspace_page)
+        self.session_sidebar.set_active_tab("plugins")
+        self.session_title_label.setText(self._t('sidebar.plugins'))
+
+    def _create_plugin_workspace(self) -> QFrame:
+        page = QFrame()
+        page.setObjectName("PluginWorkspacePage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(10)
+
+        title = QLabel(self._t('sidebar.plugins'))
+        title.setObjectName("PluginWorkspaceTitle")
+        layout.addWidget(title)
+
+        body = QHBoxLayout()
+        body_host = QFrame()
+        body_host.setObjectName("PluginWorkspaceBody")
+        body_host.setLayout(body)
+        body.setSpacing(12)
+        layout.addWidget(body_host, 1)
+
+        skills_panel = _PluginDropSection("skills")
+        skills_panel.setObjectName("PluginWorkspaceSection")
+        skills_panel.setProperty("pluginSectionRole", "skills")
+        skills_panel.files_dropped.connect(self._on_plugin_files_dropped)
+        skills_layout = QVBoxLayout(skills_panel)
+        skills_layout.setContentsMargins(0, 0, 0, 0)
+        skills_layout.setSpacing(0)
+        skills_layout.addLayout(self._plugin_section_header(self._t('sidebar.skill_library'), "SkillDropHint", "拖入 Skill 文件夹或 zip 安装"))
+        skill_cards = load_default_skill_cards() + self.plugin_state_store.load_custom_skill_cards()
+        for card in skill_cards:
+            if card.id in self.removed_skill_ids:
+                continue
+            row = _SkillCardRow(card, deletable=not _is_core_skill_card(card))
+            row.delete_requested.connect(self._on_skill_delete_requested)
+            skills_layout.addWidget(row)
+        skills_layout.addStretch(1)
+        body.addWidget(skills_panel, 8)
+
+        mcp_panel = _PluginDropSection("mcp")
+        mcp_panel.setObjectName("PluginWorkspaceSection")
+        mcp_panel.setProperty("pluginSectionRole", "mcp")
+        mcp_panel.setMaximumWidth(260)
+        mcp_panel.files_dropped.connect(self._on_plugin_files_dropped)
+        mcp_layout = QVBoxLayout(mcp_panel)
+        mcp_layout.setContentsMargins(0, 0, 0, 0)
+        mcp_layout.setSpacing(0)
+        mcp_layout.addLayout(self._plugin_section_header(self._t('sidebar.mcp_services'), "McpDropHint", "拖入 MCP JSON 配置"))
+        mcp_rows = load_default_mcp_rows() + self.plugin_state_store.load_custom_mcp_rows()
+        for row in mcp_rows:
+            mcp_layout.addWidget(_McpStatusRow(row))
+        mcp_layout.addStretch(1)
+        body.addWidget(mcp_panel, 2)
+        return page
+
+    def _plugin_section_header(self, title: str, hint_object_name: str, hint_text: str) -> QHBoxLayout:
+        header = QHBoxLayout()
+        header.setContentsMargins(12, 0, 12, 0)
+        header.setSpacing(8)
+        title_label = QLabel(title)
+        title_label.setObjectName("PluginSectionTitle")
+        header.addWidget(title_label)
+        header.addStretch(1)
+        hint = QLabel(hint_text)
+        hint.setObjectName(hint_object_name)
+        header.addWidget(hint)
+        return header
+
+    def _on_plugin_files_dropped(self, role: str, paths: list[str]) -> None:
+        installed = 0
+        errors: list[str] = []
+        for raw_path in paths:
+            try:
+                if role == "skills":
+                    self.plugin_state_store.install_skill_from_path(raw_path)
+                elif role == "mcp":
+                    self.plugin_state_store.install_mcp_from_path(raw_path)
+                else:
+                    continue
+                installed += 1
+            except Exception as exc:
+                errors.append(f"{Path(raw_path).name}: {exc}")
+        if installed:
+            self.removed_skill_ids = self.plugin_state_store.load_removed_skill_ids()
+            self._rebuild_plugin_workspace()
+            self.set_status_i18n("idle", "main.ready")
+        if errors:
+            QMessageBox.warning(self, "插件安装失败", "\n".join(errors))
+
+    def _on_skill_delete_requested(self, skill_id: str) -> None:
+        normalized = str(skill_id or "").strip()
+        if not normalized:
+            return
+        matching_card = next((card for card in load_default_skill_cards() + self.plugin_state_store.load_custom_skill_cards() if card.id == normalized), None)
+        if matching_card is None or _is_core_skill_card(matching_card):
+            return
+        if not self._confirm_skill_delete(matching_card.title):
+            return
+        try:
+            self.removed_skill_ids = self.plugin_state_store.mark_skill_removed(normalized)
+        except Exception:
+            QMessageBox.warning(self, self._t('sidebar.skill_delete_failed_title'), self._t('sidebar.skill_delete_failed_prompt'))
+            return
+        self._rebuild_plugin_workspace()
+
+    def _confirm_skill_delete(self, skill_title: str) -> bool:
+        answer = QMessageBox.question(
+            self,
+            self._t('sidebar.skill_delete_title'),
+            self._t('sidebar.skill_delete_prompt', skill=skill_title),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _rebuild_plugin_workspace(self) -> None:
+        old_page = self.plugin_workspace_page
+        old_index = self.workspace_stack.indexOf(old_page)
+        is_current = self.workspace_stack.currentWidget() is old_page
+        self.workspace_stack.removeWidget(old_page)
+        old_page.deleteLater()
+        self.plugin_workspace_page = self._create_plugin_workspace()
+        if old_index >= 0:
+            self.workspace_stack.insertWidget(old_index, self.plugin_workspace_page)
+        else:
+            self.workspace_stack.addWidget(self.plugin_workspace_page)
+        if is_current:
+            self.workspace_stack.setCurrentWidget(self.plugin_workspace_page)
+
+    def _build_model_menu(self) -> QMenu:
+        menu = QMenu(self.model_display_button)
+        current = str(self.model_display_button.property("model_id") or "")
+        for model_id, label in self.chat_session.list_configured_models():
+            action = menu.addAction(display_model_name(model_id, label))
+            action.setData(str(model_id))
+            action.setCheckable(True)
+            action.setChecked(str(model_id) == current)
+            action.triggered.connect(lambda _checked=False, value=str(model_id): self._select_orchestrator_model(value))
+        return menu
+
+    def _show_model_menu(self) -> None:
+        menu = self._build_model_menu()
+        menu.exec(self.model_display_button.mapToGlobal(self.model_display_button.rect().bottomLeft()))
+
+    def _select_orchestrator_model(self, model_id: str) -> None:
+        self._on_role_model_changed("orchestrator", model_id)
 
     def _append_stream_answer(self, text: str) -> None:
         if not text:
@@ -728,7 +1009,7 @@ class MainWindow(QMainWindow):
                 self._thinking_indicator.set_base(self._t('main.event.planning'))
         if event_type == "PlanningCompleted":
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            if payload.get("tasks") or payload.get("route_type"):
+            if _should_show_work_area(payload):
                 self.ensure_work_area(payload)
 
         if event_type == "AgentMessageDelta":
@@ -800,7 +1081,7 @@ class MainWindow(QMainWindow):
                 self.session_sidebar.select_session(current_id)
                 title = self.session_sidebar.session_title(current_id)
                 if title:
-                    self.session_title_label.setText(title)
+                    self._set_session_title(title)
         finally:
             if not self._closing:
                 self.event_bridge.flush()
@@ -815,6 +1096,13 @@ class MainWindow(QMainWindow):
     def _hide_empty_state(self) -> None:
         if self.empty_state.isVisible():
             self.empty_state.hide()
+
+    def _set_session_title(self, title: str) -> None:
+        clean = str(title or "").replace("\n", " ").strip() or self._t('main.new_chat')
+        self.session_title_label.setToolTip(clean)
+        metrics = QFontMetrics(self.session_title_label.font())
+        available = max(80, self.session_title_label.width())
+        self.session_title_label.setText(metrics.elidedText(clean, Qt.ElideRight, available))
 
     def _create_empty_state(self) -> QLabel:
         label = QLabel(self._t('main.empty'))
@@ -865,22 +1153,16 @@ def _first_or_empty(values) -> str:
     return ""
 
 
-def _compact_model_label(value: str, limit: int = 32) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(1, limit - 1)] + "…"
+def _is_core_skill_card(card) -> bool:
+    return any(str(chip).strip() == "核心" for chip in getattr(card, "chips", ()) or ())
 
 
-def _title_from_messages(messages: list[dict[str, str]]) -> str:
-    for message in messages:
-        if str(message.get("role") or "").strip().lower() != "user":
-            continue
-        text = str(message.get("content") or "").replace("\n", " ").strip()
-        if not text:
-            continue
-        return text[:34] + "..." if len(text) > 36 else text
-    return ""
+def _should_show_work_area(payload: dict) -> bool:
+    route = str(payload.get("route_type") or "").strip()
+    tasks = payload.get("tasks")
+    if route == "multi_agent":
+        return isinstance(tasks, list) and bool(tasks)
+    return route in {"direct_answer", "single_agent", "clarify"} and isinstance(tasks, list)
 
 
 def _event_text(event: dict) -> str:

@@ -25,6 +25,7 @@ class SessionSummary:
     message_count: int
     last_user: str = ""
     last_assistant: str = ""
+    title: str = ""
 
 
 class SessionStore:
@@ -171,6 +172,7 @@ class SessionStore:
         message_count = 0
         last_user = ""
         last_assistant = ""
+        title = ""
         session_id = path.stem
         for event in self._iter_events(path):
             session_id = str(event.get("session_id") or session_id)
@@ -179,6 +181,8 @@ class SessionStore:
                 created_at = timestamp
             if timestamp:
                 updated_at = timestamp
+            if event.get("type") == "session_metadata":
+                title = sanitize_text(str(event.get("title") or title)).strip()
             if event.get("type") != "message":
                 continue
             message_count += 1
@@ -188,7 +192,7 @@ class SessionStore:
                 last_user = content
             elif role == "assistant":
                 last_assistant = content
-        if message_count <= 0:
+        if message_count <= 0 and not title:
             return None
         return SessionSummary(
             session_id=session_id,
@@ -198,6 +202,7 @@ class SessionStore:
             message_count=message_count,
             last_user=self._truncate(last_user, 160),
             last_assistant=self._truncate(last_assistant, 160),
+            title=title,
         )
 
     def _iter_events(self, path: Path) -> Iterable[dict[str, Any]]:
