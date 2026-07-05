@@ -23,6 +23,7 @@ class RunExecutionRequest:
     workspace_root: Path
     event_bus: ExecutionEventBus
     cancel_requested: asyncio.Event
+    approval_session: Any = None
 
 
 class RunExecutor(Protocol):
@@ -47,6 +48,7 @@ class KernelAgentLoopExecutor:
         response = await KernelFacade(context).run_once(
             request.user_input,
             show_plan=True,
+            approval_session=request.approval_session,
             settings=RuntimeSettings.from_env(workspace_root=request.workspace_root),
             event_bus=request.event_bus,
         )
@@ -72,7 +74,7 @@ def emit_execution_event_as_run_event(
     return run_events.emit(
         run_id=run_id,
         session_id=session_id,
-        event_type=map_execution_event_type(event.event_type),
+        event_type=event_type_for_execution_event(event),
         payload=payload,
     )
 
@@ -117,6 +119,35 @@ def map_execution_event_type(event_type: str) -> str:
         "FinalAuditCompleted": "audit.completed",
     }
     return mapping.get(raw, _camel_to_event_type(raw))
+
+
+def event_type_for_execution_event(event: ExecutionEvent) -> str:
+    """Map a runtime execution event to the run-event stream type.
+
+    SDK tool callbacks currently arrive as ToolInvoked with a payload event_type.
+    Treat the final sdk_tool_end callback as completion so live UI surfaces do
+    not keep showing a running tool after the SDK has finished it.
+    """
+
+    raw = str(getattr(event, "event_type", "") or "").strip()
+    payload = dict(getattr(event, "payload", {}) or {})
+    payload_event_type = str(payload.get("event_type") or "").strip()
+    status_text = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            getattr(event, "status", ""),
+            payload.get("status"),
+            payload.get("decision"),
+            payload.get("outcome"),
+        )
+    )
+
+    if raw == "ToolInvoked" and payload_event_type == "sdk_tool_end":
+        if any(marker in status_text for marker in ("failed", "error", "reject", "denied")):
+            return "tool.failed"
+        return "tool.completed"
+
+    return map_execution_event_type(raw)
 
 
 async def call_run_executor(executor: RunExecutor, request: RunExecutionRequest) -> RunExecutionResult:

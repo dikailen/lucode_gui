@@ -2,14 +2,28 @@ import { app, BrowserWindow, Menu, dialog, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { DesktopBrowserBridge } from "./browserBridge.js";
+import { DesktopBrowserManager } from "./browserManager.js";
 import { RuntimeLauncher } from "./runtimeLauncher.js";
+import { resolveWorkspaceRoot } from "./runtimeLauncher.js";
+import { DesktopTerminalManager } from "./terminalManager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const runtimeLauncher = new RuntimeLauncher();
+const terminalManager = new DesktopTerminalManager({
+  workspaceRoot: resolveWorkspaceRoot(process.env, process.cwd()),
+});
+const browserManager = new DesktopBrowserManager();
+const browserBridge = new DesktopBrowserBridge(browserManager);
+terminalManager.registerIpc();
+browserManager.registerIpc();
 
 async function createWindow() {
+  const bridge = await browserBridge.start();
+  process.env.LUCODE_DESKTOP_BROWSER_BRIDGE_URL = bridge.baseUrl;
+  process.env.LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN = bridge.token;
   const runtime = await runtimeLauncher.ensureRuntime();
   const devUrl = process.env.VITE_DEV_SERVER_URL || process.env.LUCODE_RENDERER_DEV_URL;
   const rendererSource = devUrl ? "dev" : "dist";
@@ -28,7 +42,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
       preload,
       additionalArguments: [
         `--lucode-runtime-base-url=${runtime.baseUrl}`,
@@ -39,6 +53,11 @@ async function createWindow() {
     },
   });
   win.setMenuBarVisibility(false);
+  const terminalWebContentsId = win.webContents.id;
+  win.on("closed", () => {
+    terminalManager.disposeForWebContentsId(terminalWebContentsId);
+    browserManager.disposeForWebContentsId(terminalWebContentsId);
+  });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -64,6 +83,11 @@ async function verifySmokeRendererIfNeeded(win: BrowserWindow): Promise<void> {
     console.error("Electron smoke failed: renderer root stayed empty.");
     app.exit(1);
   }
+  const preloadReady = await waitForPreloadBridge(win, 3000);
+  if (!preloadReady) {
+    console.error("Electron smoke failed: preload bridges were not exposed.");
+    app.exit(1);
+  }
 }
 
 async function waitForRendererRoot(win: BrowserWindow, timeoutMs: number): Promise<boolean> {
@@ -73,6 +97,23 @@ async function waitForRendererRoot(win: BrowserWindow, timeoutMs: number): Promi
       .executeJavaScript("Boolean(document.querySelector('#root')?.childElementCount)", true)
       .catch(() => false);
     if (rendered) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+async function waitForPreloadBridge(win: BrowserWindow, timeoutMs: number): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const ready = await win.webContents
+      .executeJavaScript(
+        "Boolean(window.lucodeRuntime?.baseUrl && window.lucodeDesktop?.droppedFilePaths && window.lucodeTerminal?.create && window.lucodeBrowser?.createTab && window.lucodeBrowser?.listTabs && window.lucodeBrowser?.getPageSummary)",
+        true,
+      )
+      .catch(() => false);
+    if (ready) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -107,7 +148,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  browserManager.dispose();
+  terminalManager.dispose();
   runtimeLauncher.stopRuntime();
+  void browserBridge.dispose();
 });
 
 function handleStartupError(error: unknown): void {

@@ -39,6 +39,37 @@ ACTION_INTENT_MARKERS = (
     "edit",
     "optimize",
 )
+DESKTOP_BROWSER_HINT_MARKERS = (
+    "embedded browser",
+    "desktop browser",
+    "built-in browser",
+    "browser panel",
+    "browser tab",
+    "browser",
+    "page summary",
+    "dom",
+    "selector",
+    "click",
+    "fill",
+    "input",
+    "submit",
+    "form",
+    "navigate",
+    "内置浏览器",
+    "桌面浏览器",
+    "浏览器面板",
+    "浏览器",
+    "网页",
+    "页面摘要",
+    "选择器",
+    "点击",
+    "填表",
+    "输入",
+    "提交",
+    "表单",
+    "跳转",
+    "打开页面",
+)
 
 
 @dataclass
@@ -199,6 +230,10 @@ def build_fallback_planner_result(raw_user_input: str, model_output: str = "") -
             clarifying_question="主脑输出格式异常，而且缺少原始问题。请把问题再说具体一点。",
         )
 
+    if _needs_desktop_browser_route(text):
+        model = _fallback_model_for_skill("project_explorer", requires_tools=True) or _default_model_for_skill("project_explorer")
+        return _fallback_desktop_browser_result(raw, reason, model)
+
     if _looks_like_simple_chat(raw, output):
         return PlannerResult(
             route_type="direct_answer",
@@ -314,11 +349,67 @@ def _fallback_no_tool_model_direct_answer(raw: str, skill_id: str) -> PlannerRes
     )
 
 
+def _fallback_desktop_browser_result(raw: str, reason: str, model: str) -> PlannerResult:
+    return PlannerResult(
+        route_type="single_agent",
+        reason=(reason + " forced to embedded desktop browser worker route.").strip(),
+        refined_request=raw,
+        tasks=[
+            PlannedTask(
+                id="desktop_browser_task",
+                title="Use embedded desktop browser",
+                instruction=(
+                    "Use the embedded desktop browser to complete the page interaction request. "
+                    "Read the current page summary first when useful, then navigate or interact with the page directly. "
+                    f"User request: {raw}"
+                ),
+                skill_id="project_explorer",
+                model=model,
+                mcp=["desktop_browser"],
+                parallel_group=1,
+                acceptance_criteria=[
+                    "Complete the requested browser navigation or page interaction, or explain the blocking condition."
+                ],
+                expected_outputs=["Browser page summary, navigation result, or interaction outcome."],
+                risk_notes="Desktop browser automation must stay inside the embedded Electron browser and use approved page actions.",
+            )
+        ],
+        needs_synthesis=False,
+        memory_interface={
+            "execution_route": "desktop_browser",
+            "browser_binding": "desktop_browser",
+        },
+    )
+
+
 def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = "") -> PlannerResult:
     _extract_internal_synthesizer_task(result)
+    result.memory_interface = dict(result.memory_interface or {})
+
+    browser_text = "\n".join(
+        [
+            result.refined_request,
+            fallback_user_input,
+        ]
+    )
+    if result.route_type in {"direct_answer", "clarify"} and _needs_desktop_browser_route(browser_text):
+        model = _fallback_model_for_skill("project_explorer", requires_tools=True) or _default_model_for_skill("project_explorer")
+        browser_result = _fallback_desktop_browser_result(result.refined_request or fallback_user_input, result.reason, model)
+        result.route_type = browser_result.route_type
+        result.reason = browser_result.reason
+        result.direct_answer_instruction = ""
+        result.clarifying_question = ""
+        result.tasks = browser_result.tasks
+        result.needs_synthesis = browser_result.needs_synthesis
+        result.synthesis_instruction = ""
+        result.memory_interface.update(browser_result.memory_interface)
+
+    if result.route_type in {"single_agent", "multi_agent"} and _needs_desktop_browser_route(browser_text):
+        _rewrite_tasks_for_desktop_browser(result, fallback_user_input)
 
     for task in result.tasks:
-        task.model = _normalize_model_reference(task.model, task.skill_id, requires_tools=bool(task.mcp))
+        task_requires_tools = bool(task.mcp) or _needs_desktop_browser_route(f"{task.title}\n{task.instruction}")
+        task.model = _normalize_model_reference(task.model, task.skill_id, requires_tools=task_requires_tools)
 
     web_search_text = "\n".join(
         [
@@ -489,6 +580,40 @@ def _preserve_web_search_constraints(result: PlannerResult, fallback_user_input:
                 task.risk_notes = (task.risk_notes + " " + note).strip()
 
 
+def _rewrite_tasks_for_desktop_browser(result: PlannerResult, fallback_user_input: str) -> None:
+    request_text = str(result.refined_request or fallback_user_input or "").strip()
+    result.memory_interface.setdefault("execution_route", "desktop_browser")
+    result.memory_interface.setdefault("browser_binding", "desktop_browser")
+    result.reason = (result.reason + " forced planner web task to embedded desktop browser route.").strip()
+
+    for task in result.tasks:
+        task_text = f"{task.title}\n{task.instruction}"
+        has_web_search = "web_search" in list(task.mcp or [])
+        has_url = bool(re.search(r"https?://\S+", task_text))
+        if not has_web_search and not has_url and not _needs_desktop_browser_route(f"{request_text}\n{task_text}"):
+            continue
+
+        task.mcp = [mcp_id for mcp_id in task.mcp if mcp_id != "web_search"]
+        if "desktop_browser" not in task.mcp:
+            task.mcp.append("desktop_browser")
+        if not task.skill_id:
+            task.skill_id = "project_explorer"
+        desktop_instruction = (
+            "Use the embedded desktop browser for this task. "
+            "Do not replace this with web_search or web_fetch. "
+            "First call browser_navigate when a URL is present, then call browser_get_page_summary to read title, URL, text summary, and actionable elements. "
+            "Only use browser_click_element, browser_set_input_value, or browser_submit_form when the user explicitly requested page interaction. "
+            f"Original user request: {request_text}"
+        )
+        if "embedded desktop browser" not in task.instruction.lower():
+            task.instruction = f"{desktop_instruction}\n\nPlanner task instruction:\n{task.instruction}".strip()
+        if "Browser page title, URL, summary, or action result." not in task.expected_outputs:
+            task.expected_outputs.append("Browser page title, URL, summary, or action result.")
+        note = "Explicit embedded desktop browser request; web_search was removed so CapabilityResolver can bind desktop_browser."
+        if note not in task.risk_notes:
+            task.risk_notes = (task.risk_notes + " " + note).strip()
+
+
 def _needs_web_search(text: str) -> bool:
     lowered = str(text or "").lower()
     if not lowered.strip():
@@ -577,6 +702,44 @@ def _needs_grep_code_search(text: str) -> bool:
         ("grep" in lowered and "github" in lowered)
         or ("github" in lowered and re.search(r"\b(code|snippet|example|pattern|search)\b", lowered))
         or ("公开代码" in lowered and ("github" in lowered or "搜索" in lowered))
+    )
+
+
+def _needs_desktop_browser_route(text: str) -> bool:
+    if not _desktop_browser_bridge_available():
+        return False
+    lowered = str(text or "").lower()
+    if not lowered.strip():
+        return False
+    if _needs_web_search(lowered):
+        return False
+    if re.search(r"https?://\S+", lowered) and any(marker in lowered for marker in DESKTOP_BROWSER_HINT_MARKERS):
+        return True
+    if any(marker in lowered for marker in ("selector", "dom", "page summary", "click", "fill", "submit", "input")):
+        return True
+    return any(marker in lowered for marker in DESKTOP_BROWSER_HINT_MARKERS) and any(
+        marker in lowered
+        for marker in (
+            "open",
+            "navigate",
+            "click",
+            "fill",
+            "submit",
+            "input",
+            "打开",
+            "跳转",
+            "点击",
+            "填表",
+            "输入",
+            "提交",
+        )
+    )
+
+
+def _desktop_browser_bridge_available() -> bool:
+    return bool(
+        str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_URL") or "").strip()
+        and str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN") or "").strip()
     )
 
 

@@ -1,7 +1,21 @@
 import { type DragEvent, type FormEvent, useState } from "react";
 
 import type { Translator } from "../i18n";
-import type { ExternalMcpPayload, PluginMcpRow, PluginSkill, PluginStateResponse } from "../../shared/types";
+import type {
+  ExternalMcpPayload,
+  PluginMcpRow,
+  PluginRuntimeCapability,
+  PluginSkill,
+  PluginStateResponse,
+} from "../../shared/types";
+
+type RuntimeCapabilityCardModel = {
+  id: string;
+  description: string;
+  status: string;
+  abilities: string[];
+  risk: string;
+};
 
 export type PluginsPanelProps = {
   t: Translator;
@@ -26,6 +40,8 @@ export function PluginsPanel({
   installMcp,
   registerExternalMcp,
 }: PluginsPanelProps) {
+  const runtimeCapabilities = runtimeCapabilitiesForPlugins(t, pluginState?.runtime_capabilities || []);
+
   return (
     <section className="plugins-pane" aria-label={t("plugins.aria")}>
       <header className="workspace-header">
@@ -44,6 +60,23 @@ export function PluginsPanel({
         <div className="workspace-empty">{t("plugins.loading")}</div>
       ) : (
         <div className="plugins-content">
+          {runtimeCapabilities.length ? (
+            <section className="plugin-column runtime-capability-column" aria-label={t("plugins.runtimeCapabilities")}>
+              <div className="plugin-section-header">
+                <div className="runtime-capability-heading">
+                  <span>{t("plugins.runtimeCapabilities")}</span>
+                  <small>{t("plugins.runtimeCapabilitiesDescription")}</small>
+                </div>
+                <strong>{runtimeCapabilities.length}</strong>
+              </div>
+              <div className="runtime-capability-list">
+                {runtimeCapabilities.map((capability) => (
+                  <RuntimeCapabilityCard key={capability.id} t={t} capability={capability} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           <section className="plugin-column" aria-label={t("plugins.skillList")}>
             <div className="plugin-section-header">
               <span>{t("plugins.skillList")}</span>
@@ -63,7 +96,7 @@ export function PluginsPanel({
             </div>
           </section>
 
-          <section className="plugin-column" aria-label={t("plugins.mcpList")}>
+          <section className="plugin-column mcp-plugin-column" aria-label={t("plugins.mcpList")}>
             <div className="plugin-section-header">
               <span>{t("plugins.mcpList")}</span>
               <strong>{pluginState.mcp.length}</strong>
@@ -85,6 +118,43 @@ export function PluginsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function RuntimeCapabilityCard({
+  t,
+  capability,
+}: {
+  t: Translator;
+  capability: RuntimeCapabilityCardModel;
+}) {
+  return (
+    <article className="runtime-capability-card">
+      <div className="runtime-capability-card-header">
+        <div className="runtime-capability-card-title">{capability.id}</div>
+        <div className="runtime-capability-card-description">{capability.description}</div>
+      </div>
+      <div className="runtime-capability-grid">
+        <div className="runtime-capability-row">
+          <span className="runtime-capability-label">{t("plugins.runtimeCapabilityStatus")}</span>
+          <span className="runtime-capability-value">{capability.status}</span>
+        </div>
+        <div className="runtime-capability-row">
+          <span className="runtime-capability-label">{t("plugins.runtimeCapabilityAbilities")}</span>
+          <div className="runtime-capability-chip-row">
+            {capability.abilities.map((ability) => (
+              <span className="runtime-capability-chip" key={ability}>
+                {ability}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="runtime-capability-row">
+          <span className="runtime-capability-label">{t("plugins.runtimeCapabilityRisk")}</span>
+          <span className="runtime-capability-value runtime-capability-risk">{capability.risk}</span>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -258,23 +328,25 @@ function SkillRow({
       <div className="plugin-row-main">
         <div className="plugin-row-title">{skill.title}</div>
         <div className="plugin-row-description">{skill.description || skill.id}</div>
-        <div className="plugin-chip-row">
-          {skill.chips.map((chip) => (
-            <span className={chip === t("plugins.coreChip") ? "plugin-chip core" : "plugin-chip"} key={chip}>
-              {chip}
-            </span>
-          ))}
+        <div className="plugin-row-footer">
+          <div className="plugin-chip-row">
+            {skill.chips.map((chip) => (
+              <span className={chip === t("plugins.coreChip") ? "plugin-chip core" : "plugin-chip"} key={chip}>
+                {chip}
+              </span>
+            ))}
+          </div>
+          <button
+            className="plugin-delete-pill"
+            type="button"
+            disabled={!skill.deletable}
+            title={skill.deletable ? t("plugins.deleteSkill") : t("plugins.coreSkillLocked")}
+            onClick={() => deleteSkill(skill.id)}
+          >
+            {t("common.delete")}
+          </button>
         </div>
       </div>
-      <button
-        className="plugin-delete-pill"
-        type="button"
-        disabled={!skill.deletable}
-        title={skill.deletable ? t("plugins.deleteSkill") : t("plugins.coreSkillLocked")}
-        onClick={() => deleteSkill(skill.id)}
-      >
-        {t("common.delete")}
-      </button>
     </article>
   );
 }
@@ -285,8 +357,10 @@ function McpRowView({ t, row }: { t: Translator; row: PluginMcpRow }) {
       <div className="plugin-row-main">
         <div className="plugin-row-title">{row.title}</div>
         <div className="plugin-row-description">{row.detail || row.id}</div>
+        <div className="plugin-row-footer">
+          <span className={row.status === t("plugins.connected") ? "status-chip good" : "status-chip muted"}>{row.status}</span>
+        </div>
       </div>
-      <span className={row.status === t("plugins.connected") ? "status-chip good" : "status-chip muted"}>{row.status}</span>
     </article>
   );
 }
@@ -306,4 +380,55 @@ function splitArgs(value: string): string[] {
     .split(/\s+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+export function runtimeCapabilitiesForPlugins(
+  t: Translator,
+  capabilities: PluginRuntimeCapability[],
+): RuntimeCapabilityCardModel[] {
+  return capabilities.map((capability) => ({
+    id: capability.id,
+    description: runtimeCapabilityDescription(t, capability),
+    status: runtimeCapabilityStatus(t, capability.status_key),
+    abilities: capability.ability_keys.map((key) => runtimeCapabilityAbility(t, key)).filter(Boolean),
+    risk: runtimeCapabilityRisk(t, capability.risk_key),
+  }));
+}
+
+function runtimeCapabilityDescription(t: Translator, capability: PluginRuntimeCapability): string {
+  if (capability.id === "desktop_browser") {
+    return t("plugins.runtimeDesktopBrowserDescription");
+  }
+  return capability.summary_zh || capability.summary || capability.display_name || capability.id;
+}
+
+function runtimeCapabilityStatus(t: Translator, statusKey: string): string {
+  if (statusKey === "desktop_runtime") {
+    return t("plugins.runtimeDesktop");
+  }
+  return statusKey;
+}
+
+function runtimeCapabilityAbility(t: Translator, abilityKey: string): string {
+  switch (abilityKey) {
+    case "navigate":
+      return t("plugins.runtimeNavigate");
+    case "page_summary":
+      return t("plugins.runtimePageSummary");
+    case "controlled_click":
+      return t("plugins.runtimeControlledClick");
+    case "form_input":
+      return t("plugins.runtimeFormInput");
+    case "form_submit":
+      return t("plugins.runtimeFormSubmit");
+    default:
+      return abilityKey;
+  }
+}
+
+function runtimeCapabilityRisk(t: Translator, riskKey: string): string {
+  if (riskKey === "approval_required") {
+    return t("plugins.runtimeApprovalRequired");
+  }
+  return riskKey;
 }

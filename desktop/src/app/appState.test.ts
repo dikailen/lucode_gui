@@ -7,12 +7,14 @@ import {
   markRunStreamDisconnected,
   reduceRunEvent,
   runStageLabel,
+  selectOrchestratorModelLabel,
   selectPrimaryModelLabel,
   formatSessionTime,
   markPendingDeleteSession,
   removeSession,
   setSessionMessages,
 } from "./appState";
+import type { ModelSettingsModel, ModelSettingsResponse } from "../shared/types";
 
 describe("appState", () => {
   it("selects a readable configured model label", () => {
@@ -35,6 +37,23 @@ describe("appState", () => {
     ]);
 
     expect(label).toBe("deepseek-chat");
+  });
+
+  it("uses the persisted orchestrator role model label from model settings", () => {
+    const settings = modelSettingsFixture({
+      selectedModelId: "openrouter/anthropic/claude-sonnet-4",
+      models: [
+        modelSettingsModel("deepseek/deepseek-chat", "DeepSeek Chat", "deepseek", "deepseek-chat"),
+        modelSettingsModel(
+          "openrouter/anthropic/claude-sonnet-4",
+          "OpenRouter Claude",
+          "openrouter",
+          "claude-sonnet-4",
+        ),
+      ],
+    });
+
+    expect(selectOrchestratorModelLabel(settings, "DeepSeek Chat")).toBe("claude-sonnet-4");
   });
 
   it("keeps user message and folds streaming/final run events into chat", () => {
@@ -178,3 +197,54 @@ describe("appState", () => {
     expect(state.messages.at(-1)?.content).toContain("已停止");
   });
 });
+
+function modelSettingsFixture({
+  selectedModelId,
+  models,
+}: {
+  selectedModelId: string;
+  models: ModelSettingsModel[];
+}): ModelSettingsResponse {
+  return {
+    schema_version: "model_settings.v1",
+    summary: {
+      model_count: models.length,
+      configured_model_count: models.filter((model) => model.configured).length,
+      provider_count: 1,
+      configured_provider_count: 1,
+    },
+    models,
+    providers: [],
+    roles: [
+      {
+        role: "orchestrator",
+        label: "主脑模型",
+        model_priority: [selectedModelId],
+        selected_model_id: selectedModelId,
+      },
+    ],
+  };
+}
+
+function modelSettingsModel(
+  id: string,
+  displayName: string,
+  provider: string,
+  modelName: string,
+): ModelSettingsModel {
+  return {
+    id,
+    ref: id,
+    display_name: displayName,
+    provider,
+    configured: true,
+    available: true,
+    backend_type: "openai",
+    model_name: modelName,
+    privacy_level: "cloud",
+    supports_tools: true,
+    reasoning_level: "medium",
+    cost_level: "medium",
+    model_tier: "standard",
+  };
+}

@@ -1,5 +1,10 @@
+import type { CSSProperties } from "react";
+
+import { BrowserPanel } from "./components/BrowserPanel";
+import { ReviewPanel } from "./components/ReviewPanel";
 import { RightDock } from "./components/RightDock";
 import { SessionSidebar } from "./components/SessionSidebar";
+import { TerminalPanel } from "./components/TerminalPanel";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import { createTranslator } from "./i18n";
 import { useLucodeApp } from "./useLucodeApp";
@@ -9,9 +14,21 @@ export function App() {
   const { state } = controller;
   const language = controller.modelSettings?.ui_preferences?.language || "zh";
   const t = createTranslator(language);
+  const shellStyle = {
+    "--right-dock-width": `${controller.rightDockWidth}px`,
+  } as CSSProperties;
 
   return (
-    <main className={controller.rightDockTool ? "app-shell dock-open" : "app-shell"}>
+    <main
+      className={[
+        "app-shell",
+        controller.rightDockTool ? "dock-open" : "",
+        controller.bottomShellOpen ? "bottom-shell-open" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={shellStyle}
+    >
       <SessionSidebar
         t={t}
         sessions={state.sessions}
@@ -27,43 +44,98 @@ export function App() {
         openSettings={controller.openSettings}
         toggleSidebar={controller.toggleSidebar}
       />
-      <WorkspacePanel
+      <div className="workspace-column">
+        <div className="workspace-main">
+          <WorkspacePanel
+            t={t}
+            activeWorkspace={controller.activeWorkspace}
+            state={state}
+            input={controller.input}
+            runtimeError={controller.runtimeError}
+            pluginState={controller.pluginState}
+            pluginError={controller.pluginError}
+            pluginInstallingTarget={controller.pluginInstallingTarget}
+            modelSettings={controller.modelSettings}
+            providerCatalog={controller.providerCatalog}
+            settingsError={controller.settingsError}
+            settingsSavingRole={controller.settingsSavingRole}
+            bottomShellOpen={controller.bottomShellOpen}
+            rightDockOpen={Boolean(controller.rightDockTool)}
+            setInput={controller.setInput}
+            submit={controller.submit}
+            stopRun={controller.stopRun}
+            showRightDockHome={controller.showRightDockHome}
+            activateRightDockTool={controller.activateRightDockTool}
+            collapseRightDock={controller.collapseRightDock}
+            toggleBottomShell={controller.toggleBottomShell}
+            openSettings={controller.openSettings}
+            closeSettings={controller.closeSettings}
+            refreshModelSettings={controller.refreshModelSettings}
+            refreshProviderCatalog={controller.refreshProviderCatalog}
+            updateRoleModel={controller.updateRoleModel}
+            updateQueryRefiner={controller.updateQueryRefiner}
+            updatePrivacyMode={controller.updatePrivacyMode}
+            updateWorkerPool={controller.updateWorkerPool}
+            updateLanguage={controller.updateLanguage}
+            saveProvider={controller.saveProvider}
+            deleteProvider={controller.deleteProvider}
+            fetchProviderModels={controller.fetchProviderModels}
+            refreshPluginState={controller.refreshPluginState}
+            deleteSkill={controller.deleteSkill}
+            installSkill={controller.installSkill}
+            installMcp={controller.installMcp}
+            registerExternalMcp={controller.registerExternalMcp}
+          />
+        </div>
+        {controller.bottomShellOpen ? (
+          <section className="bottom-shell-dock" aria-label={t("terminal.tabsAria")}>
+            <TerminalPanel
+              t={t}
+              terminalState={controller.terminalState}
+              terminalError={controller.terminalError}
+              terminalCommand={controller.terminalCommand}
+              setTerminalCommand={controller.setTerminalCommand}
+              runTerminalCommand={controller.runTerminalCommand}
+              clearTerminal={controller.clearTerminal}
+              rerunTerminalCommand={controller.rerunTerminalCommand}
+              setTerminalCwd={controller.setTerminalCwd}
+              closeTerminal={controller.closeBottomShell}
+            />
+          </section>
+        ) : null}
+      </div>
+      <RightDock
         t={t}
-        activeWorkspace={controller.activeWorkspace}
-        state={state}
-        input={controller.input}
-        runtimeError={controller.runtimeError}
-        pluginState={controller.pluginState}
-        pluginError={controller.pluginError}
-        pluginInstallingTarget={controller.pluginInstallingTarget}
-        modelSettings={controller.modelSettings}
-        providerCatalog={controller.providerCatalog}
-        settingsError={controller.settingsError}
-        settingsSavingRole={controller.settingsSavingRole}
-        setInput={controller.setInput}
-        submit={controller.submit}
-        stopRun={controller.stopRun}
-        openDock={controller.openDock}
-        openSettings={controller.openSettings}
-        closeSettings={controller.closeSettings}
-        refreshModelSettings={controller.refreshModelSettings}
-        refreshProviderCatalog={controller.refreshProviderCatalog}
-        updateRoleModel={controller.updateRoleModel}
-        updateQueryRefiner={controller.updateQueryRefiner}
-        updatePrivacyMode={controller.updatePrivacyMode}
-        updateWorkerPool={controller.updateWorkerPool}
-        updateLanguage={controller.updateLanguage}
-        saveProvider={controller.saveProvider}
-        deleteProvider={controller.deleteProvider}
-        fetchProviderModels={controller.fetchProviderModels}
-        refreshPluginState={controller.refreshPluginState}
-        deleteSkill={controller.deleteSkill}
-        installSkill={controller.installSkill}
-        installMcp={controller.installMcp}
-        registerExternalMcp={controller.registerExternalMcp}
-      />
-      <RightDock t={t} activeTool={controller.rightDockTool} openDock={controller.openDock}>
-        {null}
+        activeTool={controller.rightDockTool}
+        windows={controller.rightDockWindows}
+        activateTool={controller.activateRightDockTool}
+        collapseDock={controller.collapseRightDock}
+        closeWindow={controller.closeRightDockWindow}
+        startResize={controller.startRightDockResize}
+        resetWidth={controller.resetRightDockWidth}
+      >
+        {controller.rightDockTool === "review" ? (
+          <ReviewPanel
+            state={state}
+            openBrowser={() => controller.activateRightDockTool("browser")}
+            resolveApproval={controller.resolveRunApproval}
+          />
+        ) : controller.rightDockTool === "terminal" ? (
+          <TerminalPanel
+            t={t}
+            terminalState={controller.terminalState}
+            terminalError={controller.terminalError}
+            terminalCommand={controller.terminalCommand}
+            setTerminalCommand={controller.setTerminalCommand}
+            runTerminalCommand={controller.runTerminalCommand}
+            clearTerminal={controller.clearTerminal}
+            rerunTerminalCommand={controller.rerunTerminalCommand}
+            setTerminalCwd={controller.setTerminalCwd}
+            closeTerminal={() => controller.closeRightDockWindow("terminal")}
+          />
+        ) : controller.rightDockTool === "browser" ? (
+          <BrowserPanel t={t} onClose={() => controller.closeRightDockWindow("browser")} />
+        ) : null}
       </RightDock>
       <div className="build-badge" title={controller.runtimeConfig.buildTime || "renderer build time unknown"}>
         {controller.runtimeConfig.rendererSource === "dev" ? "DEV" : "DIST"}

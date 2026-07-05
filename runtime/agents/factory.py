@@ -96,8 +96,8 @@ class AgentFactory:
             + task.instruction
             + self._execution_contract(task)
             + self._capability_context(capability_binding)
-            + self._tool_budget(task, execution_mode=execution_mode)
-            + self._tool_rules(task)
+            + self._tool_budget(task, capability_binding=capability_binding, execution_mode=execution_mode)
+            + self._tool_rules(task, capability_binding=capability_binding)
             + self._worker_report_contract(task, execution_mode=execution_mode)
             + "\n## 输出风格\n"
             + "- 默认使用中文。\n"
@@ -206,13 +206,26 @@ class AgentFactory:
             return ""
         return "\n\n## 本次任务契约\n" + "\n".join(lines)
 
-    def _tool_budget(self, task: PlannedTask, execution_mode: str = "") -> str:
-        remote_lookup = {"context7_docs", "grep_code_search"}.intersection(task.mcp)
-        if "web_search" not in task.mcp and not remote_lookup:
-            if "code_locator" in task.mcp and "project_filesystem_readonly" in task.mcp:
+    def _tool_budget(self, task: PlannedTask, capability_binding=None, execution_mode: str = "") -> str:
+        task_mcp = list(getattr(capability_binding, "mcp", []) or task.mcp)
+        remote_lookup = {"context7_docs", "grep_code_search"}.intersection(task_mcp)
+        if "desktop_browser" in task_mcp:
+            return (
+                "\n\n## 本次工具预算\n"
+                "- `browser_navigate` 最多调用 2 次。\n"
+                "- `browser_get_page_summary` 最多调用 3 次。\n"
+                "- `browser_click_element` / `browser_set_input_value` / `browser_submit_form` 仅在必要时使用；每步动作后都要重新核对页面状态。\n"
+                "- 如果页面没有加载或元素不存在，先返回阻塞原因，不要盲目继续操作。\n"
+                "- 如果用户要求“等待我审批”“先审批”“不要直接提交”等交互确认，不要在最终回答里用自然语言询问审批；"
+                "请先根据页面摘要选定具体 selector，然后调用对应的受控动作工具。Lucode runtime 审批会在工具调用前弹出审批卡。\n"
+                "- 如果 runtime 审批被拒绝或不可用，报告拒绝/不可用结果；如果审批通过并执行动作，必须再次调用 `browser_get_page_summary` 核对页面状态。\n"
+                "- 最终回答只能写真实执行结果、阻塞原因或审批拒绝结果；不要把“下一步计划”“请审批是否继续”当成任务完成。\n"
+            )
+        if "web_search" not in task_mcp and not remote_lookup:
+            if "code_locator" in task_mcp and "project_filesystem_readonly" in task_mcp:
                 if str(execution_mode or "").strip().lower() == "full":
                     command_budget = ""
-                    if "command_runner" in task.mcp:
+                    if "command_runner" in task_mcp:
                         command_budget = (
                             "\n"
                             "- `run_command` 最多调用 1 次；命令返回后必须立即根据结果给出结论。\n"
@@ -230,7 +243,7 @@ class AgentFactory:
                         + command_budget
                     )
                 command_budget = ""
-                if "command_runner" in task.mcp:
+                if "command_runner" in task_mcp:
                     command_budget = (
                         "\n"
                         "- `run_command` 最多调用 1 次；命令返回后必须立刻根据结果给出结论。\n"
@@ -248,7 +261,7 @@ class AgentFactory:
                     "- 如果预算不足以覆盖全文，明确说明只完成了部分分析，不要把部分结论伪装成全文结论。"
                     + command_budget
                 )
-            if "command_runner" in task.mcp:
+            if "command_runner" in task_mcp:
                 return (
                     "\n\n## 本次工具预算\n"
                     "- `run_command` 最多调用 1 次。\n"
@@ -257,7 +270,7 @@ class AgentFactory:
                 )
             return ""
 
-        if remote_lookup and "web_search" not in task.mcp:
+        if remote_lookup and "web_search" not in task_mcp:
             lines = [
                 "\n\n## 本次工具预算",
             ]
@@ -297,8 +310,8 @@ class AgentFactory:
             "- 不要重复搜索同义问题。"
         )
 
-    def _tool_rules(self, task: PlannedTask) -> str:
-        mcp = set(task.mcp)
+    def _tool_rules(self, task: PlannedTask, capability_binding=None) -> str:
+        mcp = set(getattr(capability_binding, "mcp", []) or task.mcp)
         lines = [
             "\n\n## 执行收束规则",
             "- 只调用本任务实际分配到的工具；不要请求未分配的工具。",
@@ -317,6 +330,13 @@ class AgentFactory:
             )
         if "web_search" in mcp:
             lines.append("- web_search 可用工具：web_search、web_fetch。最多搜索 2 次；web_fetch 最多读取 3 个网页。")
+        if "desktop_browser" in mcp:
+            lines.append(
+                "- desktop_browser 可用工具：browser_list_tabs、browser_navigate、browser_get_page_summary、"
+                "browser_click_element、browser_set_input_value、browser_submit_form。先读取页面摘要，再执行受控页面动作；每次动作后都要核对页面状态。"
+                " 对于点击、填表、提交这类会改变页面状态的请求，必须通过 browser_click_element / browser_set_input_value / browser_submit_form 发起真实工具调用；"
+                "不要在最终回答里用自然语言询问审批。需要审批时由 runtime 审批卡处理，审批拒绝后再报告结果。"
+            )
         if "context7_docs" in mcp:
             lines.append(
                 "- context7_docs 可用工具：resolve-library-id、query-docs。"

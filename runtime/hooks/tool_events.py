@@ -178,12 +178,23 @@ def _parse_arguments(arguments: str | None) -> Any:
 def _summarize_arguments(parsed: Any, raw_arguments: str | None) -> dict[str, Any]:
     if isinstance(parsed, dict):
         summary: dict[str, Any] = {"keys": sorted(str(key) for key in parsed.keys())}
-        for key in ("path", "target", "target_path", "file_path", "command", "message", "reason"):
+        for key in (
+            "path",
+            "target",
+            "target_path",
+            "file_path",
+            "command",
+            "message",
+            "reason",
+            "url",
+            "tab_id",
+            "selector",
+        ):
             if key in parsed:
                 summary[key] = _redact_text(_truncate(parsed.get(key)))
         if "patch" in parsed:
             summary["patch_paths"] = _patch_paths(str(parsed.get("patch") or ""))
-        for key in ("content", "patch", "old_text", "new_text"):
+        for key in ("content", "patch", "old_text", "new_text", "value"):
             if key in parsed:
                 summary[f"{key}_length"] = len(str(parsed.get(key) or ""))
         return summary

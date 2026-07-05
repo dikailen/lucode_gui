@@ -7,6 +7,7 @@ from runtime.config.model_config import (
     load_auth,
     load_lucode_config,
     load_provider_catalog,
+    provider_api_key_value,
     set_provider_models,
 )
 
@@ -41,7 +42,8 @@ def test_set_provider_models_replaces_models_without_touching_key(tmp_path):
     config = load_lucode_config(workspace_root=ws)
     auth = load_auth(user_home=uh)
     assert config["provider"]["deepseek"]["models"] == ["deepseek-v3", "deepseek-r1"]
-    assert auth["providers"]["deepseek"]["api_key"] == "sk-test"
+    assert "api_key" not in auth["providers"]["deepseek"]
+    assert provider_api_key_value(auth["providers"]["deepseek"]) == "sk-test"
     assert result["provider_id"] == "deepseek"
     assert result["models"] == ["deepseek-v3", "deepseek-r1"]
     assert result["changed"] is True

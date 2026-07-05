@@ -204,6 +204,62 @@ def create_app(
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
 
+    async def terminal_state(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.terminal_state())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+
+    async def terminal_run(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(manager.terminal_run(payload))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except RuntimeError as exc:
+            return _error("conflict", str(exc), status_code=409)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
+    async def terminal_stop(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.terminal_stop())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+
+    async def terminal_clear(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.terminal_clear())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+
+    async def terminal_rerun(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.terminal_rerun())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except RuntimeError as exc:
+            return _error("conflict", str(exc), status_code=409)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
+    async def terminal_cwd(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(manager.terminal_set_cwd(str(payload.get("cwd") or "")))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
     async def list_sessions(request: Request) -> JSONResponse:
         try:
             auth.require_http(request)
@@ -262,6 +318,22 @@ def create_app(
         except ValueError as exc:
             return _error("not_found", str(exc), status_code=404)
 
+    async def resolve_run_approval(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(
+                manager.resolve_run_approval(
+                    str(request.path_params.get("run_id") or ""),
+                    str(request.path_params.get("approval_id") or ""),
+                    str(payload.get("decision") or ""),
+                )
+            )
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
     async def run_events(websocket: WebSocket) -> None:
         run_id = str(websocket.path_params.get("run_id") or "")
         if not auth.is_websocket_authorized(websocket):
@@ -304,12 +376,19 @@ def create_app(
             Route("/api/plugins/mcp/install", install_mcp, methods=["POST"]),
             Route("/api/plugins/mcp/external", register_external_mcp, methods=["POST"]),
             Route("/api/plugins/skills/{skill_id}", delete_skill, methods=["DELETE"]),
+            Route("/api/terminal", terminal_state, methods=["GET"]),
+            Route("/api/terminal/run", terminal_run, methods=["POST"]),
+            Route("/api/terminal/stop", terminal_stop, methods=["POST"]),
+            Route("/api/terminal/clear", terminal_clear, methods=["POST"]),
+            Route("/api/terminal/rerun", terminal_rerun, methods=["POST"]),
+            Route("/api/terminal/cwd", terminal_cwd, methods=["PUT"]),
             Route("/api/sessions", list_sessions, methods=["GET"]),
             Route("/api/sessions", create_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/messages", session_messages, methods=["GET"]),
             Route("/api/sessions/{session_id}", delete_session, methods=["DELETE"]),
             Route("/api/runs", create_run, methods=["POST"]),
             Route("/api/runs/{run_id}/stop", stop_run, methods=["POST"]),
+            Route("/api/runs/{run_id}/approvals/{approval_id}", resolve_run_approval, methods=["POST"]),
             WebSocketRoute("/api/runs/{run_id}/events", run_events),
         ],
     )

@@ -153,6 +153,276 @@ describe("stage 6 run state", () => {
     expect(state.messages).toEqual([]);
   });
 
+  it("keeps a completed run process summary with real task activities", () => {
+    let state = markRunStarted(createInitialAppState(), "session_1", "run_1");
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 1,
+      type: "run.started",
+      created_at: "2026-07-03T10:00:00+08:00",
+      payload: {},
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 2,
+      type: "planner.completed",
+      created_at: "2026-07-03T10:00:02+08:00",
+      payload: {
+        route_type: "multi_agent",
+        tasks: [{ id: "task_1", title: "Inspect chat UI", model: "gpt-5.5", mcp: ["code_locator"] }],
+      },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 3,
+      type: "task.started",
+      created_at: "2026-07-03T10:00:03+08:00",
+      payload: { task_id: "task_1" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 4,
+      type: "tool.requested",
+      created_at: "2026-07-03T10:00:10+08:00",
+      payload: {
+        task_id: "task_1",
+        tool_name: "command.run",
+        action: "run",
+        arguments_summary: { command: "npm test -- WorkAreaPanel" },
+      },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 5,
+      type: "tool.completed",
+      created_at: "2026-07-03T10:00:30+08:00",
+      payload: {
+        task_id: "task_1",
+        tool_name: "filesystem.read",
+        arguments_summary: { path: "desktop/src/app/components/WorkAreaPanel.tsx" },
+        status: "completed",
+      },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 6,
+      type: "task.completed",
+      created_at: "2026-07-03T10:01:20+08:00",
+      payload: { task_id: "task_1" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 7,
+      type: "run.completed",
+      created_at: "2026-07-03T10:01:49+08:00",
+      payload: { final_output: "done" },
+    });
+
+    const snapshot = workAreaSnapshot(state);
+
+    expect(snapshot).toMatchObject({
+      runStatus: "completed",
+      durationText: "1m 49s",
+      processSummary: "已处理 1m 49s",
+    });
+    expect(snapshot?.tasks[0].activities).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        status: "running",
+        title: "运行命令",
+        detail: "npm test -- WorkAreaPanel",
+      }),
+      expect.objectContaining({
+        kind: "tool",
+        status: "done",
+        title: "读取文件",
+        detail: "desktop/src/app/components/WorkAreaPanel.tsx",
+      }),
+    ]);
+  });
+
+  it("adds worker progress and global tool activities to the work area snapshot", () => {
+    let state = markRunStarted(createInitialAppState(), "session_1", "run_1");
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 1,
+      type: "planner.completed",
+      created_at: "2026-07-03T10:00:00+08:00",
+      payload: {
+        route_type: "multi_agent",
+        tasks: [{ id: "task_1", title: "Inspect runtime", model: "gpt-5.5", mcp: ["code_locator"] }],
+      },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 2,
+      type: "task.started",
+      created_at: "2026-07-03T10:00:01+08:00",
+      payload: { task_id: "task_1" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 3,
+      type: "worker.delta",
+      created_at: "2026-07-03T10:00:02+08:00",
+      payload: { task_id: "task_1", text: "Reading runtime/server/app.py" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 4,
+      type: "tool.requested",
+      created_at: "2026-07-03T10:00:03+08:00",
+      payload: {
+        tool_name: "desktop_browser.browser_navigate",
+        action: "browser_navigate",
+        arguments_summary: { url: "https://example.com" },
+      },
+    });
+
+    const snapshot = workAreaSnapshot(state);
+
+    expect(snapshot?.tasks[0].activities).toEqual([
+      expect.objectContaining({
+        kind: "thinking",
+        status: "running",
+        title: "进度",
+        detail: "Reading runtime/server/app.py",
+      }),
+    ]);
+    expect(snapshot?.globalActivities).toEqual([
+      expect.objectContaining({
+        kind: "browser",
+        status: "running",
+        title: "打开网页",
+        detail: "https://example.com",
+      }),
+    ]);
+  });
+
+  it("keeps parallel groups and dependencies so the work area can render an execution tree", () => {
+    let state = markRunStarted(createInitialAppState(), "session_1", "run_1");
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 1,
+      type: "planner.completed",
+      created_at: "2026-06-30T00:00:00+08:00",
+      payload: {
+        route_type: "multi_agent",
+        tasks: [
+          {
+            id: "analyze_runner",
+            title: "梳理 multi_agent_runner.py 的收口与返回流程",
+            model: "deepseek-v4-pro",
+            mcp: ["project_filesystem_readonly", "code_locator"],
+            parallel_group: "1",
+          },
+          {
+            id: "analyze_approval",
+            title: "梳理 approval_policy.py 的审批判定逻辑",
+            model: "deepseek-v4-pro",
+            mcp: ["project_filesystem_readonly", "code_locator"],
+            parallel_group: "1",
+          },
+          {
+            id: "write_handoff",
+            title: "编写衔接说明文档",
+            model: "gpt-5.5",
+            mcp: ["workspace_edit", "code_locator"],
+            parallel_group: "2",
+            depends_on: ["analyze_runner", "analyze_approval"],
+          },
+        ],
+      },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 2,
+      type: "task.started",
+      created_at: "2026-06-30T00:00:01+08:00",
+      payload: { task_id: "analyze_runner" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 3,
+      type: "worker.delta",
+      created_at: "2026-06-30T00:00:02+08:00",
+      payload: { task_id: "analyze_runner", text: "读取 runtime/execution/multi_agent_runner.py" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 4,
+      type: "task.started",
+      created_at: "2026-06-30T00:00:03+08:00",
+      payload: { task_id: "analyze_approval" },
+    });
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 5,
+      type: "planner.observation",
+      created_at: "2026-06-30T00:00:04+08:00",
+      payload: { message: "主管已拆分 3 个任务" },
+    });
+
+    const snapshot = workAreaSnapshot(state);
+
+    expect(snapshot?.routeType).toBe("multi_agent");
+    expect(snapshot?.taskCount).toBe(3);
+    expect(snapshot?.supervisorActivity).toBe("主管已拆分 3 个任务");
+    expect(snapshot?.tasks).toEqual([
+      expect.objectContaining({
+        id: "analyze_runner",
+        parallelGroup: "1",
+        dependsOn: [],
+        status: "running",
+        latest: "读取 runtime/execution/multi_agent_runner.py",
+      }),
+      expect.objectContaining({
+        id: "analyze_approval",
+        parallelGroup: "1",
+        dependsOn: [],
+        status: "running",
+      }),
+      expect.objectContaining({
+        id: "write_handoff",
+        parallelGroup: "2",
+        dependsOn: ["analyze_runner", "analyze_approval"],
+        status: "waiting",
+      }),
+    ]);
+  });
+
   it("splits fenced code blocks for message rendering", () => {
     expect(renderMessageParts("说明\n```ts\nconst ok = true;\n```\n结束")).toEqual([
       { type: "text", content: "说明\n" },

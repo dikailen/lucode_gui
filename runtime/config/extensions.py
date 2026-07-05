@@ -201,26 +201,26 @@ def _mark_skill_safety(item: dict[str, Any]) -> dict[str, Any]:
 
 def _discover_core_mcp(app_home: Path) -> list[dict[str, Any]]:
     catalog_path = app_home / "catalogs" / "mcp_catalog.json"
-    if not catalog_path.exists():
-        return []
-    try:
-        data = json.loads(catalog_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
     items = []
-    for raw in data.get("mcp_servers", []):
-        if not isinstance(raw, dict):
-            continue
-        item = dict(raw)
-        item.setdefault("id", _normalize_id(str(item.get("display_name_zh") or "mcp")))
-        item.setdefault("display_name_zh", item["id"])
-        item.setdefault("tools", [])
-        item.setdefault("prompts", [])
-        item["source"] = "core"
-        item["trusted"] = True
-        item["enabled"] = bool(item.get("implemented", True))
-        item.setdefault("risk_level", "unknown")
-        items.append(item)
+    if catalog_path.exists():
+        try:
+            data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {}
+        for raw in data.get("mcp_servers", []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item.setdefault("id", _normalize_id(str(item.get("display_name_zh") or "mcp")))
+            item.setdefault("display_name_zh", item["id"])
+            item.setdefault("tools", [])
+            item.setdefault("prompts", [])
+            item["source"] = "core"
+            item["trusted"] = True
+            item["enabled"] = bool(item.get("implemented", True))
+            item.setdefault("risk_level", "unknown")
+            items.append(item)
+    items.extend(_runtime_core_mcp_items())
     return items
 
 
@@ -249,6 +249,43 @@ def _discover_mcp_dir(root: Path, source: str) -> list[dict[str, Any]]:
             item["enabled"] = bool(raw.get("enabled", False))
         items.append(item)
     return items
+
+
+def _runtime_core_mcp_items() -> list[dict[str, Any]]:
+    bridge_url = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_URL") or "").strip()
+    bridge_token = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN") or "").strip()
+    if not bridge_url or not bridge_token:
+        return []
+    return [
+        {
+            "id": "desktop_browser",
+            "display_name_zh": "桌面内置浏览器",
+            "summary_zh": "通过本地认证桥操作 Electron 内置浏览器，可读页面摘要并执行受控点击、填表、提交。",
+            "tools": [
+                "browser_list_tabs",
+                "browser_navigate",
+                "browser_get_page_summary",
+                "browser_click_element",
+                "browser_set_input_value",
+                "browser_submit_form",
+            ],
+            "allowed_for_skills": [
+                "lucode_native_capability",
+                "project_explorer",
+                "code_engineer",
+            ],
+            "approval_required": True,
+            "side_effects": "controls_local_desktop_browser",
+            "risk_level": "high",
+            "runtime_capability": True,
+            "runtime_surface": "desktop",
+            "runtime_status_key": "desktop_runtime",
+            "implemented": True,
+            "source": "core",
+            "trusted": True,
+            "enabled": True,
+        }
+    ]
 
 
 def _render_skill_items(items: list[dict[str, Any]]) -> list[str]:

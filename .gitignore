@@ -54,6 +54,12 @@ skills/task-router/
 # Desktop React/Electron workspace: keep manifests, ignore generated artifacts.
 !/desktop/package.json
 !/desktop/package-lock.json
+!/desktop/scripts/
+!/desktop/scripts/build-renderer-lite.mjs
+!/desktop/scripts/electron-smoke.mjs
 /desktop/node_modules/
 /desktop/dist/
 /desktop/dist-electron/
+/.playwright-cli/
+/desktop/.playwright-cli/
+/output/

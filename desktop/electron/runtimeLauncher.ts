@@ -53,7 +53,7 @@ export class RuntimeLauncher {
 
     const existingBaseUrl = normalizeBaseUrl(this.env.LUCODE_RUNTIME_BASE_URL || "");
     const existingToken = String(this.env.LUCODE_RUNTIME_TOKEN || "");
-    if (existingBaseUrl && existingToken) {
+    if (existingBaseUrl && existingToken && !this.shouldSpawnRuntimeForDesktopBridge()) {
       await this.waitForHealth(existingBaseUrl, 8000);
       this.runtimeHandle = {
         baseUrl: existingBaseUrl,
@@ -85,6 +85,15 @@ export class RuntimeLauncher {
     };
     await this.waitForHealth(baseUrl, 8000);
     return this.runtimeHandle;
+  }
+
+  private shouldSpawnRuntimeForDesktopBridge(): boolean {
+    const bridgeUrl = String(this.env.LUCODE_DESKTOP_BROWSER_BRIDGE_URL || "").trim();
+    const bridgeToken = String(this.env.LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN || "").trim();
+    if (!bridgeUrl || !bridgeToken) {
+      return false;
+    }
+    return String(this.env.LUCODE_RUNTIME_REUSE_EXTERNAL || "").trim() !== "1";
   }
 
   stopRuntime(): void {

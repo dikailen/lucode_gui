@@ -37,6 +37,46 @@ def test_capability_resolver_preserves_existing_task_tool_scope():
     assert "planner_task_mcp_passthrough" in binding.reasons
 
 
+def test_capability_resolver_auto_binds_desktop_browser_for_explicit_browser_interaction(monkeypatch):
+    from runtime.capabilities.resolver import CapabilityResolver
+
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_URL", "http://127.0.0.1:41011")
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN", "token_1")
+    task = _task(
+        title="Use embedded browser",
+        instruction="用内置浏览器打开 https://example.com/login 并点击登录按钮。",
+        mcp=["project_filesystem_readonly"],
+        read_set=[],
+        write_intent=[],
+    )
+
+    binding = CapabilityResolver().resolve_task(task)
+
+    assert binding.mcp == ("project_filesystem_readonly", "desktop_browser")
+    assert binding.source == "capability_resolver"
+    assert "desktop_browser_interaction_detected" in binding.reasons
+    assert "desktop_browser_available" in binding.reasons
+
+
+def test_capability_resolver_does_not_bind_desktop_browser_for_generic_web_search(monkeypatch):
+    from runtime.capabilities.resolver import CapabilityResolver
+
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_URL", "http://127.0.0.1:41011")
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN", "token_1")
+    task = _task(
+        title="Search official docs",
+        instruction="联网搜索 OpenAI 官方文档并返回链接。",
+        mcp=["web_search"],
+        read_set=[],
+        write_intent=[],
+    )
+
+    binding = CapabilityResolver().resolve_task(task)
+
+    assert binding.mcp == ("web_search",)
+    assert "desktop_browser_interaction_detected" not in binding.reasons
+
+
 def test_agent_factory_binds_mcp_servers_from_capability_resolver():
     from runtime.agents.factory import AgentFactory
     from runtime.capabilities.resolver import CapabilityBinding

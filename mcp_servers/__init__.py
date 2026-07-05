@@ -17,6 +17,7 @@ MCP_MODULES = {
     "command_runner": "mcp_servers.execution.command_mcp",
     "git_tools": "mcp_servers.execution.git_mcp",
     "web_search": "mcp_servers.network.web_search_mcp",
+    "desktop_browser": "mcp_servers.desktop_browser_mcp",
 }
 
 READ_ONLY_FILESYSTEM_TOOLS = [
@@ -67,15 +68,16 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _safe_mcp_env(values: dict[str, str]) -> dict[str, str]:
+def _safe_mcp_env(values: dict[str, str], *, allow_secrets: set[str] | None = None) -> dict[str, str]:
     """Return a minimal child-process env without inherited API keys or tokens."""
 
     denied_markers = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
+    allowed = {str(item).upper() for item in (allow_secrets or set())}
     project_root = str(Path(__file__).resolve().parent.parent)
     safe = {}
     for key, value in values.items():
         normalized = str(key or "").upper()
-        if any(marker in normalized for marker in denied_markers):
+        if normalized not in allowed and any(marker in normalized for marker in denied_markers):
             continue
         safe[str(key)] = str(value)
     safe.setdefault("PYTHONIOENCODING", "utf-8")
@@ -346,6 +348,56 @@ def create_command_runner_server(project_root: Path, quarantine_dir: Path):
     )
 
 
+def create_desktop_browser_server(project_root: Path, quarantine_dir: Path):
+    """Create a desktop browser MCP server backed by the local Electron bridge."""
+
+    bridge_url = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_URL") or "").strip()
+    bridge_token = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN") or "").strip()
+    if not bridge_url or not bridge_token:
+        raise RuntimeError("Desktop browser bridge env is missing.")
+
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
+    return MCPServerStdio(
+        name="desktop_browser_mcp",
+        params={
+            "command": sys.executable,
+            "args": _module_args(MCP_MODULES["desktop_browser"]),
+            "env": _safe_mcp_env(
+                {
+                    "DESKTOP_BROWSER_PROJECT_ROOT": str(project_root),
+                    "DESKTOP_BROWSER_QUARANTINE_DIR": str(quarantine_dir),
+                    "LUCODE_DESKTOP_BROWSER_BRIDGE_URL": bridge_url,
+                    "LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN": bridge_token,
+                    "PYTHONIOENCODING": "utf-8",
+                },
+                allow_secrets={"LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN"},
+            ),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=[
+                "browser_list_tabs",
+                "browser_navigate",
+                "browser_get_page_summary",
+                "browser_click_element",
+                "browser_set_input_value",
+                "browser_submit_form",
+            ],
+        ),
+        require_approval={
+            "always": {
+                "tool_names": [
+                    "browser_click_element",
+                    "browser_set_input_value",
+                    "browser_submit_form",
+                ],
+            },
+        },
+        cache_tools_list=True,
+        client_session_timeout_seconds=30,
+    )
+
+
 def create_git_tools_server(project_root: Path, quarantine_dir: Path):
     """Create a Git helper MCP server. Read-only tools are allowed; commits require approval."""
 
@@ -452,6 +504,8 @@ class MCPServerManager:
             return create_command_runner_server(self.project_root, self.quarantine_dir)
         if mcp_id == "git_tools":
             return create_git_tools_server(self.project_root, self.quarantine_dir)
+        if mcp_id == "desktop_browser":
+            return create_desktop_browser_server(self.project_root, self.quarantine_dir)
         raise KeyError(f"Unknown MCP server id: {mcp_id}")
 
 

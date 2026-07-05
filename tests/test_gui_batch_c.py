@@ -131,3 +131,19 @@ def test_tool_approval_event_payload_includes_requester_task_id():
 
     assert bus.events[0]["event_type"] == "ToolApprovalPre"
     assert bus.events[0]["payload"]["requester"] == "worker-edit"
+
+
+def test_browser_tool_event_summary_keeps_action_targets():
+    event = build_tool_event(
+        "pre_tool_use",
+        "desktop_browser.browser_click_element",
+        '{"tab_id": "tab_1", "selector": "button.submit", "url": "https://example.com/form", "value": "secret"}',
+        tool_rule="desktop_browser",
+        status="pending",
+    )
+
+    assert event.arguments_summary["tab_id"] == "tab_1"
+    assert event.arguments_summary["selector"] == "button.submit"
+    assert event.arguments_summary["url"] == "https://example.com/form"
+    assert event.arguments_summary["value_length"] == 6
+    assert "value" not in event.arguments_summary

@@ -30,6 +30,15 @@ describe("RuntimeClient", () => {
           updated_at: "now",
         });
       }
+      if (url.endsWith("/api/runs/run_1/approvals/approval_1") && init?.method === "POST") {
+        expect(init.body).toBe(JSON.stringify({ decision: "approve" }));
+        return response({
+          approval_id: "approval_1",
+          status: "approved",
+          decision: "approve",
+          answer: "yes",
+        });
+      }
       if (url.endsWith("/api/sessions/session_1/messages")) {
         return response({
           schema_version: "messages.v1",
@@ -244,6 +253,25 @@ describe("RuntimeClient", () => {
           ],
         });
       }
+      if (url.endsWith("/api/plugins") && !init?.method) {
+        return response({
+          schema_version: "plugin_state.v1",
+          skills: [],
+          mcp: [],
+          runtime_capabilities: [
+            {
+              id: "desktop_browser",
+              display_name: "桌面内置浏览器",
+              summary: "Operate the embedded desktop browser through a local authenticated bridge. DOM actions require approval.",
+              summary_zh: "通过本地认证桥操作 Electron 内置浏览器，可读页面摘要并执行受控点击、填表、提交。",
+              surface: "desktop",
+              status_key: "desktop_runtime",
+              ability_keys: ["navigate", "page_summary", "controlled_click", "form_input", "form_submit"],
+              risk_key: "approval_required",
+            },
+          ],
+        });
+      }
       if (url.endsWith("/api/plugins/skills/install") && init?.method === "POST") {
         expect(init.body).toBe(JSON.stringify({ path: "D:\\skills\\demo" }));
         return response({
@@ -260,6 +288,7 @@ describe("RuntimeClient", () => {
             },
           ],
           mcp: [],
+          runtime_capabilities: [],
         });
       }
       if (url.endsWith("/api/plugins/mcp/install") && init?.method === "POST") {
@@ -268,6 +297,7 @@ describe("RuntimeClient", () => {
           schema_version: "plugin_state.v1",
           installed_mcp_id: "demo",
           skills: [],
+          runtime_capabilities: [],
           mcp: [
             {
               id: "demo",
@@ -289,6 +319,7 @@ describe("RuntimeClient", () => {
           schema_version: "plugin_state.v1",
           registered_mcp_id: "local_docs",
           skills: [],
+          runtime_capabilities: [],
           mcp: [
             {
               id: "local_docs",
@@ -310,6 +341,10 @@ describe("RuntimeClient", () => {
     await expect(client.listModels()).resolves.toEqual([]);
     await expect(client.createSession("New chat")).resolves.toMatchObject({ session_id: "session_1" });
     await expect(client.startRun("session_1", "hello")).resolves.toMatchObject({ run_id: "run_1" });
+    await expect(client.resolveRunApproval("run_1", "approval_1", "approve")).resolves.toMatchObject({
+      approval_id: "approval_1",
+      decision: "approve",
+    });
     await expect(client.loadSessionMessages("session_1")).resolves.toEqual([{ role: "user", content: "hello" }]);
     await expect(client.deleteSession("session_1")).resolves.toMatchObject({ deleted: true });
     await expect(client.loadModelSettings()).resolves.toMatchObject({
@@ -338,6 +373,10 @@ describe("RuntimeClient", () => {
         { provider: "custom_openai_compatible", custom: true },
       ],
     });
+    await expect(client.loadPluginState()).resolves.toMatchObject({
+      schema_version: "plugin_state.v1",
+      runtime_capabilities: [{ id: "desktop_browser", status_key: "desktop_runtime" }],
+    });
     await expect(client.installSkill("D:\\skills\\demo")).resolves.toMatchObject({
       installed_skill_id: "demo",
       skills: [{ id: "demo", title: "Demo" }],
@@ -358,7 +397,7 @@ describe("RuntimeClient", () => {
       mcp: [{ id: "local_docs", title: "local_docs" }],
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(15);
+    expect(fetchMock).toHaveBeenCalledTimes(17);
   });
 
   it("builds authenticated websocket urls from http base urls", () => {
@@ -367,6 +406,53 @@ describe("RuntimeClient", () => {
     expect(client.runEventsUrl("run_1")).toBe(
       "ws://127.0.0.1:43217/api/runs/run_1/events?token=token%20with%20space",
     );
+  });
+
+  it("controls the terminal API through authenticated requests", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer token_1");
+      if (url.endsWith("/api/terminal") && !init?.method) {
+        return response(terminalStateResponse());
+      }
+      if (url.endsWith("/api/terminal/run") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          command: "python --version",
+          cwd: "D:\\repo",
+          timeout_seconds: 20,
+        });
+        return response({ ...terminalStateResponse(), running: true, started_command_id: "cmd_1" });
+      }
+      if (url.endsWith("/api/terminal/stop") && init?.method === "POST") {
+        return response({ ...terminalStateResponse(), stop_requested: true });
+      }
+      if (url.endsWith("/api/terminal/clear") && init?.method === "POST") {
+        return response({ ...terminalStateResponse(), transcript: [] });
+      }
+      if (url.endsWith("/api/terminal/rerun") && init?.method === "POST") {
+        return response({ ...terminalStateResponse(), running: true, started_command_id: "cmd_2" });
+      }
+      if (url.endsWith("/api/terminal/cwd") && init?.method === "PUT") {
+        expect(JSON.parse(String(init.body))).toEqual({ cwd: "D:\\repo\\desktop" });
+        return response({ ...terminalStateResponse(), cwd: "D:\\repo\\desktop" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    const client = new RuntimeClient({
+      baseUrl: "http://127.0.0.1:43217/",
+      token: "token_1",
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await expect(client.loadTerminalState()).resolves.toMatchObject({ schema_version: "terminal.v1" });
+    await expect(client.runTerminalCommand("python --version", { cwd: "D:\\repo", timeout_seconds: 20 })).resolves.toMatchObject({
+      started_command_id: "cmd_1",
+    });
+    await expect(client.stopTerminalCommand()).resolves.toMatchObject({ stop_requested: true });
+    await expect(client.clearTerminal()).resolves.toMatchObject({ transcript: [] });
+    await expect(client.rerunTerminalCommand()).resolves.toMatchObject({ started_command_id: "cmd_2" });
+    await expect(client.setTerminalCwd("D:\\repo\\desktop")).resolves.toMatchObject({ cwd: "D:\\repo\\desktop" });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it("creates, updates, and deletes providers without putting API keys in responses", async () => {
@@ -589,5 +675,19 @@ function modelSettingsResponse() {
     ui_preferences: {
       language: "zh",
     },
+  };
+}
+
+function terminalStateResponse() {
+  return {
+    schema_version: "terminal.v1",
+    workspace_root: "D:\\repo",
+    cwd: "D:\\repo",
+    running: false,
+    running_command_id: "",
+    running_command: "",
+    last_result: null,
+    history: [],
+    transcript: [],
   };
 }

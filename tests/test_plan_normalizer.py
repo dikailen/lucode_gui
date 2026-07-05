@@ -285,6 +285,16 @@ def test_dynamic_attempt_emits_plan_normalized_for_single_task_multi_agent(monke
     assert len(normalized_events) == 1
     assert normalized_events[0].payload["route_type"] == "single_agent"
     assert planning_events[-1].payload["route_type"] == "single_agent"
+    assert planning_events[-1].payload["tasks"] == [
+        {
+            "id": "task-1",
+            "title": "Task task-1",
+            "model": "worker-model",
+            "mcp": ["project_filesystem_readonly"],
+            "parallel_group": "1",
+            "depends_on": [],
+        }
+    ]
 
 
 def test_dynamic_attempt_passes_memory_pack_to_preview_plan(monkeypatch, tmp_path):

@@ -80,6 +80,20 @@ class TerminalSession:
         running = self._running
         return bool(running and running.thread.is_alive())
 
+    @property
+    def running_command_id(self) -> str:
+        running = self._running
+        if running is None or not running.thread.is_alive():
+            return ""
+        return running.command_id
+
+    @property
+    def running_command(self) -> str:
+        running = self._running
+        if running is None or not running.thread.is_alive():
+            return ""
+        return running.request.command
+
     def set_cwd(self, cwd: str | Path) -> Path:
         resolved = self._resolve_cwd(cwd)
         if not resolved.exists():

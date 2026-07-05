@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import time
 
 import pytest
 
@@ -55,6 +57,19 @@ def _client(tmp_path, *, token: str = TOKEN, model_catalog_provider=None, run_ex
     return TestClient(app)
 
 
+def _wait_terminal_idle(client: TestClient, *, timeout_seconds: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout_seconds
+    payload = {}
+    while time.monotonic() < deadline:
+        response = client.get("/api/terminal", headers=_auth_headers())
+        assert response.status_code == 200, response.json()
+        payload = response.json()
+        if not payload["running"] and payload["last_result"] is not None:
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"terminal did not become idle: {payload}")
+
+
 def test_health_is_available_without_runtime_token(tmp_path):
     client = _client(tmp_path)
 
@@ -63,6 +78,22 @@ def test_health_is_available_without_runtime_token(tmp_path):
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["service"] == "lucode-runtime-server"
+
+
+def test_health_reports_desktop_browser_bridge_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_URL", "http://127.0.0.1:41011")
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN", "token_1")
+    client = _client(tmp_path)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    bridge = response.json()["desktop_browser_bridge"]
+    assert bridge == {
+        "available": True,
+        "url_configured": True,
+        "token_configured": True,
+    }
     assert response.json()["schema_version"] == "runtime_server.v1"
     assert response.json()["workspace_root"] == str(tmp_path.resolve())
 
@@ -595,6 +626,37 @@ def test_plugin_state_endpoint_returns_skills_and_mcp_rows(tmp_path):
     ]
     assert payload["skills"][0]["core"] is True
     assert {item["id"] for item in payload["mcp"]} >= {"filesystem", "git", "browser", "image_draw"}
+    assert payload["runtime_capabilities"] == []
+
+
+def test_plugin_state_endpoint_returns_runtime_capabilities_from_runtime_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_URL", "http://127.0.0.1:41011")
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN", "token_1")
+    client = _client(tmp_path)
+
+    response = client.get("/api/plugins", headers=_auth_headers())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "plugin_state.v1"
+    assert payload["runtime_capabilities"] == [
+        {
+            "id": "desktop_browser",
+            "display_name": "桌面内置浏览器",
+            "summary": "Operate the embedded desktop browser through a local authenticated bridge. DOM actions require approval.",
+            "summary_zh": "通过本地认证桥操作 Electron 内置浏览器，可读页面摘要并执行受控点击、填表、提交。",
+            "surface": "desktop",
+            "status_key": "desktop_runtime",
+            "ability_keys": [
+                "navigate",
+                "page_summary",
+                "controlled_click",
+                "form_input",
+                "form_submit",
+            ],
+            "risk_key": "approval_required",
+        }
+    ]
 
 
 def test_plugin_delete_rejects_core_skill_and_removes_custom_skill(tmp_path):
@@ -730,6 +792,84 @@ def test_plugin_external_mcp_endpoint_rejects_invalid_config(tmp_path):
 
     assert response.status_code == 400
     assert "url is required" in response.json()["error"]["message"]
+
+
+def test_terminal_endpoint_runs_command_and_returns_transcript(tmp_path):
+    client = _client(tmp_path)
+    command = f'"{sys.executable}" --version'
+
+    initial = client.get("/api/terminal", headers=_auth_headers())
+    unauthorized = client.get("/api/terminal")
+    started = client.post(
+        "/api/terminal/run",
+        headers=_auth_headers(),
+        json={"command": command, "timeout_seconds": 10},
+    )
+    finished = _wait_terminal_idle(client)
+
+    assert initial.status_code == 200
+    assert initial.json()["schema_version"] == "terminal.v1"
+    assert initial.json()["cwd"] == str(tmp_path.resolve())
+    assert unauthorized.status_code == 401
+    assert started.status_code == 200
+    assert started.json()["started_command_id"]
+    assert finished["running"] is False
+    assert finished["last_result"]["status"] == "success"
+    assert finished["last_result"]["returncode"] == 0
+    assert "Python" in finished["last_result"]["stdout"]
+    assert finished["history"][-1]["command"] == command
+    assert finished["history"][-1]["status"] == "success"
+    assert [entry["kind"] for entry in finished["transcript"]] == ["command", "stdout", "result"]
+    assert finished["transcript"][0]["text"] == command
+
+
+def test_terminal_endpoint_supports_cwd_clear_and_rerun(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    client = _client(tmp_path)
+    command = f'"{sys.executable}" --version'
+
+    cwd_response = client.put("/api/terminal/cwd", headers=_auth_headers(), json={"cwd": "pkg"})
+    run_response = client.post("/api/terminal/run", headers=_auth_headers(), json={"command": command})
+    first_finished = _wait_terminal_idle(client)
+    clear_response = client.post("/api/terminal/clear", headers=_auth_headers(), json={})
+    rerun_response = client.post("/api/terminal/rerun", headers=_auth_headers(), json={})
+    rerun_finished = _wait_terminal_idle(client)
+
+    assert cwd_response.status_code == 200
+    assert cwd_response.json()["cwd"] == str((tmp_path / "pkg").resolve())
+    assert run_response.status_code == 200
+    assert first_finished["history"][-1]["cwd"] == str((tmp_path / "pkg").resolve())
+    assert clear_response.status_code == 200
+    assert clear_response.json()["transcript"] == []
+    assert clear_response.json()["history"][-1]["command"] == command
+    assert rerun_response.status_code == 200
+    assert rerun_response.json()["started_command_id"]
+    assert rerun_finished["last_result"]["status"] == "success"
+    assert len(rerun_finished["history"]) == 2
+    assert rerun_finished["history"][-1]["command"] == command
+
+
+def test_terminal_endpoint_rejects_empty_or_concurrent_commands(tmp_path):
+    client = _client(tmp_path)
+
+    empty = client.post("/api/terminal/run", headers=_auth_headers(), json={"command": ""})
+    started = client.post(
+        "/api/terminal/run",
+        headers=_auth_headers(),
+        json={"command": f'"{sys.executable}" --version'},
+    )
+    concurrent = client.post(
+        "/api/terminal/run",
+        headers=_auth_headers(),
+        json={"command": f'"{sys.executable}" --version'},
+    )
+
+    assert empty.status_code == 400
+    assert started.status_code == 200
+    if concurrent.status_code != 409:
+        _wait_terminal_idle(client)
+    else:
+        assert "already has a running command" in concurrent.json()["error"]["message"]
 
 
 def test_sessions_are_persisted_and_listed_with_stable_short_titles(tmp_path):
@@ -965,6 +1105,88 @@ def test_run_executor_events_are_bridged_to_versioned_websocket_events(tmp_path)
     assert events[2]["payload"]["text"] == "hello"
     assert events[3]["payload"]["final_output"] == "final answer"
     assert events[3]["payload"]["turn_status"] == "完成"
+
+
+def test_run_approval_endpoint_resolves_pending_approval_request(tmp_path):
+    async def runner(request):
+        answer = await request.approval_session.request_approval("Approve browser click?")
+        return RunExecutionResult(final_output=f"approval={answer}")
+
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=runner)
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            headers=_auth_headers(),
+            json={"title": "approval test"},
+        ).json()["session_id"]
+        run_id = client.post(
+            "/api/runs",
+            headers=_auth_headers(),
+            json={"session_id": session_id, "input": "click the browser button"},
+        ).json()["run_id"]
+
+        with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+            started = websocket.receive_json()
+            requested = websocket.receive_json()
+            assert started["type"] == "run.started"
+            assert requested["type"] == "approval.requested"
+            approval_id = requested["payload"]["approval_id"]
+            assert requested["payload"]["prompt"] == "Approve browser click?"
+
+            response = client.post(
+                f"/api/runs/{run_id}/approvals/{approval_id}",
+                headers=_auth_headers(),
+                json={"decision": "approve"},
+            )
+
+            assert response.status_code == 200, response.json()
+            assert response.json()["decision"] == "approve"
+            resolved = websocket.receive_json()
+            completed = websocket.receive_json()
+            assert resolved["type"] == "approval.resolved"
+            assert resolved["payload"]["approval_id"] == approval_id
+            assert resolved["payload"]["decision"] == "approve"
+            assert completed["type"] == "run.completed"
+            assert completed["payload"]["final_output"] == "approval=yes"
+
+
+def test_run_approval_endpoint_can_reject_pending_approval_request(tmp_path):
+    async def runner(request):
+        answer = await request.approval_session.request_approval("Reject browser click?")
+        return RunExecutionResult(final_output=f"approval={answer}")
+
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=runner)
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            headers=_auth_headers(),
+            json={"title": "approval reject test"},
+        ).json()["session_id"]
+        run_id = client.post(
+            "/api/runs",
+            headers=_auth_headers(),
+            json={"session_id": session_id, "input": "reject the browser button"},
+        ).json()["run_id"]
+
+        with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+            websocket.receive_json()
+            requested = websocket.receive_json()
+            approval_id = requested["payload"]["approval_id"]
+
+            response = client.post(
+                f"/api/runs/{run_id}/approvals/{approval_id}",
+                headers=_auth_headers(),
+                json={"decision": "reject"},
+            )
+
+            assert response.status_code == 200, response.json()
+            assert response.json()["decision"] == "reject"
+            resolved = websocket.receive_json()
+            completed = websocket.receive_json()
+            assert resolved["type"] == "approval.resolved"
+            assert resolved["payload"]["status"] == "rejected"
+            assert completed["type"] == "run.completed"
+            assert completed["payload"]["final_output"] == "approval=no"
 
 
 def test_stop_run_cancels_running_executor_and_emits_cancel_event(tmp_path):

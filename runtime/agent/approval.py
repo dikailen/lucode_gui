@@ -151,7 +151,14 @@ async def run_with_approval(
             print("说明：请检查参数。写入、删除、命令或提交类工具可能改变项目状态；删除/覆盖会先做备份。")
 
             if session is not None:
-                answer = await session.request_approval(approval_prompt())
+                answer = await _request_session_approval(
+                    session,
+                    approval_prompt(),
+                    tool_name=tool_name,
+                    arguments=item.arguments,
+                    tool_rule=tool_rule,
+                    preview=preview,
+                )
             else:
                 try:
                     answer = sanitize_text(input(approval_prompt())).strip().lower()
@@ -249,6 +256,27 @@ async def run_with_approval(
         )
 
     return result
+
+
+async def _request_session_approval(
+    session,
+    prompt: str,
+    *,
+    tool_name: str,
+    arguments: str | None,
+    tool_rule: str,
+    preview: str,
+) -> str:
+    requester = getattr(session, "request_tool_approval", None)
+    if callable(requester):
+        return await requester(
+            prompt,
+            tool_name=tool_name,
+            arguments=arguments,
+            tool_rule=tool_rule,
+            preview=preview,
+        )
+    return await session.request_approval(prompt)
 
 
 async def _decide_with_supervisor_agent(decider, policy_decision, approval_policy, tool_name: str, arguments: str | None):

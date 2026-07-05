@@ -1,12 +1,66 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import re
 
 
 EXCLUSIVE_MCP_RESOURCE_LOCKS = {
     "command_runner": "terminal",
     "safe_backup": "workspace_backup",
+    "desktop_browser": "browser_session",
 }
+
+DESKTOP_BROWSER_MCP_ID = "desktop_browser"
+BROWSER_SURFACE_MARKERS = (
+    "embedded browser",
+    "desktop browser",
+    "browser panel",
+    "built-in browser",
+    "browser tab",
+    "browser",
+    "page summary",
+    "dom",
+    "selector",
+    "tab",
+    "web page",
+    "open page",
+    "navigate",
+    "click",
+    "fill",
+    "input",
+    "submit",
+    "form",
+    "内置浏览器",
+    "桌面浏览器",
+    "浏览器面板",
+    "浏览器",
+    "网页",
+    "页面摘要",
+    "地址栏",
+    "打开页面",
+    "跳转",
+    "点击",
+    "填表",
+    "输入",
+    "提交",
+    "表单",
+    "选择器",
+    "标签页",
+)
+WEB_SEARCH_ONLY_MARKERS = (
+    "web search",
+    "search the web",
+    "browse the web",
+    "official docs",
+    "official link",
+    "return only links",
+    "联网搜索",
+    "联网上搜索",
+    "官方文档",
+    "官方链接",
+    "返回链接",
+)
 
 
 @dataclass(frozen=True)
@@ -44,11 +98,17 @@ class CapabilityResolver:
     """
 
     def resolve_task(self, task) -> CapabilityBinding:
-        mcp = _string_tuple(getattr(task, "mcp", []) or [])
+        mcp_values = list(getattr(task, "mcp", []) or [])
+        reasons = ["planner_task_mcp_passthrough"]
+        if _desktop_browser_available():
+            reasons.append("desktop_browser_available")
+            if _needs_desktop_browser(task):
+                mcp_values.append(DESKTOP_BROWSER_MCP_ID)
+                reasons.append("desktop_browser_interaction_detected")
+        mcp = _string_tuple(mcp_values)
         read_set = _string_tuple(getattr(task, "read_set", []) or [])
         write_intent = _string_tuple(getattr(task, "write_intent", []) or [])
         resource_locks = _resource_locks_for_task(task, mcp)
-        reasons = ["planner_task_mcp_passthrough"]
         if write_intent and "workspace_edit" in mcp:
             reasons.append("declared_write_scope")
         if read_set:
@@ -61,7 +121,7 @@ class CapabilityResolver:
             read_set=read_set,
             write_intent=write_intent,
             resource_locks=resource_locks,
-            source="planner_task",
+            source="capability_resolver" if DESKTOP_BROWSER_MCP_ID in mcp else "planner_task",
             reasons=tuple(reasons),
         )
 
@@ -81,6 +141,47 @@ def _resource_locks_for_task(task, mcp: tuple[str, ...]) -> tuple[str, ...]:
 
 def _string_tuple(values) -> tuple[str, ...]:
     return _dedupe_tuple(str(item or "").strip() for item in list(values or []) if str(item or "").strip())
+
+
+def _desktop_browser_available() -> bool:
+    return bool(
+        str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_URL") or "").strip()
+        and str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN") or "").strip()
+    )
+
+
+def _needs_desktop_browser(task) -> bool:
+    text = "\n".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "instruction", "") or ""),
+        ]
+    ).lower()
+    if not text.strip():
+        return False
+    if any(marker in text for marker in WEB_SEARCH_ONLY_MARKERS):
+        return False
+    if re.search(r"https?://\S+", text) and any(marker in text for marker in BROWSER_SURFACE_MARKERS):
+        return True
+    if any(marker in text for marker in ("selector", "dom", "click", "fill", "submit", "input")):
+        return True
+    return any(marker in text for marker in BROWSER_SURFACE_MARKERS) and any(
+        marker in text
+        for marker in (
+            "open",
+            "navigate",
+            "click",
+            "fill",
+            "submit",
+            "input",
+            "打开",
+            "跳转",
+            "点击",
+            "填表",
+            "输入",
+            "提交",
+        )
+    )
 
 
 def _normalize_resource(value) -> str:

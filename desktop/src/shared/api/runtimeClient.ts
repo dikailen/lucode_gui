@@ -8,10 +8,13 @@ import type {
   ProviderModelsFetchPayload,
   ProviderModelsFetchResponse,
   ProviderSettingsPayload,
+  RunApprovalDecision,
+  RunApprovalResponse,
   RuntimeModel,
   ServerRun,
   ServerSession,
   SessionMessagesResponse,
+  TerminalStateResponse,
 } from "../types";
 
 type FetchLike = typeof fetch;
@@ -139,6 +142,52 @@ export class RuntimeClient {
     });
   }
 
+  async loadTerminalState(): Promise<TerminalStateResponse> {
+    return this.request<TerminalStateResponse>("/api/terminal");
+  }
+
+  async runTerminalCommand(
+    command: string,
+    options: { cwd?: string; timeout_seconds?: number } = {},
+  ): Promise<TerminalStateResponse> {
+    return this.request<TerminalStateResponse>("/api/terminal/run", {
+      method: "POST",
+      body: JSON.stringify({
+        command,
+        cwd: options.cwd || "",
+        timeout_seconds: options.timeout_seconds ?? 60,
+      }),
+    });
+  }
+
+  async stopTerminalCommand(): Promise<TerminalStateResponse> {
+    return this.request<TerminalStateResponse>("/api/terminal/stop", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async clearTerminal(): Promise<TerminalStateResponse> {
+    return this.request<TerminalStateResponse>("/api/terminal/clear", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async rerunTerminalCommand(): Promise<TerminalStateResponse> {
+    return this.request<TerminalStateResponse>("/api/terminal/rerun", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async setTerminalCwd(cwd: string): Promise<TerminalStateResponse> {
+    return this.request<TerminalStateResponse>("/api/terminal/cwd", {
+      method: "PUT",
+      body: JSON.stringify({ cwd }),
+    });
+  }
+
   async listSessions(): Promise<ServerSession[]> {
     const payload = await this.request<{ schema_version: "session.v1"; sessions: ServerSession[] }>(
       "/api/sessions",
@@ -178,6 +227,20 @@ export class RuntimeClient {
       method: "POST",
       body: JSON.stringify({}),
     });
+  }
+
+  async resolveRunApproval(
+    runId: string,
+    approvalId: string,
+    decision: RunApprovalDecision,
+  ): Promise<RunApprovalResponse> {
+    return this.request<RunApprovalResponse>(
+      `/api/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      },
+    );
   }
 
   runEventsUrl(runId: string): string {

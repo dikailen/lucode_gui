@@ -142,6 +142,15 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
         "backup_policy": "none",
         "model_requirement": "tool-capable model with network permission",
     },
+    "desktop_browser": {
+        "capability": "browser",
+        "offline_allowed": True,
+        "budget_policy": "local desktop bridge over authenticated loopback HTTP; browser actions require approval",
+        "log_policy": "logs browser navigation, DOM summary reads, and approved page actions",
+        "backup_policy": "none",
+        "model_requirement": "tool-capable model with desktop runtime bridge",
+        "summary": "Operate the embedded desktop browser through a local authenticated bridge. DOM actions require approval.",
+    },
 }
 
 

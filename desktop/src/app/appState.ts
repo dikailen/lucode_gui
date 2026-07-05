@@ -4,6 +4,7 @@ import type {
   PersistedChatMessage,
   RenderedMessagePart,
   RunEvent,
+  ModelSettingsResponse,
   RuntimeModel,
   ServerSession,
 } from "../shared/types";
@@ -28,6 +29,15 @@ export type StageMeta = {
   detail: string;
 };
 
+export type WorkAreaActivity = {
+  id: string;
+  kind: "thinking" | "tool" | "browser" | "approval" | "error";
+  status: "running" | "waiting" | "done" | "failed";
+  title: string;
+  detail: string;
+  timestamp: string;
+};
+
 export type WorkAreaTask = {
   id: string;
   title: string;
@@ -37,13 +47,20 @@ export type WorkAreaTask = {
   parallelGroup: string;
   status: "waiting" | "running" | "completed" | "failed";
   latest: string;
+  activities?: WorkAreaActivity[];
 };
 
 export type WorkAreaSnapshot = {
+  runStatus: RunStatus;
   routeType: string;
   taskCount: number;
   supervisorActivity: string;
+  globalActivities?: WorkAreaActivity[];
   collapsedSummary: string;
+  processSummary?: string;
+  durationText?: string;
+  startedAt?: string;
+  endedAt?: string;
   tasks: WorkAreaTask[];
 };
 
@@ -66,6 +83,18 @@ export function selectPrimaryModelLabel(models: RuntimeModel[]): string {
     return "\u672a\u914d\u7f6e\u6a21\u578b";
   }
   return displayModelNameForModel(configured);
+}
+
+export function selectOrchestratorModelLabel(settings: ModelSettingsResponse, fallback = "\u672a\u914d\u7f6e\u6a21\u578b"): string {
+  const selectedModelId = settings.roles.find((role) => role.role === "orchestrator")?.selected_model_id || "";
+  if (!selectedModelId) {
+    return fallback;
+  }
+  const selectedModel = settings.models.find((model) => model.id === selectedModelId);
+  if (!selectedModel) {
+    return selectedModelId;
+  }
+  return displayModelNameForModel(selectedModel);
 }
 
 export function activeSessionTitle(state: AppState, t?: Translator): string {
@@ -232,8 +261,13 @@ export function workAreaSnapshot(state: AppState, t?: Translator): WorkAreaSnaps
     return null;
   }
   const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const runEvents = state.events.filter((event) => event.run_id === planEvent.run_id);
+  const startedAt = runStartTime(runEvents);
+  const endedAt = runEndTime(state.runStatus, runEvents);
+  const durationText = formatRunDuration(startedAt, endedAt || runEvents.at(-1)?.created_at || "");
   let supervisorActivity = "";
-  for (const event of state.events.filter((item) => item.seq >= planEvent.seq)) {
+  const globalActivities: WorkAreaActivity[] = [];
+  for (const event of runEvents.filter((item) => item.seq >= planEvent.seq)) {
     const taskId = taskIdFromEvent(event);
     if (taskId && taskById.has(taskId)) {
       const task = taskById.get(taskId)!;
@@ -246,18 +280,40 @@ export function workAreaSnapshot(state: AppState, t?: Translator): WorkAreaSnaps
       } else if (event.type === "worker.delta") {
         task.status = task.status === "waiting" ? "running" : task.status;
         task.latest = truncateLine(textPayload(event, "text") || textPayload(event, "message") || task.latest);
+        const activity = workerProgressActivityFromEvent(event);
+        if (activity) {
+          task.activities = [...(task.activities ?? []), activity];
+        }
       } else if (event.type.startsWith("tool.")) {
-        task.latest = eventDetail(event, t) || eventLabel(event, t);
+        const activity = workAreaActivityFromEvent(event);
+        if (activity) {
+          task.activities = [...(task.activities ?? []), activity];
+          task.latest = activity.detail ? `${activity.title}: ${activity.detail}` : activity.title;
+        } else {
+          task.latest = eventDetail(event, t) || eventLabel(event, t);
+        }
+      }
+    } else if (event.type.startsWith("tool.")) {
+      const activity = workAreaActivityFromEvent(event);
+      if (activity) {
+        globalActivities.push(activity);
+        supervisorActivity = activity.detail ? `${activity.title}: ${activity.detail}` : activity.title;
       }
     } else if (event.type.startsWith("audit.") || event.type.startsWith("planner.")) {
       supervisorActivity = eventDetail(event, t) || eventLabel(event, t);
     }
   }
   return {
+    runStatus: state.runStatus,
     routeType,
     taskCount: tasks.length,
     supervisorActivity,
+    globalActivities,
     collapsedSummary: workAreaSummary(state, tasks, t),
+    processSummary: processSummary(state.runStatus, durationText, t),
+    durationText,
+    startedAt,
+    endedAt,
     tasks,
   };
 }
@@ -515,6 +571,144 @@ function taskIdFromEvent(event: RunEvent): string {
   return stringValue(event.payload?.task_id) || stringValue(event.payload?.id);
 }
 
+function workerProgressActivityFromEvent(event: RunEvent): WorkAreaActivity | null {
+  if (event.type !== "worker.delta") {
+    return null;
+  }
+  const detail = truncateLine(textPayload(event, "text") || textPayload(event, "message"), 140);
+  if (!detail) {
+    return null;
+  }
+  return {
+    id: `${event.run_id}_${event.seq}_${event.type}`,
+    kind: "thinking",
+    status: "running",
+    title: "进度",
+    detail,
+    timestamp: event.created_at,
+  };
+}
+
+function workAreaActivityFromEvent(event: RunEvent): WorkAreaActivity | null {
+  if (!event.type.startsWith("tool.")) {
+    return null;
+  }
+  const payload = event.payload || {};
+  const args = objectValue(payload.arguments_summary);
+  const toolName = stringValue(payload.tool_name) || stringValue(payload.tool);
+  const action = stringValue(payload.action) || actionFromToolName(toolName);
+  const status = toolActivityStatus(event);
+  const detail = activityDetail(args, payload);
+  const isBrowser = isBrowserAction(toolName, action);
+  return {
+    id: `${event.run_id}_${event.seq}_${event.type}`,
+    kind: event.type === "tool.approval_required" ? "approval" : isBrowser ? "browser" : "tool",
+    status,
+    title: activityTitle({ toolName, action, detail, status, eventType: event.type, isBrowser }),
+    detail,
+    timestamp: event.created_at,
+  };
+}
+
+function activityTitle({
+  toolName,
+  action,
+  detail,
+  status,
+  eventType,
+  isBrowser,
+}: {
+  toolName: string;
+  action: string;
+  detail: string;
+  status: WorkAreaActivity["status"];
+  eventType: string;
+  isBrowser: boolean;
+}): string {
+  if (eventType === "tool.approval_required" || status === "waiting") {
+    return isBrowser ? "等待浏览器审批" : "等待工具审批";
+  }
+  if (status === "failed") {
+    return isBrowser ? "浏览器操作失败" : "工具调用失败";
+  }
+  if (isBrowser) {
+    if (action === "browser_navigate") {
+      return "打开网页";
+    }
+    if (action === "browser_get_page_summary") {
+      return "读取页面";
+    }
+    if (action === "browser_click_element") {
+      return "点击页面";
+    }
+    if (action === "browser_set_input_value") {
+      return "填写页面";
+    }
+    if (action === "browser_submit_form") {
+      return "提交表单";
+    }
+    return "浏览器操作";
+  }
+  const haystack = `${toolName} ${action}`.toLowerCase();
+  if (detail && haystack.includes("command")) {
+    return "运行命令";
+  }
+  if (detail && /(read|filesystem|file|path)/.test(haystack)) {
+    return "读取文件";
+  }
+  if (detail && /(write|edit|patch|delete|create)/.test(haystack)) {
+    return "修改文件";
+  }
+  return status === "done" ? "工具调用完成" : "执行工具";
+}
+
+function toolActivityStatus(event: RunEvent): WorkAreaActivity["status"] {
+  const marker = `${event.type} ${stringValue(event.payload.status)} ${stringValue(event.payload.outcome)} ${stringValue(
+    event.payload.decision,
+  )}`.toLowerCase();
+  if (/(failed|error|reject|denied)/.test(marker)) {
+    return "failed";
+  }
+  if (event.type === "tool.approval_required" || /(approval|required|waiting|pending)/.test(marker)) {
+    return "waiting";
+  }
+  if (event.type === "tool.completed" || /(completed|success|approved)/.test(marker)) {
+    return "done";
+  }
+  return "running";
+}
+
+function activityDetail(args: Record<string, unknown>, payload: Record<string, unknown>): string {
+  return (
+    stringValue(args.command) ||
+    stringValue(args.url) ||
+    stringValue(args.selector) ||
+    stringValue(args.path) ||
+    stringValue(args.target_path) ||
+    stringValue(args.file_path) ||
+    stringValue(args.tab_id) ||
+    stringValue(args.message) ||
+    stringValue(payload.message)
+  );
+}
+
+function isBrowserAction(toolName: string, action: string): boolean {
+  const haystack = `${toolName} ${action}`.toLowerCase();
+  return haystack.includes("desktop_browser") || haystack.includes("browser_");
+}
+
+function actionFromToolName(toolName: string): string {
+  const clean = toolName.trim();
+  if (!clean) {
+    return "";
+  }
+  return clean.includes(".") ? clean.split(".").at(-1) || "" : clean;
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 function normalizePlanTasks(value: unknown): WorkAreaTask[] {
   if (!Array.isArray(value)) {
     return [];
@@ -532,6 +726,7 @@ function normalizePlanTasks(value: unknown): WorkAreaTask[] {
         parallelGroup: stringValue(item.parallel_group),
         status: "waiting",
         latest: "",
+        activities: [],
       };
     });
 }
@@ -568,6 +763,49 @@ function workAreaSummary(state: AppState, tasks: WorkAreaTask[], t?: Translator)
     return translate(t, "workArea.cancelledSummary", "\u5df2\u505c\u6b62");
   }
   return translate(t, "workArea.completedSummary", `${tasks.length} \u4e2a\u4efb\u52a1\u5b8c\u6210`, { count: tasks.length });
+}
+
+function processSummary(status: RunStatus, durationText: string, t?: Translator): string {
+  const duration = durationText || "0s";
+  if (status === "completed") {
+    return translate(t, "workArea.processCompleted", `已处理 ${duration}`, { duration });
+  }
+  if (status === "failed") {
+    return translate(t, "workArea.processFailed", `处理失败 ${duration}`, { duration });
+  }
+  if (status === "cancelled") {
+    return translate(t, "workArea.processCancelled", `已停止 ${duration}`, { duration });
+  }
+  if (status === "running") {
+    return translate(t, "workArea.processRunning", `处理中 ${duration}`, { duration });
+  }
+  return translate(t, "workArea.processIdle", "执行过程", { duration });
+}
+
+function runStartTime(events: RunEvent[]): string {
+  return events.find((event) => event.type === "run.started")?.created_at || events[0]?.created_at || "";
+}
+
+function runEndTime(status: RunStatus, events: RunEvent[]): string {
+  if (!["completed", "failed", "cancelled"].includes(status)) {
+    return "";
+  }
+  return [...events].reverse().find((event) => /^run\.(completed|failed|cancelled)$/.test(event.type))?.created_at || "";
+}
+
+function formatRunDuration(startedAt: string, endedAt: string): string {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(endedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return "0s";
+  }
+  const totalSeconds = Math.max(0, Math.round((end - start) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 function stage(

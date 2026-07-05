@@ -22,11 +22,13 @@ def load_catalog(name: str) -> dict:
 def load_skill_catalog() -> dict:
     """Load the runtime skill catalog with user and workspace extensions merged in."""
 
-    return build_skill_catalog(PROJECT_ROOT, include_dynamic=True)
+    catalog = build_skill_catalog(PROJECT_ROOT, include_dynamic=True)
+    return _merge_runtime_mcp_skill_authorizations(catalog, load_mcp_catalog())
 
 
 def load_mcp_catalog() -> dict:
-    return load_catalog("mcp_catalog.json")
+    catalog = load_catalog("mcp_catalog.json")
+    return _merge_runtime_core_mcp(catalog)
 
 
 def load_permission_policy() -> dict:
@@ -138,3 +140,64 @@ def _strip_frontmatter(text: str) -> str:
     if end == -1:
         return text
     return text[end + 4 :]
+
+
+def _merge_runtime_core_mcp(catalog: dict) -> dict:
+    """Merge MCPs that only exist in the current runtime surface.
+
+    The embedded desktop browser is only valid when Electron has started its
+    authenticated bridge. Keeping it out of the static JSON avoids misleading
+    CLI runs while still letting planner validation see it in desktop runs.
+    """
+
+    merged = dict(catalog or {})
+    servers = [dict(item) for item in list(merged.get("mcp_servers") or []) if isinstance(item, dict)]
+    known_ids = {str(item.get("id") or "").strip() for item in servers}
+    for item in _runtime_core_mcp_items():
+        mcp_id = str(item.get("id") or "").strip()
+        if not mcp_id or mcp_id in known_ids:
+            continue
+        servers.append(dict(item))
+        known_ids.add(mcp_id)
+    merged["mcp_servers"] = servers
+    return merged
+
+
+def _merge_runtime_mcp_skill_authorizations(skill_catalog: dict, mcp_catalog: dict) -> dict:
+    merged = dict(skill_catalog or {})
+    skills = [dict(item) for item in list(merged.get("skills") or []) if isinstance(item, dict)]
+    runtime_mcps = [
+        item
+        for item in list(mcp_catalog.get("mcp_servers") or [])
+        if str(item.get("source") or "").strip() == "core"
+    ]
+    if not runtime_mcps:
+        merged["skills"] = skills
+        return merged
+
+    for skill in skills:
+        skill_id = str(skill.get("id") or "").strip()
+        allowed = list(skill.get("allowed_mcp") or [])
+        changed = False
+        for mcp in runtime_mcps:
+            mcp_id = str(mcp.get("id") or "").strip()
+            allowed_for_skills = {str(item or "").strip() for item in list(mcp.get("allowed_for_skills") or [])}
+            if mcp_id and skill_id in allowed_for_skills and mcp_id not in allowed:
+                allowed.append(mcp_id)
+                changed = True
+        if changed:
+            skill["allowed_mcp"] = allowed
+    merged["skills"] = skills
+    return merged
+
+
+def _runtime_core_mcp_items() -> list[dict]:
+    try:
+        from runtime.config.extensions import discover_mcp_layers
+    except Exception:
+        return []
+    try:
+        layers = discover_mcp_layers()
+    except Exception:
+        return []
+    return [dict(item) for item in list(layers.get("core") or []) if str(item.get("source") or "") == "core"]

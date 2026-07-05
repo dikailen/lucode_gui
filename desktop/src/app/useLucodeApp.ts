@@ -8,6 +8,7 @@ import {
   markRunStreamDisconnected,
   reduceRunEvent,
   removeSession,
+  selectOrchestratorModelLabel,
   selectPrimaryModelLabel,
   setActiveSession,
   setModelLabel,
@@ -15,7 +16,25 @@ import {
   setSessions,
   type AppState,
 } from "./appState";
-import { displayModelNameForModel } from "./modelDisplay";
+import {
+  closeBottomShell as closeBottomShellState,
+  closeRightDock,
+  closeRightDockWindow as closeRightDockWindowState,
+  clampRightDockWidth,
+  createPanelLayoutState,
+  DEFAULT_RIGHT_DOCK_WIDTH,
+  openRightDockWindow,
+  rightDockWindows,
+  setRightDockWindowStatus,
+  shouldForceCompactSidebar,
+  toggleBottomShell as toggleBottomShellState,
+  toggleRightDockTool,
+  activeRightDockTool,
+  type DockToolId,
+  type RightDockWindow,
+  type RightDockWindowStatus,
+  type RightDockWindowTool,
+} from "./panelLayout";
 import { resolveRuntimeConfig } from "./runtimeEnv";
 import { isTerminalRunEvent } from "./runEvents";
 import { RuntimeClient } from "../shared/api/runtimeClient";
@@ -27,13 +46,17 @@ import type {
   ProviderModelsFetchPayload,
   ProviderModelsFetchResponse,
   ProviderSettingsPayload,
+  RunApprovalDecision,
   RunEvent,
   RuntimeConfig,
   ServerSession,
+  TerminalStateResponse,
 } from "../shared/types";
 
 export type WorkspaceId = "chat" | "plugins" | "settings";
-export type DockToolId = "" | "terminal" | "browser" | "files";
+export type { DockToolId, RightDockWindow, RightDockWindowTool } from "./panelLayout";
+
+const RIGHT_DOCK_WIDTH_KEY = "lucode.rightDockWidth";
 
 export type LucodeAppController = {
   state: AppState;
@@ -45,15 +68,29 @@ export type LucodeAppController = {
   pluginState: PluginStateResponse | null;
   activeWorkspace: WorkspaceId;
   rightDockTool: DockToolId;
+  rightDockWindows: RightDockWindow[];
+  bottomShellOpen: boolean;
+  rightDockWidth: number;
   sidebarCollapsed: boolean;
   settingsError: string;
   pluginError: string;
   pluginInstallingTarget: "skills" | "mcp" | "";
   settingsSavingRole: string;
+  terminalState: TerminalStateResponse | null;
+  terminalError: string;
+  terminalCommand: string;
   setInput: (value: string) => void;
+  setTerminalCommand: (value: string) => void;
   toggleSettings: () => void;
   openSettings: () => void;
-  openDock: (tool: DockToolId) => void;
+  showRightDockHome: () => void;
+  activateRightDockTool: (tool: RightDockWindowTool) => void;
+  collapseRightDock: () => void;
+  closeRightDockWindow: (windowId: string) => void;
+  toggleBottomShell: () => void;
+  closeBottomShell: () => void;
+  startRightDockResize: (clientX: number) => void;
+  resetRightDockWidth: () => void;
   closeSettings: () => void;
   switchWorkspace: (workspace: WorkspaceId) => void;
   toggleSidebar: () => void;
@@ -72,8 +109,15 @@ export type LucodeAppController = {
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
+  refreshTerminalState: () => void;
+  runTerminalCommand: () => void;
+  stopTerminalCommand: () => void;
+  clearTerminal: () => void;
+  rerunTerminalCommand: () => void;
+  setTerminalCwd: (cwd: string) => void;
   submit: (event: FormEvent) => void;
   stopRun: () => void;
+  resolveRunApproval: (runId: string, approvalId: string, decision: RunApprovalDecision) => void;
   createNewSession: () => void;
   selectSession: (sessionId: string) => void;
   requestDeleteSession: (sessionId: string) => void;
@@ -89,13 +133,76 @@ export function useLucodeApp(): LucodeAppController {
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogResponse | null>(null);
   const [pluginState, setPluginState] = useState<PluginStateResponse | null>(null);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>("chat");
-  const [rightDockTool, setRightDockTool] = useState<DockToolId>("");
+  const [panelLayout, setPanelLayout] = useState(() => createPanelLayoutState());
+  const rightDockTool = activeRightDockTool(panelLayout);
+  const dockWindows = rightDockWindows(panelLayout);
+  const bottomShellOpen = panelLayout.bottomShellOpen;
+  const [viewportWidth, setViewportWidth] = useState(() => readViewportWidth());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const effectiveSidebarCollapsed = sidebarCollapsed || shouldForceCompactSidebar(viewportWidth, Boolean(rightDockTool));
+  const [rightDockWidth, setRightDockWidth] = useState(() => loadRightDockWidth(readViewportWidth(), false));
   const [settingsError, setSettingsError] = useState("");
   const [pluginError, setPluginError] = useState("");
   const [pluginInstallingTarget, setPluginInstallingTarget] = useState<"skills" | "mcp" | "">("");
   const [settingsSavingRole, setSettingsSavingRole] = useState("");
+  const [terminalState, setTerminalState] = useState<TerminalStateResponse | null>(null);
+  const [terminalError, setTerminalError] = useState("");
+  const [terminalCommand, setTerminalCommand] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+
+  function saveRightDockWidth(width: number) {
+    const clamped = clampRightDockWidth(width, effectiveSidebarCollapsed, viewportWidth);
+    setRightDockWidth(clamped);
+    try {
+      window.localStorage.setItem(RIGHT_DOCK_WIDTH_KEY, String(clamped));
+    } catch {
+      // Width persistence is optional.
+    }
+  }
+
+  function startRightDockResize(clientX: number) {
+    const startX = Number(clientX);
+    const startWidth = rightDockWidth;
+    const collapsed = effectiveSidebarCollapsed;
+    const viewport = viewportWidth;
+    const handleMove = (event: PointerEvent) => {
+      saveRightDockWidth(startWidth + startX - event.clientX);
+    };
+    const handleEnd = () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleEnd);
+      window.removeEventListener("pointercancel", handleEnd);
+      document.body.classList.remove("resizing-right-dock");
+    };
+    document.body.classList.add("resizing-right-dock");
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleEnd);
+    window.addEventListener("pointercancel", handleEnd);
+    setRightDockWidth(clampRightDockWidth(startWidth, collapsed, viewport));
+  }
+
+  useEffect(() => {
+    function handleResize() {
+      setViewportWidth(readViewportWidth());
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    setRightDockWidth((current) => {
+      const clamped = clampRightDockWidth(current, effectiveSidebarCollapsed, viewportWidth);
+      if (clamped === current) {
+        return current;
+      }
+      try {
+        window.localStorage.setItem(RIGHT_DOCK_WIDTH_KEY, String(clamped));
+      } catch {
+        // Width persistence is optional.
+      }
+      return clamped;
+    });
+  }, [effectiveSidebarCollapsed, viewportWidth]);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,6 +220,7 @@ export function useLucodeApp(): LucodeAppController {
             if (!cancelled) {
               setSettingsError("");
               setModelSettings(settings);
+              setState((current) => setModelLabel(current, selectOrchestratorModelLabel(settings, current.modelLabel)));
             }
           })
           .catch((error) => {
@@ -165,10 +273,28 @@ export function useLucodeApp(): LucodeAppController {
     };
   }, [client]);
 
+  useEffect(() => {
+    if (bottomShellOpen || rightDockTool === "terminal") {
+      void refreshTerminalState();
+    }
+  }, [bottomShellOpen, rightDockTool]);
+
+  useEffect(() => {
+    if ((!bottomShellOpen && rightDockTool !== "terminal") || !terminalState?.running) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshTerminalState();
+    }, 700);
+    return () => window.clearInterval(timer);
+  }, [bottomShellOpen, rightDockTool, terminalState?.running]);
+
   async function refreshModelSettings() {
     setSettingsError("");
     try {
-      setModelSettings(await client.loadModelSettings());
+      const settings = await client.loadModelSettings();
+      setModelSettings(settings);
+      setState((current) => setModelLabel(current, selectOrchestratorModelLabel(settings, current.modelLabel)));
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : String(error));
     }
@@ -253,6 +379,72 @@ export function useLucodeApp(): LucodeAppController {
     return true;
   }
 
+  async function refreshTerminalState() {
+    setTerminalError("");
+    try {
+      setTerminalState(await client.loadTerminalState());
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function runTerminalCommand() {
+    const command = terminalCommand.trim();
+    if (!command || terminalState?.running) {
+      return;
+    }
+    setTerminalError("");
+    try {
+      setTerminalState(await client.runTerminalCommand(command, { cwd: terminalState?.cwd || "" }));
+      setTerminalCommand("");
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function stopTerminalCommand() {
+    setTerminalError("");
+    try {
+      setTerminalState(await client.stopTerminalCommand());
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function clearTerminal() {
+    setTerminalError("");
+    try {
+      setTerminalState(await client.clearTerminal());
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function rerunTerminalCommand() {
+    if (terminalState?.running) {
+      return;
+    }
+    setTerminalError("");
+    try {
+      setTerminalState(await client.rerunTerminalCommand());
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function setTerminalCwd(cwd: string) {
+    const cleanCwd = cwd.trim();
+    if (!cleanCwd || terminalState?.running) {
+      return;
+    }
+    setTerminalError("");
+    try {
+      setTerminalState(await client.setTerminalCwd(cleanCwd));
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function updateRoleModel(role: string, modelId: string) {
     if (!role || !modelId || settingsSavingRole) {
       return;
@@ -263,7 +455,7 @@ export function useLucodeApp(): LucodeAppController {
       const settings = await client.updateModelRole(role, modelId);
       setModelSettings(settings);
       if (role === "orchestrator") {
-        setState((current) => setModelLabel(current, displayModelName(modelId, settings)));
+        setState((current) => setModelLabel(current, selectOrchestratorModelLabel(settings, current.modelLabel)));
       }
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : String(error));
@@ -344,10 +536,7 @@ export function useLucodeApp(): LucodeAppController {
         ? await client.updateProvider(providerId, payload)
         : await client.createProvider(payload);
       setModelSettings(nextSettings);
-      const orchestrator = nextSettings.roles.find((role) => role.role === "orchestrator");
-      if (orchestrator?.selected_model_id) {
-        setState((current) => setModelLabel(current, displayModelName(orchestrator.selected_model_id, nextSettings)));
-      }
+      setState((current) => setModelLabel(current, selectOrchestratorModelLabel(nextSettings, current.modelLabel)));
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : String(error));
       return false;
@@ -366,13 +555,7 @@ export function useLucodeApp(): LucodeAppController {
     try {
       const nextSettings = await client.deleteProvider(providerId);
       setModelSettings(nextSettings);
-      const orchestrator = nextSettings.roles.find((role) => role.role === "orchestrator");
-      setState((current) =>
-        setModelLabel(
-          current,
-          orchestrator?.selected_model_id ? displayModelName(orchestrator.selected_model_id, nextSettings) : "未设置",
-        ),
-      );
+      setState((current) => setModelLabel(current, selectOrchestratorModelLabel(nextSettings, "未设置")));
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : String(error));
       return false;
@@ -440,6 +623,20 @@ export function useLucodeApp(): LucodeAppController {
     }
   }
 
+  async function resolveRunApproval(runId: string, approvalId: string, decision: RunApprovalDecision) {
+    const cleanRunId = runId.trim();
+    const cleanApprovalId = approvalId.trim();
+    if (!cleanRunId || !cleanApprovalId) {
+      return;
+    }
+    setRuntimeError("");
+    try {
+      await client.resolveRunApproval(cleanRunId, cleanApprovalId, decision);
+    } catch (error) {
+      setRuntimeError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   function openRunStream(runId: string) {
     socketRef.current?.close();
     const socket = client.openRunEventSocket(runId);
@@ -454,6 +651,7 @@ export function useLucodeApp(): LucodeAppController {
         return;
       }
       setState((current) => reduceRunEvent(current, payload));
+      updateRightDockForRunEvent(payload);
       if (isTerminalRunEvent(payload.type)) {
         sawTerminalEvent = true;
         socket.close(1000, "run finished");
@@ -480,6 +678,17 @@ export function useLucodeApp(): LucodeAppController {
         socketRef.current = null;
       }
     });
+  }
+
+  function updateRightDockForRunEvent(event: RunEvent) {
+    if (isBrowserCapabilityEvent(event)) {
+      const status = rightDockStatusFromBrowserEvent(event);
+      setPanelLayout((current) => openRightDockWindow(current, "browser", { focus: false, status }));
+      return;
+    }
+    if (event.type === "run.completed" || event.type === "run.cancelled") {
+      setPanelLayout((current) => setRightDockWindowStatus(current, "browser", "idle"));
+    }
   }
 
   async function refreshSessions() {
@@ -549,21 +758,35 @@ export function useLucodeApp(): LucodeAppController {
     pluginState,
     activeWorkspace,
     rightDockTool,
-    sidebarCollapsed,
+    rightDockWindows: dockWindows,
+    bottomShellOpen,
+    rightDockWidth,
+    sidebarCollapsed: effectiveSidebarCollapsed,
     settingsError,
     pluginError,
     pluginInstallingTarget,
     settingsSavingRole,
+    terminalState,
+    terminalError,
+    terminalCommand,
     setInput,
+    setTerminalCommand,
     toggleSettings: () => {
-      setRightDockTool("");
+      setPanelLayout((current) => closeRightDock(current));
       setActiveWorkspace((current) => (current === "settings" ? "chat" : "settings"));
     },
     openSettings: () => {
-      setRightDockTool("");
+      setPanelLayout((current) => closeRightDock(current));
       setActiveWorkspace("settings");
     },
-    openDock: (tool) => setRightDockTool((current) => (current === tool ? "" : tool)),
+    showRightDockHome: () => setPanelLayout((current) => toggleRightDockTool(current, "home")),
+    activateRightDockTool: (tool) => setPanelLayout((current) => toggleRightDockTool(current, tool)),
+    collapseRightDock: () => setPanelLayout((current) => closeRightDock(current)),
+    closeRightDockWindow: (windowId) => setPanelLayout((current) => closeRightDockWindowState(current, windowId)),
+    toggleBottomShell: () => setPanelLayout((current) => toggleBottomShellState(current)),
+    closeBottomShell: () => setPanelLayout((current) => closeBottomShellState(current)),
+    startRightDockResize,
+    resetRightDockWidth: () => saveRightDockWidth(DEFAULT_RIGHT_DOCK_WIDTH),
     closeSettings: () => setActiveWorkspace("chat"),
     switchWorkspace: (workspace) => {
       setActiveWorkspace(workspace);
@@ -587,15 +810,71 @@ export function useLucodeApp(): LucodeAppController {
     installSkill: (path) => void installSkill(path),
     installMcp: (path) => void installMcp(path),
     registerExternalMcp,
+    refreshTerminalState: () => void refreshTerminalState(),
+    runTerminalCommand: () => void runTerminalCommand(),
+    stopTerminalCommand: () => void stopTerminalCommand(),
+    clearTerminal: () => void clearTerminal(),
+    rerunTerminalCommand: () => void rerunTerminalCommand(),
+    setTerminalCwd: (cwd) => void setTerminalCwd(cwd),
     submit: (event) => void submitRun(event),
     stopRun: () => void stopRun(),
+    resolveRunApproval: (runId, approvalId, decision) => void resolveRunApproval(runId, approvalId, decision),
     createNewSession: () => void createNewSession(),
     selectSession: (sessionId) => void selectSession(sessionId),
     requestDeleteSession: (sessionId) => void requestDeleteSession(sessionId),
   };
 }
 
-function displayModelName(modelId: string, settings: ModelSettingsResponse): string {
-  const model = settings.models.find((item) => item.id === modelId);
-  return model ? displayModelNameForModel(model) : modelId;
+function isBrowserCapabilityEvent(event: RunEvent): boolean {
+  const payload = event.payload || {};
+  const toolName = stringPayloadField(payload, "tool_name") || stringPayloadField(payload, "tool");
+  const action = stringPayloadField(payload, "action") || actionFromToolName(toolName);
+  const haystack = `${toolName} ${action}`.toLowerCase();
+  return haystack.includes("desktop_browser") || haystack.includes("browser_");
+}
+
+function rightDockStatusFromBrowserEvent(event: RunEvent): RightDockWindowStatus {
+  const marker = `${event.type} ${stringPayloadField(event.payload || {}, "status")} ${stringPayloadField(
+    event.payload || {},
+    "outcome",
+  )} ${stringPayloadField(event.payload || {}, "decision")}`.toLowerCase();
+  if (/(approval|waiting|required)/.test(marker)) {
+    return "attention";
+  }
+  if (/(failed|error|reject|denied)/.test(marker)) {
+    return "attention";
+  }
+  return "running";
+}
+
+function actionFromToolName(toolName: string): string {
+  const clean = toolName.trim();
+  if (!clean) {
+    return "";
+  }
+  return clean.includes(".") ? clean.split(".").at(-1) || "" : clean;
+}
+
+function stringPayloadField(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readViewportWidth(): number {
+  if (typeof window === "undefined") {
+    return 1280;
+  }
+  return window.innerWidth || 1280;
+}
+
+function loadRightDockWidth(viewportWidth: number, sidebarCollapsed: boolean): number {
+  if (typeof window === "undefined") {
+    return DEFAULT_RIGHT_DOCK_WIDTH;
+  }
+  try {
+    const stored = Number.parseInt(window.localStorage.getItem(RIGHT_DOCK_WIDTH_KEY) || "", 10);
+    return clampRightDockWidth(Number.isFinite(stored) ? stored : DEFAULT_RIGHT_DOCK_WIDTH, sidebarCollapsed, viewportWidth);
+  } catch {
+    return clampRightDockWidth(DEFAULT_RIGHT_DOCK_WIDTH, sidebarCollapsed, viewportWidth);
+  }
 }

@@ -1,7 +1,7 @@
 import { ChatPane } from "./ChatPane";
 import { PluginsPanel } from "./PluginsPanel";
 import { SettingsPanel } from "./SettingsPanel";
-import type { DockToolId, WorkspaceId } from "../useLucodeApp";
+import type { RightDockWindowTool, WorkspaceId } from "../useLucodeApp";
 import type { AppState } from "../appState";
 import type { Translator } from "../i18n";
 import type {
@@ -27,10 +27,15 @@ export type WorkspacePanelProps = {
   providerCatalog: ProviderCatalogResponse | null;
   settingsError: string;
   settingsSavingRole: string;
+  bottomShellOpen: boolean;
+  rightDockOpen: boolean;
   setInput: (value: string) => void;
   submit: React.FormEventHandler;
   stopRun: () => void;
-  openDock: (tool: DockToolId) => void;
+  showRightDockHome: () => void;
+  activateRightDockTool: (tool: RightDockWindowTool) => void;
+  collapseRightDock: () => void;
+  toggleBottomShell: () => void;
   openSettings: () => void;
   closeSettings: () => void;
   refreshModelSettings: () => void;
@@ -63,10 +68,15 @@ export function WorkspacePanel({
   providerCatalog,
   settingsError,
   settingsSavingRole,
+  bottomShellOpen,
+  rightDockOpen,
   setInput,
   submit,
   stopRun,
-  openDock,
+  showRightDockHome,
+  activateRightDockTool,
+  collapseRightDock,
+  toggleBottomShell,
   openSettings,
   closeSettings,
   refreshModelSettings,
@@ -132,7 +142,12 @@ export function WorkspacePanel({
       setInput={setInput}
       submit={submit}
       stopRun={stopRun}
-      openDock={openDock}
+      bottomShellOpen={bottomShellOpen}
+      rightDockOpen={rightDockOpen}
+      showRightDockHome={showRightDockHome}
+      activateRightDockTool={activateRightDockTool}
+      collapseRightDock={collapseRightDock}
+      toggleBottomShell={toggleBottomShell}
       openSettings={openSettings}
       updateRoleModel={updateRoleModel}
     />

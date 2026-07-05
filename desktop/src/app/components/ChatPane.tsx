@@ -10,9 +10,13 @@ import {
   workAreaSnapshot,
   type AppState,
 } from "../appState";
+import { buildChatTurns, type ChatTurn } from "../chatTurns";
 import type { Translator } from "../i18n";
 import { displayModelNameForModel } from "../modelDisplay";
-import type { DockToolId } from "../useLucodeApp";
+import { runtimeToastItems } from "../runtimeActivity";
+import type { RightDockWindowTool } from "../useLucodeApp";
+import { MarkdownContent } from "./MarkdownContent";
+import { RuntimeToastStack } from "./RuntimeToastStack";
 import { WorkAreaPanel } from "./WorkAreaPanel";
 import type { ChatMessage, ModelSettingsResponse } from "../../shared/types";
 
@@ -25,7 +29,12 @@ export type ChatPaneProps = {
   setInput: (value: string) => void;
   submit: (event: FormEvent) => void;
   stopRun: () => void;
-  openDock: (tool: DockToolId) => void;
+  bottomShellOpen: boolean;
+  rightDockOpen: boolean;
+  showRightDockHome: () => void;
+  activateRightDockTool: (tool: RightDockWindowTool) => void;
+  collapseRightDock: () => void;
+  toggleBottomShell: () => void;
   openSettings: () => void;
   updateRoleModel: (role: string, modelId: string) => void;
 };
@@ -39,19 +48,32 @@ export function ChatPane({
   setInput,
   submit,
   stopRun,
-  openDock,
+  bottomShellOpen,
+  rightDockOpen,
+  showRightDockHome,
+  activateRightDockTool,
+  collapseRightDock,
+  toggleBottomShell,
   openSettings,
   updateRoleModel,
 }: ChatPaneProps) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const stage = runStageMeta(state, t);
   const visibleEvents = recentRunEvents(state);
+  const toastItems = runtimeToastItems(state);
   const title = activeSessionTitle(state, t);
   const showStage = state.runStatus !== "idle";
   const snapshot = workAreaSnapshot(state, t);
+  const turns = useMemo(() => buildChatTurns(state.messages, snapshot), [state.messages, snapshot]);
+  const activeTurnId = [...turns].reverse().find((turn) => turn.user)?.id || "";
+  const activeTurn = turns.find((turn) => turn.id === activeTurnId);
   const configuredModels = useMemo(() => modelSettings?.models.filter((model) => model.configured) ?? [], [modelSettings]);
   const orchestratorRole = modelSettings?.roles.find((role) => role.role === "orchestrator");
-  const showThinking = state.runStatus === "running" && !snapshot && !state.messages.some((message) => message.role === "assistant");
+  const showThinking =
+    state.runStatus === "running" &&
+    !snapshot &&
+    Boolean(activeTurn?.user) &&
+    !activeTurn?.responses.some((message) => message.role === "assistant");
   const failedMessage = state.runStatus === "failed" ? lastFailedMessage(state.messages) : "";
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -76,37 +98,52 @@ export function ChatPane({
           ) : null}
         </div>
         <div className="chat-header-actions">
-          <button className="tool-pill-button" type="button" onClick={() => openDock("terminal")}>
-            {t("chat.terminal")}
+          <button
+            className={bottomShellOpen ? "workspace-toggle-button active" : "workspace-toggle-button"}
+            type="button"
+            title={t("chat.toggleShell")}
+            aria-label={t("chat.toggleShell")}
+            aria-pressed={bottomShellOpen}
+            onClick={toggleBottomShell}
+          >
+            <span className="workspace-toggle-icon shell" aria-hidden="true" />
           </button>
-          <button className="tool-pill-button" type="button" onClick={() => openDock("browser")}>
-            {t("chat.browser")}
-          </button>
-          <button className="tool-pill-button" type="button" onClick={() => openDock("files")}>
-            {t("chat.files")}
-          </button>
-          <button className="square-icon-button" type="button" title={t("common.settings")} aria-label={t("common.settings")} onClick={openSettings}>
-            S
+          <button
+            className={rightDockOpen ? "workspace-toggle-button active" : "workspace-toggle-button"}
+            type="button"
+            title={t("chat.toggleRightDock")}
+            aria-label={t("chat.toggleRightDock")}
+            aria-pressed={rightDockOpen}
+            onClick={rightDockOpen ? collapseRightDock : showRightDockHome}
+          >
+            <span className="workspace-toggle-icon dock" aria-hidden="true" />
           </button>
         </div>
       </header>
 
-      <section className="chat-scroll" aria-live="polite">
-        <div className={state.messages.length === 0 ? "message-column empty" : "message-column"}>
-          {state.messages.length === 0 ? (
+      <RuntimeToastStack items={toastItems} onOpenReview={() => activateRightDockTool("review")} />
+
+      <section className={toastItems.length ? "chat-scroll has-runtime-toast" : "chat-scroll"} aria-live="polite">
+        <div className={turns.length === 0 ? "message-column empty" : "message-column"}>
+          {turns.length === 0 ? (
             <div className="empty-chat-prompt">{t("chat.empty")}</div>
           ) : (
-            state.messages.map((message) => <MessageBubble key={message.id} t={t} message={message} />)
+            turns.map((turn) => (
+              <ChatTurnView
+                key={turn.id}
+                t={t}
+                turn={turn}
+                showThinking={showThinking && turn.id === activeTurnId}
+              />
+            ))
           )}
-          {showThinking ? <ThinkingIndicator t={t} /> : null}
-          {snapshot ? <WorkAreaPanel t={t} snapshot={snapshot} /> : null}
           {state.runStatus === "failed" ? (
             <ErrorRecoveryPanel t={t} reason={failedMessage || runtimeError} openSettings={openSettings} />
           ) : null}
         </div>
       </section>
 
-      {visibleEvents.length && state.runStatus === "running" ? (
+      {visibleEvents.length && state.runStatus === "running" && toastItems.length === 0 ? (
         <section className="run-event-strip" aria-label={t("chat.events")}>
           {visibleEvents.map((event) => (
             <div className="run-event-item" key={`${event.run_id}_${event.seq}`}>
@@ -183,6 +220,27 @@ export function ChatPane({
   );
 }
 
+function ChatTurnView({
+  t,
+  turn,
+  showThinking,
+}: {
+  t: Translator;
+  turn: ChatTurn;
+  showThinking: boolean;
+}) {
+  return (
+    <section className={turn.user ? "chat-turn" : "chat-turn orphan"} data-chat-turn-id={turn.id}>
+      {turn.user ? <MessageBubble t={t} message={turn.user} /> : null}
+      {turn.process ? <WorkAreaPanel t={t} snapshot={turn.process} /> : null}
+      {showThinking ? <ThinkingIndicator t={t} /> : null}
+      {turn.responses.map((message) => (
+        <MessageBubble key={message.id} t={t} message={message} />
+      ))}
+    </section>
+  );
+}
+
 function ThinkingIndicator({ t }: { t: Translator }) {
   return (
     <div className="thinking-indicator">
@@ -207,22 +265,29 @@ function ErrorRecoveryPanel({ t, reason, openSettings }: { t: Translator; reason
 }
 
 function MessageBubble({ t, message }: { t: Translator; message: ChatMessage }) {
+  const isAssistant = message.role === "assistant";
   return (
     <article className={`message ${message.role} ${message.status || ""}`}>
-      <div className="message-role">
-        <span>{roleLabel(t, message.role)}</span>
-        {message.status === "streaming" ? <small>{t("chat.generating")}</small> : null}
-      </div>
+      {!isAssistant || message.status === "streaming" ? (
+        <div className="message-role">
+          <span>{roleLabel(t, message.role)}</span>
+          {message.status === "streaming" ? <small>{t("chat.generating")}</small> : null}
+        </div>
+      ) : null}
       <div className="message-content">
-        {renderMessageParts(message.content).map((part, index) =>
-          part.type === "code" ? (
-            <pre className="message-code" key={`${message.id}_code_${index}`}>
-              {part.language ? <code className="code-language">{part.language}</code> : null}
-              <code>{part.content}</code>
-            </pre>
-          ) : (
-            <p key={`${message.id}_text_${index}`}>{part.content}</p>
-          ),
+        {isAssistant ? (
+          <MarkdownContent content={message.content} />
+        ) : (
+          renderMessageParts(message.content).map((part, index) =>
+            part.type === "code" ? (
+              <pre className="message-code" key={`${message.id}_code_${index}`}>
+                {part.language ? <code className="code-language">{part.language}</code> : null}
+                <code>{part.content}</code>
+              </pre>
+            ) : (
+              <p key={`${message.id}_text_${index}`}>{part.content}</p>
+            ),
+          )
         )}
       </div>
     </article>

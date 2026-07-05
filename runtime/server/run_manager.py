@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from catalog_system.model_probe import fetch_upstream_models
 from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+from runtime.config.extensions import discover_mcp_layers
 from runtime.events import ExecutionEventBus
 from runtime.config.model_config import (
     connect_provider,
@@ -38,16 +41,20 @@ from runtime.server.execution_bridge import (
     call_run_executor,
     emit_execution_event_as_run_event,
 )
+from runtime.server.approval_session import RuntimeApprovalSession
 from runtime.server.event_stream import RunEventStream
 from runtime.server.schemas import (
     MODEL_LIST_SCHEMA_VERSION,
     RUNTIME_SERVER_SCHEMA_VERSION,
     SESSION_MESSAGES_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION,
+    TERMINAL_SCHEMA_VERSION,
     ServerRun,
     ServerSession,
     utc_now_iso,
 )
+from runtime.terminal import CommandResult, TerminalHistoryEntry, TerminalSession, TerminalTranscriptEntry
+from runtime.tools.registry import CORE_SERVER_METADATA
 from lucode.gui.i18n import load_gui_language, save_gui_language
 
 
@@ -75,14 +82,69 @@ class RuntimeRunManager:
         self._runs: dict[str, ServerRun] = {}
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._run_cancel_events: dict[str, asyncio.Event] = {}
+        self._approval_sessions: dict[str, RuntimeApprovalSession] = {}
+        self._terminal_session = TerminalSession(workspace_root=self.workspace_root)
 
     def health(self) -> dict[str, Any]:
+        bridge_url = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_URL") or "").strip()
+        bridge_token = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN") or "").strip()
         return {
             "ok": True,
             "service": "lucode-runtime-server",
             "schema_version": RUNTIME_SERVER_SCHEMA_VERSION,
             "workspace_root": str(self.workspace_root),
+            "desktop_browser_bridge": {
+                "available": bool(bridge_url and bridge_token),
+                "url_configured": bool(bridge_url),
+                "token_configured": bool(bridge_token),
+            },
         }
+
+    def terminal_state(self) -> dict[str, Any]:
+        return _terminal_state_payload(self._terminal_session)
+
+    def terminal_set_cwd(self, cwd: str) -> dict[str, Any]:
+        self._terminal_session.set_cwd(str(cwd or "").strip() or self.workspace_root)
+        return self.terminal_state()
+
+    def terminal_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        command = str(payload.get("command") or "").strip()
+        if not command:
+            raise ValueError("command is required")
+        command_id = self._terminal_session.start(
+            command,
+            reason=str(payload.get("reason") or "manual terminal command"),
+            source="user",
+            cwd=str(payload.get("cwd") or "").strip() or None,
+            timeout_seconds=_terminal_timeout(payload.get("timeout_seconds")),
+        )
+        state = self.terminal_state()
+        state["started_command_id"] = command_id
+        return state
+
+    def terminal_stop(self) -> dict[str, Any]:
+        stopped = self._terminal_session.cancel()
+        state = self.terminal_state()
+        state["stop_requested"] = stopped
+        return state
+
+    def terminal_clear(self) -> dict[str, Any]:
+        self._terminal_session.clear()
+        return self.terminal_state()
+
+    def terminal_rerun(self) -> dict[str, Any]:
+        if not self._terminal_session.history:
+            raise ValueError("terminal session has no command history to rerun")
+        entry = self._terminal_session.history[-1]
+        command_id = self._terminal_session.start(
+            entry.command,
+            reason=entry.reason,
+            source=entry.source,
+            cwd=entry.cwd,
+        )
+        state = self.terminal_state()
+        state["started_command_id"] = command_id
+        return state
 
     def list_models(self) -> dict[str, Any]:
         try:
@@ -266,6 +328,7 @@ class RuntimeRunManager:
             "schema_version": "plugin_state.v1",
             "skills": skills,
             "mcp": mcp_rows,
+            "runtime_capabilities": _runtime_capabilities_payload(self.workspace_root),
         }
 
     def delete_skill(self, skill_id: str) -> dict[str, Any]:
@@ -435,6 +498,9 @@ class RuntimeRunManager:
             raise ValueError(f"unknown run_id: {run_id}")
         if run.status in {"completed", "failed", "cancelled"}:
             return run.to_dict()
+        approval_session = self._approval_sessions.get(run.run_id)
+        if approval_session is not None:
+            approval_session.cancel_pending("user_requested_stop")
         cancel_event = self._run_cancel_events.get(run.run_id)
         if cancel_event is not None:
             cancel_event.set()
@@ -446,6 +512,16 @@ class RuntimeRunManager:
 
     def has_run(self, run_id: str) -> bool:
         return str(run_id or "").strip() in self._runs
+
+    def resolve_run_approval(self, run_id: str, approval_id: str, decision: str) -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        run = self._runs.get(clean_run_id)
+        if run is None:
+            raise ValueError(f"unknown run_id: {run_id}")
+        approval_session = self._approval_sessions.get(clean_run_id)
+        if approval_session is None:
+            raise ValueError(f"run has no pending approval session: {run_id}")
+        return approval_session.resolve(approval_id, decision)
 
     def _history_items(self):
         try:
@@ -509,6 +585,12 @@ class RuntimeRunManager:
                 event=event,
             )
         )
+        approval_session = RuntimeApprovalSession(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            run_events=self.events,
+        )
+        self._approval_sessions[run.run_id] = approval_session
         request = RunExecutionRequest(
             run_id=run.run_id,
             session_id=run.session_id,
@@ -516,6 +598,7 @@ class RuntimeRunManager:
             workspace_root=self.workspace_root,
             event_bus=event_bus,
             cancel_requested=cancel_requested,
+            approval_session=approval_session,
         )
         try:
             result = await call_run_executor(self._run_executor, request)
@@ -528,9 +611,11 @@ class RuntimeRunManager:
             if run.status != "cancelled":
                 self._mark_completed(run, final_output=result.final_output, metadata=result.metadata)
         finally:
+            approval_session.cancel_pending("run_finished")
             unsubscribe()
             self._run_tasks.pop(run.run_id, None)
             self._run_cancel_events.pop(run.run_id, None)
+            self._approval_sessions.pop(run.run_id, None)
 
     def _mark_completed(self, run: ServerRun, *, final_output: str, metadata: dict[str, Any]) -> None:
         now = utc_now_iso()
@@ -588,6 +673,99 @@ class RuntimeRunManager:
             created_at=session.created_at,
             updated_at=updated_at,
         )
+
+
+def _terminal_state_payload(session: TerminalSession) -> dict[str, Any]:
+    return {
+        "schema_version": TERMINAL_SCHEMA_VERSION,
+        "workspace_root": str(session.workspace_root),
+        "cwd": str(session.current_cwd),
+        "running": session.is_running,
+        "running_command_id": session.running_command_id,
+        "running_command": session.running_command,
+        "last_result": _terminal_result_payload(session.last_result),
+        "history": [_terminal_history_payload(entry) for entry in session.history[-50:]],
+        "transcript": [_terminal_transcript_payload(entry) for entry in session.transcript[-200:]],
+    }
+
+
+def _terminal_history_payload(entry: TerminalHistoryEntry) -> dict[str, Any]:
+    return {
+        "command": entry.command,
+        "cwd": str(entry.cwd),
+        "reason": entry.reason,
+        "source": entry.source,
+        "status": entry.status.value,
+        "returncode": entry.returncode,
+        "duration_ms": entry.duration_ms,
+    }
+
+
+def _terminal_transcript_payload(entry: TerminalTranscriptEntry) -> dict[str, Any]:
+    return {
+        "kind": entry.kind,
+        "command_id": entry.command_id,
+        "text": entry.text,
+        "result": _terminal_result_summary(entry.result),
+    }
+
+
+def _terminal_result_summary(result: CommandResult | None) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    return {
+        "status": result.status.value,
+        "returncode": result.returncode,
+        "duration_ms": result.duration_ms,
+    }
+
+
+def _terminal_result_payload(result: CommandResult | None) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    return {
+        "command": result.command,
+        "cwd": str(result.cwd),
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "status": result.status.value,
+        "decision": _terminal_decision_payload(result),
+        "started_at": result.started_at.isoformat(timespec="seconds"),
+        "ended_at": result.ended_at.isoformat(timespec="seconds"),
+        "duration_ms": result.duration_ms,
+        "source": result.source,
+        "reason": result.reason,
+    }
+
+
+def _terminal_decision_payload(result: CommandResult) -> dict[str, Any]:
+    decision = result.decision
+    return {
+        "decision": decision.decision,
+        "risk_level": decision.risk_level,
+        "reason": decision.reason,
+        "permission_decision": decision.permission_decision,
+        "permission_reason": decision.permission_reason,
+        "findings": [
+            {
+                "severity": getattr(finding, "severity", ""),
+                "category": getattr(finding, "category", ""),
+                "message": getattr(finding, "message", ""),
+                "evidence": getattr(finding, "evidence", ""),
+                "blocks_execution": bool(getattr(finding, "blocks_execution", False)),
+            }
+            for finding in decision.findings
+        ],
+    }
+
+
+def _terminal_timeout(value: Any) -> int:
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        timeout = 60
+    return max(1, min(timeout, 300))
 
 
 def _sanitize_model(item: dict[str, Any]) -> dict[str, Any]:
@@ -852,6 +1030,59 @@ def _clean_title(title: Any) -> str:
 def _is_placeholder_title(title: Any) -> bool:
     normalized = str(title or "").strip().casefold()
     return normalized in {"", "new chat", "untitled chat", "新会话", "未命名会话"}
+
+
+def _runtime_capabilities_payload(workspace_root: Path) -> list[dict[str, Any]]:
+    layers = discover_mcp_layers(SimpleNamespace(workspace_root=workspace_root))
+    capabilities: list[dict[str, Any]] = []
+    for item in layers.get("core") or []:
+        if not bool(item.get("runtime_capability")):
+            continue
+        capabilities.append(_runtime_capability_to_dict(item))
+    return capabilities
+
+
+def _runtime_capability_to_dict(item: dict[str, Any]) -> dict[str, Any]:
+    capability_id = str(item.get("id") or "").strip()
+    metadata = CORE_SERVER_METADATA.get(capability_id, {})
+    summary_zh = str(item.get("summary_zh") or item.get("summary") or "").strip()
+    summary = str(metadata.get("summary") or item.get("summary") or summary_zh).strip()
+    return {
+        "id": capability_id,
+        "display_name": str(item.get("display_name_zh") or capability_id),
+        "summary": summary,
+        "summary_zh": summary_zh,
+        "surface": str(item.get("runtime_surface") or "runtime"),
+        "status_key": str(item.get("runtime_status_key") or "runtime_available"),
+        "ability_keys": _runtime_capability_ability_keys(item),
+        "risk_key": "approval_required" if bool(item.get("approval_required")) else "standard",
+    }
+
+
+def _runtime_capability_ability_keys(item: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    tools = item.get("tools")
+    if isinstance(tools, str):
+        tool_names = [tools.strip()] if tools.strip() else []
+    elif isinstance(tools, (list, tuple)):
+        tool_names = [str(tool).strip() for tool in tools if str(tool).strip()]
+    else:
+        tool_names = []
+    for tool_name in tool_names:
+        key = _runtime_ability_key_for_tool(tool_name)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _runtime_ability_key_for_tool(tool_name: str) -> str:
+    return {
+        "browser_navigate": "navigate",
+        "browser_get_page_summary": "page_summary",
+        "browser_click_element": "controlled_click",
+        "browser_set_input_value": "form_input",
+        "browser_submit_form": "form_submit",
+    }.get(str(tool_name or "").strip())
 
 
 def _is_core_skill_card(card: Any) -> bool:

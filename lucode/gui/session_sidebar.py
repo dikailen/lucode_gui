@@ -533,7 +533,7 @@ class _SkillCardRow(QFrame):
         self.setProperty("skill_id", card.id)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(4)
 
         top = QHBoxLayout()
@@ -541,6 +541,7 @@ class _SkillCardRow(QFrame):
         top.setSpacing(8)
         title = QLabel(card.title)
         title.setObjectName("SkillRowTitle")
+        title.setWordWrap(True)
         top.addWidget(title, 1)
 
         chips = QLabel("  ".join(str(chip) for chip in card.chips))
@@ -579,7 +580,7 @@ class _McpStatusRow(QFrame):
         self.setProperty("listRow", True)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(10)
 
         text_host = QVBoxLayout()
@@ -587,6 +588,7 @@ class _McpStatusRow(QFrame):
         text_host.setSpacing(2)
         name = QLabel(row.title)
         name.setObjectName("McpName")
+        name.setWordWrap(True)
         text_host.addWidget(name)
         if row.detail:
             detail = QLabel(row.detail)

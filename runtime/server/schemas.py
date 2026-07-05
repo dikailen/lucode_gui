@@ -11,6 +11,7 @@ SESSION_SCHEMA_VERSION = "session.v1"
 SESSION_MESSAGES_SCHEMA_VERSION = "messages.v1"
 RUN_SCHEMA_VERSION = "run.v1"
 RUN_EVENT_SCHEMA_VERSION = "run_event.v1"
+TERMINAL_SCHEMA_VERSION = "terminal.v1"
 
 
 def utc_now_iso() -> str:

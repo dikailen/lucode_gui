@@ -81,6 +81,18 @@ export function providerIdForNewConnection(
   return `${base}_${suffix}`;
 }
 
+export function toggleProviderModelSelection(modelsText: string, modelId: string): string {
+  const cleanModelId = modelId.trim();
+  const models = uniqueProviderModels(splitModels(modelsText));
+  if (!cleanModelId) {
+    return models.join("\n");
+  }
+  const nextModels = models.includes(cleanModelId)
+    ? models.filter((model) => model !== cleanModelId)
+    : [...models, cleanModelId];
+  return nextModels.join("\n");
+}
+
 const TABS: Array<{ id: SettingsTab; labelKey: Parameters<Translator>[0] }> = [
   { id: "models", labelKey: "settings.models" },
   { id: "privacy", labelKey: "settings.privacy" },
@@ -362,6 +374,7 @@ function ProvidersSettingsPage({
   const [formNote, setFormNote] = useState("");
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState("");
   const [apiKeyFieldActive, setApiKeyFieldActive] = useState(false);
+  const [selectableModels, setSelectableModels] = useState<string[]>(() => splitModels(form.modelsText));
 
   const configuredModelsByProvider = useMemo(() => {
     const grouped = new Map<string, string[]>();
@@ -386,7 +399,9 @@ function ProvidersSettingsPage({
 
   function selectPreset(providerId: string) {
     const preset = catalog.find((item) => item.provider === providerId);
-    setForm(createProviderForm(preset));
+    const nextForm = createProviderForm(preset);
+    setForm(nextForm);
+    setSelectableModels(splitModels(nextForm.modelsText));
     setApiKeyFieldActive(false);
     setFormError("");
     setFormNote("");
@@ -394,7 +409,9 @@ function ProvidersSettingsPage({
 
   function editProvider(provider: ModelSettingsProvider) {
     const fallbackModels = configuredModelsByProvider.get(provider.provider) ?? [];
-    setForm(createProviderFormFromProvider(provider, fallbackModels));
+    const nextForm = createProviderFormFromProvider(provider, fallbackModels);
+    setForm(nextForm);
+    setSelectableModels(splitModels(nextForm.modelsText));
     setApiKeyFieldActive(false);
     setFormError("");
     setFormNote("");
@@ -430,7 +447,9 @@ function ProvidersSettingsPage({
     };
     const ok = await saveProvider(payload, form.editingProviderId);
     if (ok) {
-      setForm(createProviderForm(catalog.find((item) => item.provider === form.presetId) ?? catalog[0]));
+      const nextForm = createProviderForm(catalog.find((item) => item.provider === form.presetId) ?? catalog[0]);
+      setForm(nextForm);
+      setSelectableModels(splitModels(nextForm.modelsText));
       setApiKeyFieldActive(false);
       setFormNote("");
       setFormError("");
@@ -454,7 +473,9 @@ function ProvidersSettingsPage({
       setFormError(t("settings.providerFetchFailed", { error: result.error || result.source || "unknown" }));
       return;
     }
-    setForm((current) => ({ ...current, modelsText: result.models.join("\n") }));
+    const fetchedModels = uniqueProviderModels(result.models);
+    setSelectableModels(fetchedModels);
+    setForm((current) => ({ ...current, modelsText: fetchedModels.join("\n") }));
     setFormError("");
     setFormNote(t("settings.providerFetchSuccess", { count: result.models.length }));
   }
@@ -468,10 +489,24 @@ function ProvidersSettingsPage({
     if (ok) {
       setPendingDeleteProvider("");
       if (form.editingProviderId === providerId) {
-        setForm(createProviderForm(catalog[0]));
+        const nextForm = createProviderForm(catalog[0]);
+        setForm(nextForm);
+        setSelectableModels(splitModels(nextForm.modelsText));
         setApiKeyFieldActive(false);
       }
     }
+  }
+
+  function toggleFetchedModel(modelId: string) {
+    patchForm({ modelsText: toggleProviderModelSelection(form.modelsText, modelId) });
+  }
+
+  function selectAllFetchedModels() {
+    patchForm({ modelsText: selectableModels.join("\n") });
+  }
+
+  function clearFetchedModelSelection() {
+    patchForm({ modelsText: "" });
   }
 
   return (
@@ -500,7 +535,9 @@ function ProvidersSettingsPage({
             className="secondary-button"
             type="button"
             onClick={() => {
-              setForm(createProviderForm(catalog[0]));
+              const nextForm = createProviderForm(catalog[0]);
+              setForm(nextForm);
+              setSelectableModels(splitModels(nextForm.modelsText));
               setApiKeyFieldActive(false);
             }}
           >
@@ -577,6 +614,16 @@ function ProvidersSettingsPage({
               </button>
             </div>
             <textarea value={form.modelsText} onChange={(event) => patchForm({ modelsText: event.target.value })} />
+            {selectableModels.length ? (
+              <ProviderModelPicker
+                t={t}
+                models={selectableModels}
+                selectedModels={splitModels(form.modelsText)}
+                onToggle={toggleFetchedModel}
+                onSelectAll={selectAllFetchedModels}
+                onClear={clearFetchedModelSelection}
+              />
+            ) : null}
           </ProviderField>
           <div className="provider-checkbox-row">
             <label>
@@ -684,6 +731,56 @@ function ProvidersSettingsPage({
           )}
         </div>
       </section>
+    </div>
+  );
+}
+
+function ProviderModelPicker({
+  t,
+  models,
+  selectedModels,
+  onToggle,
+  onSelectAll,
+  onClear,
+}: {
+  t: Translator;
+  models: string[];
+  selectedModels: string[];
+  onToggle: (modelId: string) => void;
+  onSelectAll: () => void;
+  onClear: () => void;
+}) {
+  const selected = new Set(selectedModels);
+  return (
+    <div className="provider-model-picker">
+      <div className="provider-model-picker-header">
+        <div>
+          <span>{t("settings.providerModelSelection")}</span>
+          <small>{t("settings.providerModelSelectionHint")}</small>
+        </div>
+        <div className="provider-model-picker-actions">
+          <button className="secondary-button" type="button" onClick={onSelectAll}>
+            {t("settings.providerSelectAllModels")}
+          </button>
+          <button className="secondary-button" type="button" onClick={onClear}>
+            {t("settings.providerClearModelSelection")}
+          </button>
+        </div>
+      </div>
+      <div className="provider-model-picker-list">
+        {models.map((model) => (
+          <button
+            key={model}
+            className={selected.has(model) ? "provider-model-option selected" : "provider-model-option"}
+            type="button"
+            aria-pressed={selected.has(model)}
+            onClick={() => onToggle(model)}
+            title={model}
+          >
+            <span>{model}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -900,10 +997,26 @@ function createProviderFormFromProvider(provider: ModelSettingsProvider, fallbac
 }
 
 function splitModels(value: string): string[] {
-  return value
+  return uniqueProviderModels(
+    value
     .split(/\r?\n|,/)
     .map((item) => item.trim())
-    .filter(Boolean);
+      .filter(Boolean),
+  );
+}
+
+function uniqueProviderModels(models: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const model of models) {
+    const cleanModel = model.trim();
+    if (!cleanModel || seen.has(cleanModel)) {
+      continue;
+    }
+    seen.add(cleanModel);
+    result.push(cleanModel);
+  }
+  return result;
 }
 
 function runtimePreferences(modelSettings: ModelSettingsResponse) {

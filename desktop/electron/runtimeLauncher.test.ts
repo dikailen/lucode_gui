@@ -28,6 +28,47 @@ describe("runtimeLauncher", () => {
     expect(waitForHealth).toHaveBeenCalledWith("http://127.0.0.1:43217", 8000);
   });
 
+  it("spawns an owned runtime when desktop browser bridge env is present", async () => {
+    const child = { killed: false, kill: vi.fn() };
+    const spawnRuntime = vi.fn(() => child);
+    const waitForHealth = vi.fn(async () => undefined);
+    const launcher = new RuntimeLauncher({
+      env: {
+        LUCODE_RUNTIME_BASE_URL: "http://127.0.0.1:43217",
+        LUCODE_RUNTIME_TOKEN: "old-token",
+        LUCODE_DESKTOP_BROWSER_BRIDGE_URL: "http://127.0.0.1:50123",
+        LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN: "bridge-token",
+        LUCODE_WORKSPACE_ROOT: "D:/pycharm/code/lucode",
+        LUCODE_PYTHON: "D:/Python/python.exe",
+      },
+      cwd: "D:/pycharm/code/lucode/desktop",
+      spawnRuntime,
+      findFreePort: async () => 45678,
+      randomToken: () => "generated-token",
+      waitForHealth,
+    });
+
+    await expect(launcher.ensureRuntime()).resolves.toMatchObject({
+      baseUrl: "http://127.0.0.1:45678",
+      token: "generated-token",
+      process: child,
+      owned: true,
+    });
+    expect(spawnRuntime).toHaveBeenCalledOnce();
+    expect(spawnRuntime).toHaveBeenCalledWith(
+      "D:/Python/python.exe",
+      ["-m", "runtime.server", "--workspace", "D:/pycharm/code/lucode", "--host", "127.0.0.1", "--port", "45678"],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          LUCODE_RUNTIME_TOKEN: "generated-token",
+          LUCODE_DESKTOP_BROWSER_BRIDGE_URL: "http://127.0.0.1:50123",
+          LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN: "bridge-token",
+        }),
+      }),
+    );
+    expect(waitForHealth).toHaveBeenCalledWith("http://127.0.0.1:45678", 8000);
+  });
+
   it("spawns the Python runtime once with a generated token and workspace root", async () => {
     const child = { killed: false, kill: vi.fn() };
     const spawnRuntime = vi.fn(() => child);

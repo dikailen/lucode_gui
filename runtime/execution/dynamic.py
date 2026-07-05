@@ -270,7 +270,11 @@ async def _execute_dynamic_attempt(
         mode=settings.execution_mode,
         agent="orchestrator",
         status="completed",
-        payload={"route_type": plan.route_type, "task_count": len(plan.tasks)},
+        payload={
+            "route_type": plan.route_type,
+            "task_count": len(plan.tasks),
+            "tasks": _planning_event_tasks(plan),
+        },
     )
     run_state.record_gate(gate_decision)
     validation = validate_plan(plan, privacy_policy=privacy_policy)
@@ -632,6 +636,27 @@ def _title_model_part(part: str) -> str:
     if text.isupper():
         return text
     return text[:1].upper() + text[1:]
+
+
+def _planning_event_tasks(plan) -> list[dict[str, object]]:
+    """Return the compact task shape consumed by the desktop WorkArea tree."""
+
+    tasks = []
+    for index, task in enumerate(list(getattr(plan, "tasks", []) or [])):
+        task_id = str(getattr(task, "id", "") or f"task_{index + 1}")
+        tasks.append(
+            {
+                "id": task_id,
+                "title": str(getattr(task, "title", "") or task_id),
+                "model": str(getattr(task, "model", "") or ""),
+                "mcp": [str(item) for item in list(getattr(task, "mcp", []) or []) if str(item).strip()],
+                "parallel_group": str(getattr(task, "parallel_group", "") or "1"),
+                "depends_on": [
+                    str(item) for item in list(getattr(task, "depends_on", []) or []) if str(item).strip()
+                ],
+            }
+        )
+    return tasks
 
 
 def _task_model_is_usable(

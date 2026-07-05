@@ -136,6 +136,12 @@ def audit_execution(
                             f"预期输出：{expected_text}",
                         )
 
+        if _desktop_browser_action_stopped_at_prose_approval(task, record, final_output):
+            remaining_issues.append(
+                f"任务 {task.id} 是 desktop_browser 页面交互任务，但输出只描述了下一步或自然语言审批，"
+                "没有触发实际浏览器动作工具。"
+            )
+
         if "workspace_edit" in task.mcp and record.status == "completed" and not record.verification:
             remaining_issues.append(
                 f"任务 {task.id} 修改了文件，但没有 verification 结果，无法确认验收标准是否满足。"
@@ -203,9 +209,85 @@ def _should_enforce_semantic_acceptance(task, record=None, criterion: str = "") 
     mcp_ids = set(getattr(task, "mcp", []) or [])
     if mcp_ids.intersection({"workspace_edit", "safe_backup", "command_runner"}):
         return True
+    if "desktop_browser" in mcp_ids and _looks_like_desktop_browser_action_requirement(task, criterion):
+        return True
     if getattr(task, "write_intent", None):
         return True
     return False
+
+
+def _looks_like_desktop_browser_action_requirement(task, criterion: str = "") -> bool:
+    text = _normalize_text(
+        "\n".join(
+            [
+                str(criterion or ""),
+                str(getattr(task, "title", "") or ""),
+                str(getattr(task, "instruction", "") or ""),
+                " ".join(str(item or "") for item in list(getattr(task, "acceptance_criteria", []) or [])),
+                " ".join(str(item or "") for item in list(getattr(task, "expected_outputs", []) or [])),
+            ]
+        )
+    )
+    if not text:
+        return False
+    action_markers = [
+        "browser_click_element",
+        "browser_set_input_value",
+        "browser_submit_form",
+        "click",
+        "fill",
+        "setinput",
+        "set_input",
+        "submit",
+        "填写",
+        "填入",
+        "填表",
+        "输入框",
+        "点击",
+        "提交",
+        "选择器",
+        "selector",
+    ]
+    return any(_normalize_text(marker) in text for marker in action_markers)
+
+
+def _desktop_browser_action_stopped_at_prose_approval(task, record, final_output: str) -> bool:
+    if "desktop_browser" not in set(getattr(task, "mcp", []) or []):
+        return False
+    if str(getattr(record, "status", "") or "") != "completed":
+        return False
+    if not _looks_like_desktop_browser_action_requirement(task):
+        return False
+    text = _normalize_text(f"{getattr(record, 'output_preview', '')}\n{final_output}")
+    if not text:
+        return False
+    prose_approval_markers = [
+        "请审批",
+        "等待审批",
+        "是否继续",
+        "下一步计划",
+        "我将尝试",
+        "将尝试",
+        "我会尝试",
+        "继续执行",
+        "不会提交表单",
+    ]
+    actual_action_markers = [
+        "browser_set_input_value",
+        "browser_click_element",
+        "browser_submit_form",
+        "set_input_value",
+        "action_result",
+        "操作完成",
+        "已填写",
+        "填写完成",
+        "已点击",
+        "点击完成",
+        "已提交",
+    ]
+    return any(_normalize_text(marker) in text for marker in prose_approval_markers) and not any(
+        _normalize_text(marker) in text for marker in actual_action_markers
+    )
 
 
 def _has_successful_verification(record) -> bool:

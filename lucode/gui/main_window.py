@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
         self._closing = False
 
         self.setWindowTitle("Lucode")
-        self.resize(1600, 1000)
+        self.resize(1440, 960)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setObjectName("MainSplitter")
@@ -757,7 +757,7 @@ class MainWindow(QMainWindow):
         page = QFrame()
         page.setObjectName("PluginWorkspacePage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
         title = QLabel(self._t('sidebar.plugins'))
@@ -792,7 +792,7 @@ class MainWindow(QMainWindow):
         mcp_panel = _PluginDropSection("mcp")
         mcp_panel.setObjectName("PluginWorkspaceSection")
         mcp_panel.setProperty("pluginSectionRole", "mcp")
-        mcp_panel.setMaximumWidth(260)
+        mcp_panel.setMaximumWidth(340)
         mcp_panel.files_dropped.connect(self._on_plugin_files_dropped)
         mcp_layout = QVBoxLayout(mcp_panel)
         mcp_layout.setContentsMargins(0, 0, 0, 0)
@@ -807,7 +807,7 @@ class MainWindow(QMainWindow):
 
     def _plugin_section_header(self, title: str, hint_object_name: str, hint_text: str) -> QHBoxLayout:
         header = QHBoxLayout()
-        header.setContentsMargins(12, 0, 12, 0)
+        header.setContentsMargins(8, 0, 8, 0)
         header.setSpacing(8)
         title_label = QLabel(title)
         title_label.setObjectName("PluginSectionTitle")

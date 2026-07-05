@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { SAVED_PROVIDER_KEY_MASK, providerApiKeyInputValue, providerIdForNewConnection } from "./SettingsPanel";
+import {
+  SAVED_PROVIDER_KEY_MASK,
+  providerApiKeyInputValue,
+  providerIdForNewConnection,
+  toggleProviderModelSelection,
+} from "./SettingsPanel";
 
 describe("Provider API key field", () => {
   it("shows a saved provider key as a password-style mask while idle", () => {
@@ -29,5 +34,19 @@ describe("Provider connection id", () => {
   it("uses a stable fallback for non-latin custom provider names", () => {
     expect(providerIdForNewConnection("Company Account", "custom_openai_compatible", true, [])).toBe("company_account");
     expect(providerIdForNewConnection("", "custom_openai_compatible", true, [])).toBe("custom_provider");
+  });
+});
+
+describe("Provider model selection", () => {
+  it("removes a selected fetched model from the saved model list", () => {
+    const next = toggleProviderModelSelection("gpt-4o\ncodex-auto-review\ngpt-4.1", "codex-auto-review");
+
+    expect(next).toBe("gpt-4o\ngpt-4.1");
+  });
+
+  it("adds an unselected fetched model and keeps model ids unique", () => {
+    const next = toggleProviderModelSelection("gpt-4o\ngpt-4o", "codex-auto-review");
+
+    expect(next).toBe("gpt-4o\ncodex-auto-review");
   });
 });

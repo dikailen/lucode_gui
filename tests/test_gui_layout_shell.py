@@ -297,7 +297,7 @@ def test_plugin_workspace_uses_compact_split_and_dense_rows(app, tmp_path):
     assert mcp_panel is not None
     assert skills_panel.acceptDrops()
     assert mcp_panel.acceptDrops()
-    assert mcp_panel.maximumWidth() <= 280
+    assert mcp_panel.maximumWidth() <= 360
     assert len(skills_rows) == 4
     assert len(mcp_rows) >= 2
     assert all(row.maximumHeight() <= 76 for row in skills_rows)
