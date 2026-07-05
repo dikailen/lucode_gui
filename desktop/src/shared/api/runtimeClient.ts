@@ -1,4 +1,6 @@
 import type {
+  ComfyUiSettingsPayload,
+  ComfyUiStateResponse,
   DeleteSessionResponse,
   ExternalMcpPayload,
   ModelSettingsResponse,
@@ -137,6 +139,24 @@ export class RuntimeClient {
 
   async registerExternalMcp(payload: ExternalMcpPayload): Promise<PluginStateResponse> {
     return this.request<PluginStateResponse>("/api/plugins/mcp/external", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async loadComfyUiState(): Promise<ComfyUiStateResponse> {
+    return this.request<ComfyUiStateResponse>("/api/comfyui");
+  }
+
+  async saveComfyUiSettings(payload: ComfyUiSettingsPayload): Promise<ComfyUiStateResponse> {
+    return this.request<ComfyUiStateResponse>("/api/comfyui", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async checkComfyUiConnection(payload: Partial<ComfyUiSettingsPayload> = {}): Promise<ComfyUiStateResponse> {
+    return this.request<ComfyUiStateResponse>("/api/comfyui/check", {
       method: "POST",
       body: JSON.stringify(payload),
     });

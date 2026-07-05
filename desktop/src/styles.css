@@ -3501,6 +3501,12 @@ summary.work-area-header::-webkit-details-marker {
   color: #697386;
 }
 
+.status-chip.danger {
+  border-color: #efcaca;
+  background: #fff4f4;
+  color: #a33a3a;
+}
+
 .plugins-content {
   display: grid;
   min-height: 0;
@@ -3525,6 +3531,12 @@ summary.work-area-header::-webkit-details-marker {
 .runtime-capability-column {
   grid-column: 1 / -1;
   grid-template-rows: auto auto;
+}
+
+.comfyui-column {
+  grid-column: 1 / -1;
+  grid-template-rows: auto auto auto;
+  min-height: auto;
 }
 
 .runtime-capability-heading {
@@ -3633,6 +3645,93 @@ summary.work-area-header::-webkit-details-marker {
 
 .runtime-capability-risk {
   color: #8a5a12;
+}
+
+.comfyui-connection-form {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  border: 1px solid #e1e6f0;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.comfyui-url-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.comfyui-url-field span {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.comfyui-url-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #172033;
+  font-size: 12px;
+  outline: none;
+  padding: 0 10px;
+}
+
+.comfyui-url-field input:focus {
+  border-color: #8bb4ff;
+  box-shadow: 0 0 0 3px rgba(36, 92, 246, 0.1);
+}
+
+.comfyui-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.secondary-button.subtle {
+  color: #667085;
+}
+
+.comfyui-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.comfyui-meta span {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid #e1e7f0;
+  border-radius: 999px;
+  background: #f8fafc;
+  line-height: 1;
+  padding: 5px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comfyui-error {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #efcaca;
+  border-radius: 8px;
+  background: #fff7f7;
+  color: #a33a3a;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .plugin-drop-zone {
@@ -4630,6 +4729,19 @@ summary.work-area-header::-webkit-details-marker {
   .runtime-capability-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
+  }
+
+  .comfyui-connection-form {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .comfyui-actions {
+    justify-content: flex-start;
+  }
+
+  .comfyui-error {
+    white-space: normal;
   }
 
   .plugin-list {

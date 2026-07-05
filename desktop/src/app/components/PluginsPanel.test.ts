@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { createTranslator } from "../i18n";
-import type { PluginRuntimeCapability } from "../../shared/types";
+import type { ComfyUiStateResponse, PluginRuntimeCapability } from "../../shared/types";
 import { PluginsPanel } from "./PluginsPanel";
 
 function pluginState(runtimeCapabilities: PluginRuntimeCapability[] = []) {
@@ -31,18 +31,41 @@ function pluginState(runtimeCapabilities: PluginRuntimeCapability[] = []) {
   };
 }
 
-function renderPanel(language: "zh" | "en", runtimeCapabilities: PluginRuntimeCapability[] = []) {
+function comfyUiState(status: ComfyUiStateResponse["status"] = "unknown"): ComfyUiStateResponse {
+  return {
+    schema_version: "comfyui.v1",
+    base_url: "http://127.0.0.1:8188",
+    configured: true,
+    status,
+    last_error: "",
+    checked_at: status === "unknown" ? "" : "2026-07-05T10:00:00Z",
+    endpoints: status === "online" ? { system_stats: true, queue: true } : {},
+  };
+}
+
+function renderPanel(
+  language: "zh" | "en",
+  runtimeCapabilities: PluginRuntimeCapability[] = [],
+  comfyUi: ComfyUiStateResponse | null = null,
+) {
   return renderToStaticMarkup(
     createElement(PluginsPanel, {
       t: createTranslator(language),
       pluginState: pluginState(runtimeCapabilities),
       pluginError: "",
       pluginInstallingTarget: "",
+      comfyUiState: comfyUi,
+      comfyUiError: "",
+      comfyUiBusy: false,
       refreshPluginState: () => undefined,
       deleteSkill: () => undefined,
       installSkill: () => undefined,
       installMcp: () => undefined,
       registerExternalMcp: async () => true,
+      refreshComfyUiState: () => undefined,
+      saveComfyUiUrl: async () => true,
+      checkComfyUi: () => undefined,
+      openComfyUiInBrowser: () => undefined,
     }),
   );
 }
@@ -102,5 +125,15 @@ describe("PluginsPanel runtime capability section", () => {
     expect(html).toContain("Form input");
     expect(html).toContain("Form submit");
     expect(html).toContain("Page actions require approval");
+  });
+
+  it("renders a compact ComfyUI connection card with actionable controls", () => {
+    const html = renderPanel("en", [], comfyUiState("online"));
+
+    expect(html).toContain("ComfyUI connection");
+    expect(html).toContain("http://127.0.0.1:8188");
+    expect(html).toContain("Online");
+    expect(html).toContain("Check connection");
+    expect(html).toContain("Open right side");
   });
 });

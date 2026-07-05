@@ -5,6 +5,7 @@ import type { RightDockWindowTool, WorkspaceId } from "../useLucodeApp";
 import type { AppState } from "../appState";
 import type { Translator } from "../i18n";
 import type {
+  ComfyUiStateResponse,
   ExternalMcpPayload,
   ModelSettingsResponse,
   PluginStateResponse,
@@ -23,6 +24,9 @@ export type WorkspacePanelProps = {
   pluginState: PluginStateResponse | null;
   pluginError: string;
   pluginInstallingTarget: "skills" | "mcp" | "";
+  comfyUiState: ComfyUiStateResponse | null;
+  comfyUiError: string;
+  comfyUiBusy: boolean;
   modelSettings: ModelSettingsResponse | null;
   providerCatalog: ProviderCatalogResponse | null;
   settingsError: string;
@@ -53,6 +57,10 @@ export type WorkspacePanelProps = {
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
+  refreshComfyUiState: () => void;
+  saveComfyUiUrl: (baseUrl: string) => Promise<boolean>;
+  checkComfyUi: (baseUrl?: string) => void;
+  openComfyUiInBrowser: (baseUrl?: string) => void;
 };
 
 export function WorkspacePanel({
@@ -64,6 +72,9 @@ export function WorkspacePanel({
   pluginState,
   pluginError,
   pluginInstallingTarget,
+  comfyUiState,
+  comfyUiError,
+  comfyUiBusy,
   modelSettings,
   providerCatalog,
   settingsError,
@@ -94,6 +105,10 @@ export function WorkspacePanel({
   installSkill,
   installMcp,
   registerExternalMcp,
+  refreshComfyUiState,
+  saveComfyUiUrl,
+  checkComfyUi,
+  openComfyUiInBrowser,
 }: WorkspacePanelProps) {
   if (activeWorkspace === "settings") {
     return (
@@ -124,11 +139,18 @@ export function WorkspacePanel({
         pluginState={pluginState}
         pluginError={pluginError}
         pluginInstallingTarget={pluginInstallingTarget}
+        comfyUiState={comfyUiState}
+        comfyUiError={comfyUiError}
+        comfyUiBusy={comfyUiBusy}
         refreshPluginState={refreshPluginState}
         deleteSkill={deleteSkill}
         installSkill={installSkill}
         installMcp={installMcp}
         registerExternalMcp={registerExternalMcp}
+        refreshComfyUiState={refreshComfyUiState}
+        saveComfyUiUrl={saveComfyUiUrl}
+        checkComfyUi={checkComfyUi}
+        openComfyUiInBrowser={openComfyUiInBrowser}
       />
     );
   }

@@ -204,6 +204,33 @@ def create_app(
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
 
+    async def comfyui_state(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.comfyui_state())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+
+    async def update_comfyui_settings(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(manager.update_comfyui_settings(payload))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
+    async def check_comfyui(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(await asyncio.to_thread(manager.check_comfyui, payload))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
     async def terminal_state(request: Request) -> JSONResponse:
         try:
             auth.require_http(request)
@@ -376,6 +403,9 @@ def create_app(
             Route("/api/plugins/mcp/install", install_mcp, methods=["POST"]),
             Route("/api/plugins/mcp/external", register_external_mcp, methods=["POST"]),
             Route("/api/plugins/skills/{skill_id}", delete_skill, methods=["DELETE"]),
+            Route("/api/comfyui", comfyui_state, methods=["GET"]),
+            Route("/api/comfyui", update_comfyui_settings, methods=["PUT"]),
+            Route("/api/comfyui/check", check_comfyui, methods=["POST"]),
             Route("/api/terminal", terminal_state, methods=["GET"]),
             Route("/api/terminal/run", terminal_run, methods=["POST"]),
             Route("/api/terminal/stop", terminal_stop, methods=["POST"]),

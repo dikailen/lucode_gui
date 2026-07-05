@@ -1,7 +1,8 @@
-import { type DragEvent, type FormEvent, useState } from "react";
+import { type DragEvent, type FormEvent, useEffect, useState } from "react";
 
 import type { Translator } from "../i18n";
 import type {
+  ComfyUiStateResponse,
   ExternalMcpPayload,
   PluginMcpRow,
   PluginRuntimeCapability,
@@ -22,11 +23,18 @@ export type PluginsPanelProps = {
   pluginState: PluginStateResponse | null;
   pluginError: string;
   pluginInstallingTarget: "skills" | "mcp" | "";
+  comfyUiState: ComfyUiStateResponse | null;
+  comfyUiError: string;
+  comfyUiBusy: boolean;
   refreshPluginState: () => void;
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
+  refreshComfyUiState: () => void;
+  saveComfyUiUrl: (baseUrl: string) => Promise<boolean>;
+  checkComfyUi: (baseUrl?: string) => void;
+  openComfyUiInBrowser: (baseUrl?: string) => void;
 };
 
 export function PluginsPanel({
@@ -34,13 +42,27 @@ export function PluginsPanel({
   pluginState,
   pluginError,
   pluginInstallingTarget,
+  comfyUiState,
+  comfyUiError,
+  comfyUiBusy,
   refreshPluginState,
   deleteSkill,
   installSkill,
   installMcp,
   registerExternalMcp,
+  refreshComfyUiState,
+  saveComfyUiUrl,
+  checkComfyUi,
+  openComfyUiInBrowser,
 }: PluginsPanelProps) {
   const runtimeCapabilities = runtimeCapabilitiesForPlugins(t, pluginState?.runtime_capabilities || []);
+  const [comfyUiUrl, setComfyUiUrl] = useState(comfyUiState?.base_url || "http://127.0.0.1:8188");
+
+  useEffect(() => {
+    if (comfyUiState?.base_url) {
+      setComfyUiUrl(comfyUiState.base_url);
+    }
+  }, [comfyUiState?.base_url]);
 
   return (
     <section className="plugins-pane" aria-label={t("plugins.aria")}>
@@ -76,6 +98,19 @@ export function PluginsPanel({
               </div>
             </section>
           ) : null}
+
+          <ComfyUiConnectionCard
+            t={t}
+            url={comfyUiUrl}
+            state={comfyUiState}
+            error={comfyUiError}
+            busy={comfyUiBusy}
+            onUrlChange={setComfyUiUrl}
+            refresh={refreshComfyUiState}
+            save={saveComfyUiUrl}
+            check={checkComfyUi}
+            openBrowser={openComfyUiInBrowser}
+          />
 
           <section className="plugin-column" aria-label={t("plugins.skillList")}>
             <div className="plugin-section-header">
@@ -117,6 +152,85 @@ export function PluginsPanel({
           </section>
         </div>
       )}
+    </section>
+  );
+}
+
+function ComfyUiConnectionCard({
+  t,
+  url,
+  state,
+  error,
+  busy,
+  onUrlChange,
+  refresh,
+  save,
+  check,
+  openBrowser,
+}: {
+  t: Translator;
+  url: string;
+  state: ComfyUiStateResponse | null;
+  error: string;
+  busy: boolean;
+  onUrlChange: (value: string) => void;
+  refresh: () => void;
+  save: (baseUrl: string) => Promise<boolean>;
+  check: (baseUrl?: string) => void;
+  openBrowser: (baseUrl?: string) => void;
+}) {
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    await save(url);
+  }
+
+  const cleanUrl = url.trim();
+  const status = state?.status || "unknown";
+  const lastError = error || state?.last_error || "";
+
+  return (
+    <section className="plugin-column comfyui-column" aria-label={t("plugins.comfyUiTitle")}>
+      <div className="plugin-section-header">
+        <div className="runtime-capability-heading">
+          <span>{t("plugins.comfyUiTitle")}</span>
+          <small>{t("plugins.comfyUiDescription")}</small>
+        </div>
+        <span className={`status-chip ${status === "online" ? "good" : status === "offline" ? "danger" : "muted"}`}>
+          {comfyUiStatusLabel(t, status)}
+        </span>
+      </div>
+      <form className="comfyui-connection-form" onSubmit={submit}>
+        <label className="comfyui-url-field">
+          <span>{t("plugins.comfyUiUrl")}</span>
+          <input
+            value={url}
+            onChange={(event) => onUrlChange(event.target.value)}
+            placeholder="http://127.0.0.1:8188"
+            disabled={busy}
+          />
+        </label>
+        <div className="comfyui-actions">
+          <button className="secondary-button" type="submit" disabled={busy || !cleanUrl}>
+            {busy ? t("common.saving") : t("common.save")}
+          </button>
+          <button className="secondary-button" type="button" disabled={busy || !cleanUrl} onClick={() => check(cleanUrl)}>
+            {t("plugins.comfyUiCheck")}
+          </button>
+          <button className="secondary-button" type="button" disabled={busy || !cleanUrl} onClick={() => openBrowser(cleanUrl)}>
+            {t("plugins.comfyUiOpen")}
+          </button>
+          <button className="secondary-button subtle" type="button" disabled={busy} onClick={refresh}>
+            {t("common.refresh")}
+          </button>
+        </div>
+      </form>
+      <div className="comfyui-meta">
+        <span>{state?.configured ? t("plugins.comfyUiConfigured") : t("plugins.comfyUiNotConfigured")}</span>
+        {state?.checked_at ? <span>{t("plugins.comfyUiChecked")}: {state.checked_at}</span> : null}
+        {state?.endpoints?.system_stats ? <span>/system_stats</span> : null}
+        {state?.endpoints?.queue ? <span>/queue</span> : null}
+      </div>
+      {lastError ? <div className="comfyui-error">{lastError}</div> : null}
     </section>
   );
 }
@@ -431,4 +545,15 @@ function runtimeCapabilityRisk(t: Translator, riskKey: string): string {
     return t("plugins.runtimeApprovalRequired");
   }
   return riskKey;
+}
+
+function comfyUiStatusLabel(t: Translator, status: ComfyUiStateResponse["status"]): string {
+  switch (status) {
+    case "online":
+      return t("plugins.comfyUiOnline");
+    case "offline":
+      return t("plugins.comfyUiOffline");
+    default:
+      return t("plugins.comfyUiUnknown");
+  }
 }

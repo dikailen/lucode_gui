@@ -794,6 +794,107 @@ def test_plugin_external_mcp_endpoint_rejects_invalid_config(tmp_path):
     assert "url is required" in response.json()["error"]["message"]
 
 
+def test_comfyui_endpoint_returns_default_state_and_requires_auth(tmp_path):
+    client = _client(tmp_path)
+
+    unauthorized = client.get("/api/comfyui")
+    response = client.get("/api/comfyui", headers=_auth_headers())
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "comfyui.v1",
+        "base_url": "http://127.0.0.1:8188",
+        "configured": False,
+        "status": "unknown",
+        "last_error": "",
+        "checked_at": "",
+        "endpoints": {},
+    }
+
+
+def test_comfyui_endpoint_saves_normalized_url(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.put(
+        "/api/comfyui",
+        headers=_auth_headers(),
+        json={"base_url": "127.0.0.1:8188/"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["base_url"] == "http://127.0.0.1:8188"
+    assert response.json()["configured"] is True
+    stored = json.loads((tmp_path / ".lucode" / "comfyui.json").read_text(encoding="utf-8"))
+    assert stored == {"base_url": "http://127.0.0.1:8188"}
+
+
+def test_comfyui_endpoint_rejects_invalid_url(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.put(
+        "/api/comfyui",
+        headers=_auth_headers(),
+        json={"base_url": "file:///tmp/comfyui"},
+    )
+
+    assert response.status_code == 400
+    assert "http or https" in response.json()["error"]["message"]
+
+
+def test_comfyui_check_reports_online_from_saved_url(tmp_path, monkeypatch):
+    from runtime.server import comfyui as comfyui_module
+
+    requested_urls = []
+
+    def fake_get_json(url, *, timeout_seconds):
+        requested_urls.append((url, timeout_seconds))
+        return {}
+
+    monkeypatch.setattr(comfyui_module, "_comfyui_http_get_json", fake_get_json)
+    client = _client(tmp_path)
+    client.put("/api/comfyui", headers=_auth_headers(), json={"base_url": "http://127.0.0.1:8188"})
+
+    response = client.post("/api/comfyui/check", headers=_auth_headers(), json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "online"
+    assert payload["configured"] is True
+    assert payload["last_error"] == ""
+    assert payload["checked_at"]
+    assert payload["endpoints"] == {"system_stats": True, "queue": True}
+    assert requested_urls == [
+        ("http://127.0.0.1:8188/system_stats", 2.0),
+        ("http://127.0.0.1:8188/queue", 2.0),
+    ]
+
+
+def test_comfyui_check_reports_offline_without_failing_request(tmp_path, monkeypatch):
+    from runtime.server import comfyui as comfyui_module
+
+    def fake_get_json(_url, *, timeout_seconds):
+        raise RuntimeError(f"connection refused after {timeout_seconds}s")
+
+    monkeypatch.setattr(comfyui_module, "_comfyui_http_get_json", fake_get_json)
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/comfyui/check",
+        headers=_auth_headers(),
+        json={"base_url": "http://127.0.0.1:8188/"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["base_url"] == "http://127.0.0.1:8188"
+    assert payload["status"] == "offline"
+    assert payload["configured"] is False
+    assert payload["endpoints"] == {"system_stats": False, "queue": False}
+    assert "system_stats" in payload["last_error"]
+    assert "queue" in payload["last_error"]
+
+
 def test_terminal_endpoint_runs_command_and_returns_transcript(tmp_path):
     client = _client(tmp_path)
     command = f'"{sys.executable}" --version'

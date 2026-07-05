@@ -39,6 +39,7 @@ import { resolveRuntimeConfig } from "./runtimeEnv";
 import { isTerminalRunEvent } from "./runEvents";
 import { RuntimeClient } from "../shared/api/runtimeClient";
 import type {
+  ComfyUiStateResponse,
   ExternalMcpPayload,
   ModelSettingsResponse,
   PluginStateResponse,
@@ -57,6 +58,12 @@ export type WorkspaceId = "chat" | "plugins" | "settings";
 export type { DockToolId, RightDockWindow, RightDockWindowTool } from "./panelLayout";
 
 const RIGHT_DOCK_WIDTH_KEY = "lucode.rightDockWidth";
+const DEFAULT_COMFYUI_URL = "http://127.0.0.1:8188";
+
+export type BrowserNavigationRequest = {
+  id: number;
+  url: string;
+};
 
 export type LucodeAppController = {
   state: AppState;
@@ -75,6 +82,10 @@ export type LucodeAppController = {
   settingsError: string;
   pluginError: string;
   pluginInstallingTarget: "skills" | "mcp" | "";
+  comfyUiState: ComfyUiStateResponse | null;
+  comfyUiError: string;
+  comfyUiBusy: boolean;
+  browserNavigationRequest: BrowserNavigationRequest | null;
   settingsSavingRole: string;
   terminalState: TerminalStateResponse | null;
   terminalError: string;
@@ -109,6 +120,10 @@ export type LucodeAppController = {
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
+  refreshComfyUiState: () => void;
+  saveComfyUiUrl: (baseUrl: string) => Promise<boolean>;
+  checkComfyUi: (baseUrl?: string) => void;
+  openComfyUiInBrowser: (baseUrl?: string) => void;
   refreshTerminalState: () => void;
   runTerminalCommand: () => void;
   stopTerminalCommand: () => void;
@@ -144,11 +159,16 @@ export function useLucodeApp(): LucodeAppController {
   const [settingsError, setSettingsError] = useState("");
   const [pluginError, setPluginError] = useState("");
   const [pluginInstallingTarget, setPluginInstallingTarget] = useState<"skills" | "mcp" | "">("");
+  const [comfyUiState, setComfyUiState] = useState<ComfyUiStateResponse | null>(null);
+  const [comfyUiError, setComfyUiError] = useState("");
+  const [comfyUiBusy, setComfyUiBusy] = useState(false);
+  const [browserNavigationRequest, setBrowserNavigationRequest] = useState<BrowserNavigationRequest | null>(null);
   const [settingsSavingRole, setSettingsSavingRole] = useState("");
   const [terminalState, setTerminalState] = useState<TerminalStateResponse | null>(null);
   const [terminalError, setTerminalError] = useState("");
   const [terminalCommand, setTerminalCommand] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+  const browserNavigationSeqRef = useRef(0);
 
   function saveRightDockWidth(width: number) {
     const clamped = clampRightDockWidth(width, effectiveSidebarCollapsed, viewportWidth);
@@ -251,6 +271,19 @@ export function useLucodeApp(): LucodeAppController {
           .catch((error) => {
             if (!cancelled) {
               setSettingsError(error instanceof Error ? error.message : String(error));
+            }
+          });
+        void client
+          .loadComfyUiState()
+          .then((comfyUi) => {
+            if (!cancelled) {
+              setComfyUiError("");
+              setComfyUiState(comfyUi);
+            }
+          })
+          .catch((error) => {
+            if (!cancelled) {
+              setComfyUiError(error instanceof Error ? error.message : String(error));
             }
           });
         const activeSessionId = sessions[0]?.session_id;
@@ -377,6 +410,59 @@ export function useLucodeApp(): LucodeAppController {
       setPluginInstallingTarget("");
     }
     return true;
+  }
+
+  async function refreshComfyUiState() {
+    setComfyUiError("");
+    try {
+      setComfyUiState(await client.loadComfyUiState());
+    } catch (error) {
+      setComfyUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveComfyUiUrl(baseUrl: string): Promise<boolean> {
+    const cleanBaseUrl = baseUrl.trim();
+    if (!cleanBaseUrl || comfyUiBusy) {
+      return false;
+    }
+    setComfyUiError("");
+    setComfyUiBusy(true);
+    try {
+      setComfyUiState(await client.saveComfyUiSettings({ base_url: cleanBaseUrl }));
+    } catch (error) {
+      setComfyUiError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setComfyUiBusy(false);
+    }
+    return true;
+  }
+
+  async function checkComfyUi(baseUrl = "") {
+    if (comfyUiBusy) {
+      return;
+    }
+    setComfyUiError("");
+    setComfyUiBusy(true);
+    try {
+      const cleanBaseUrl = baseUrl.trim();
+      setComfyUiState(await client.checkComfyUiConnection(cleanBaseUrl ? { base_url: cleanBaseUrl } : {}));
+    } catch (error) {
+      setComfyUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setComfyUiBusy(false);
+    }
+  }
+
+  function openComfyUiInBrowser(baseUrl = "") {
+    const url = (baseUrl.trim() || comfyUiState?.base_url || DEFAULT_COMFYUI_URL).trim();
+    if (!url) {
+      return;
+    }
+    browserNavigationSeqRef.current += 1;
+    setBrowserNavigationRequest({ id: browserNavigationSeqRef.current, url });
+    setPanelLayout((current) => openRightDockWindow(current, "browser"));
   }
 
   async function refreshTerminalState() {
@@ -765,6 +851,10 @@ export function useLucodeApp(): LucodeAppController {
     settingsError,
     pluginError,
     pluginInstallingTarget,
+    comfyUiState,
+    comfyUiError,
+    comfyUiBusy,
+    browserNavigationRequest,
     settingsSavingRole,
     terminalState,
     terminalError,
@@ -792,6 +882,7 @@ export function useLucodeApp(): LucodeAppController {
       setActiveWorkspace(workspace);
       if (workspace === "plugins") {
         void refreshPluginState();
+        void refreshComfyUiState();
       }
     },
     toggleSidebar: () => setSidebarCollapsed((current) => !current),
@@ -810,6 +901,10 @@ export function useLucodeApp(): LucodeAppController {
     installSkill: (path) => void installSkill(path),
     installMcp: (path) => void installMcp(path),
     registerExternalMcp,
+    refreshComfyUiState: () => void refreshComfyUiState(),
+    saveComfyUiUrl,
+    checkComfyUi: (baseUrl) => void checkComfyUi(baseUrl),
+    openComfyUiInBrowser,
     refreshTerminalState: () => void refreshTerminalState(),
     runTerminalCommand: () => void runTerminalCommand(),
     stopTerminalCommand: () => void stopTerminalCommand(),

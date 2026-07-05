@@ -162,6 +162,22 @@ export type ExternalMcpPayload = {
   url?: string;
 };
 
+export type ComfyUiStatus = "unknown" | "online" | "offline";
+
+export type ComfyUiStateResponse = {
+  schema_version: "comfyui.v1";
+  base_url: string;
+  configured: boolean;
+  status: ComfyUiStatus;
+  last_error: string;
+  checked_at: string;
+  endpoints: Record<string, boolean>;
+};
+
+export type ComfyUiSettingsPayload = {
+  base_url: string;
+};
+
 export type ServerSession = {
   schema_version: "session.v1";
   session_id: string;

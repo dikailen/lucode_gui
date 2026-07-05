@@ -49,6 +49,9 @@ describe("page responsive styles", () => {
     expect(ruleFor(".runtime-capability-list", styles)).toContain("grid-template-columns: repeat(auto-fit, minmax(280px, 1fr))");
     expect(ruleFor(".runtime-capability-list", media)).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(ruleFor(".runtime-capability-row", media)).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(ruleFor(".comfyui-column", styles)).toContain("grid-column: 1 / -1");
+    expect(ruleFor(".comfyui-connection-form", media)).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(ruleFor(".comfyui-actions", media)).toContain("justify-content: flex-start");
     expect(ruleFor(".external-mcp-grid", media)).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(ruleFor(".plugin-row", media)).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(ruleFor(".external-mcp-form-header", styles)).toContain("grid-template-columns: minmax(0, 1fr) auto");

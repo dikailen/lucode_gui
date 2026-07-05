@@ -42,6 +42,7 @@ from runtime.server.execution_bridge import (
     emit_execution_event_as_run_event,
 )
 from runtime.server.approval_session import RuntimeApprovalSession
+from runtime.server.comfyui import check_comfyui_connection, comfyui_state, save_comfyui_settings
 from runtime.server.event_stream import RunEventStream
 from runtime.server.schemas import (
     MODEL_LIST_SCHEMA_VERSION,
@@ -382,6 +383,15 @@ class RuntimeRunManager:
         result = self.plugin_state()
         result["registered_mcp_id"] = row.id
         return result
+
+    def comfyui_state(self) -> dict[str, Any]:
+        return comfyui_state(self.workspace_root)
+
+    def update_comfyui_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return save_comfyui_settings(self.workspace_root, dict(payload or {}))
+
+    def check_comfyui(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return check_comfyui_connection(self.workspace_root, dict(payload or {}))
 
     def create_session(self, title: str = "") -> dict[str, Any]:
         clean_title = _clean_title(title)

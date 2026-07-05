@@ -11,6 +11,7 @@ import type {
 export type BrowserPanelProps = {
   t: Translator;
   onClose?: () => void;
+  requestedNavigation?: BrowserNavigationRequest | null;
 };
 
 const EMPTY_WORKSPACE: DesktopBrowserWorkspaceState = {
@@ -18,30 +19,38 @@ const EMPTY_WORKSPACE: DesktopBrowserWorkspaceState = {
   tabs: [],
 };
 
-export function BrowserPanel({ t, onClose }: BrowserPanelProps) {
+type BrowserNavigationRequest = {
+  id: number;
+  url: string;
+};
+
+export function BrowserPanel({ t, onClose, requestedNavigation }: BrowserPanelProps) {
   const bridge = typeof window === "undefined" ? undefined : window.lucodeBrowser;
 
   if (!bridge) {
     return <BrowserUnavailable t={t} />;
   }
 
-  return <BrowserWorkspace t={t} bridge={bridge} onClose={onClose} />;
+  return <BrowserWorkspace t={t} bridge={bridge} onClose={onClose} requestedNavigation={requestedNavigation} />;
 }
 
 function BrowserWorkspace({
   t,
   bridge,
   onClose,
+  requestedNavigation,
 }: {
   t: Translator;
   bridge: DesktopBrowserBridge;
   onClose?: () => void;
+  requestedNavigation?: BrowserNavigationRequest | null;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const activeTabIdRef = useRef("");
   const workspaceRef = useRef<DesktopBrowserWorkspaceState>(EMPTY_WORKSPACE);
   const pendingBoundsFrameRef = useRef<number | null>(null);
   const lastSentBoundsRef = useRef<DesktopBrowserBounds | null>(null);
+  const handledNavigationIdRef = useRef(0);
   const [workspace, setWorkspace] = useState<DesktopBrowserWorkspaceState>(EMPTY_WORKSPACE);
   const [addressByTab, setAddressByTab] = useState<Record<string, string>>({});
   const [automationError, setAutomationError] = useState("");
@@ -159,6 +168,55 @@ function BrowserWorkspace({
       window.removeEventListener("resize", requestBoundsSync);
     };
   }, [requestBoundsSync, workspace.activeTabId]);
+
+  useEffect(() => {
+    if (!shouldHandleBrowserNavigationRequest(handledNavigationIdRef.current, requestedNavigation)) {
+      return;
+    }
+    handledNavigationIdRef.current = requestedNavigation.id;
+    let disposed = false;
+    const navigateToRequestedUrl = async () => {
+      const targetUrl = requestedNavigation.url.trim();
+      let targetTabId = workspaceRef.current.activeTabId || workspaceRef.current.tabs[0]?.tabId || "";
+      try {
+        if (!targetTabId) {
+          const created = await bridge.createTab();
+          if (disposed) {
+            return;
+          }
+          applyWorkspace(created);
+          targetTabId = created.activeTabId || created.tabs[0]?.tabId || "";
+        }
+        if (!targetTabId) {
+          return;
+        }
+        const nextWorkspace = await bridge.navigate(targetTabId, targetUrl);
+        if (disposed) {
+          return;
+        }
+        applyWorkspace(nextWorkspace);
+        const nextTab = nextWorkspace.tabs.find((tab) => tab.tabId === nextWorkspace.activeTabId) ?? null;
+        if (nextTab?.url) {
+          setAddressByTab((current) => ({ ...current, [nextTab.tabId]: nextTab.url }));
+        }
+        requestBoundsSync();
+      } catch (navigationError) {
+        if (disposed || !targetTabId) {
+          return;
+        }
+        applyWorkspace({
+          ...workspaceRef.current,
+          tabs: workspaceRef.current.tabs.map((tab) =>
+            tab.tabId === targetTabId ? { ...tab, lastError: errorMessage(navigationError) } : tab,
+          ),
+        });
+      }
+    };
+    void navigateToRequestedUrl();
+    return () => {
+      disposed = true;
+    };
+  }, [applyWorkspace, bridge, requestBoundsSync, requestedNavigation]);
 
   function focusViewport() {
     if (!tabHasPage(activeTab)) {
@@ -417,6 +475,13 @@ function tabHasPage(tab: DesktopBrowserTabState | null): boolean {
 
 export function shouldCloseBrowserPanelAfterTabClose(workspace: DesktopBrowserWorkspaceState): boolean {
   return workspace.tabs.length === 0;
+}
+
+export function shouldHandleBrowserNavigationRequest(
+  lastHandledId: number,
+  request: BrowserNavigationRequest | null | undefined,
+): request is BrowserNavigationRequest {
+  return Boolean(request && request.id > lastHandledId && request.url.trim());
 }
 
 function tabLabel(tab: DesktopBrowserTabState, t: Translator): string {

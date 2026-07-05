@@ -330,6 +330,23 @@ describe("RuntimeClient", () => {
           ],
         });
       }
+      if (url.endsWith("/api/comfyui") && !init?.method) {
+        return response(comfyUiStateResponse());
+      }
+      if (url.endsWith("/api/comfyui") && init?.method === "PUT") {
+        expect(JSON.parse(String(init.body))).toEqual({ base_url: "http://127.0.0.1:8188" });
+        return response({ ...comfyUiStateResponse(), configured: true });
+      }
+      if (url.endsWith("/api/comfyui/check") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ base_url: "http://127.0.0.1:8188" });
+        return response({
+          ...comfyUiStateResponse(),
+          configured: true,
+          status: "online",
+          checked_at: "now",
+          endpoints: { system_stats: true, queue: true },
+        });
+      }
       throw new Error(`unexpected url ${url}`);
     });
     const client = new RuntimeClient({
@@ -396,8 +413,20 @@ describe("RuntimeClient", () => {
       registered_mcp_id: "local_docs",
       mcp: [{ id: "local_docs", title: "local_docs" }],
     });
+    await expect(client.loadComfyUiState()).resolves.toMatchObject({
+      schema_version: "comfyui.v1",
+      base_url: "http://127.0.0.1:8188",
+      status: "unknown",
+    });
+    await expect(client.saveComfyUiSettings({ base_url: "http://127.0.0.1:8188" })).resolves.toMatchObject({
+      configured: true,
+    });
+    await expect(client.checkComfyUiConnection({ base_url: "http://127.0.0.1:8188" })).resolves.toMatchObject({
+      status: "online",
+      endpoints: { system_stats: true, queue: true },
+    });
 
-    expect(fetchMock).toHaveBeenCalledTimes(17);
+    expect(fetchMock).toHaveBeenCalledTimes(20);
   });
 
   it("builds authenticated websocket urls from http base urls", () => {
@@ -689,5 +718,17 @@ function terminalStateResponse() {
     last_result: null,
     history: [],
     transcript: [],
+  };
+}
+
+function comfyUiStateResponse() {
+  return {
+    schema_version: "comfyui.v1",
+    base_url: "http://127.0.0.1:8188",
+    configured: false,
+    status: "unknown",
+    last_error: "",
+    checked_at: "",
+    endpoints: {},
   };
 }

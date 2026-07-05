@@ -55,6 +55,9 @@ export function App() {
             pluginState={controller.pluginState}
             pluginError={controller.pluginError}
             pluginInstallingTarget={controller.pluginInstallingTarget}
+            comfyUiState={controller.comfyUiState}
+            comfyUiError={controller.comfyUiError}
+            comfyUiBusy={controller.comfyUiBusy}
             modelSettings={controller.modelSettings}
             providerCatalog={controller.providerCatalog}
             settingsError={controller.settingsError}
@@ -85,6 +88,10 @@ export function App() {
             installSkill={controller.installSkill}
             installMcp={controller.installMcp}
             registerExternalMcp={controller.registerExternalMcp}
+            refreshComfyUiState={controller.refreshComfyUiState}
+            saveComfyUiUrl={controller.saveComfyUiUrl}
+            checkComfyUi={controller.checkComfyUi}
+            openComfyUiInBrowser={controller.openComfyUiInBrowser}
           />
         </div>
         {controller.bottomShellOpen ? (
@@ -134,7 +141,11 @@ export function App() {
             closeTerminal={() => controller.closeRightDockWindow("terminal")}
           />
         ) : controller.rightDockTool === "browser" ? (
-          <BrowserPanel t={t} onClose={() => controller.closeRightDockWindow("browser")} />
+          <BrowserPanel
+            t={t}
+            onClose={() => controller.closeRightDockWindow("browser")}
+            requestedNavigation={controller.browserNavigationRequest}
+          />
         ) : null}
       </RightDock>
       <div className="build-badge" title={controller.runtimeConfig.buildTime || "renderer build time unknown"}>
