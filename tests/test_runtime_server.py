@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -765,6 +766,108 @@ def test_plugin_mcp_install_endpoint_imports_json_and_refreshes_state(tmp_path):
     assert (tmp_path / ".lucode" / "mcp_servers.json").exists()
     stored = json.loads((tmp_path / ".lucode" / "mcp_servers.json").read_text(encoding="utf-8"))
     assert stored["mcpServers"]["external_demo"]["url"] == "http://127.0.0.1:8765/mcp"
+
+
+def test_plugin_package_install_endpoint_installs_skills_and_mcp_templates(tmp_path):
+    package = tmp_path / "comfyui_plugin"
+    skill_dir = package / "skills" / "comfyui_operator"
+    mcp_dir = package / "mcp"
+    skill_dir.mkdir(parents=True)
+    mcp_dir.mkdir(parents=True)
+    (package / "lucode-plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lucode_plugin.v1",
+                "id": "comfyui_plugin",
+                "title": "ComfyUI Plugin",
+                "description": "Optional ComfyUI capability package.",
+                "skills": ["skills/comfyui_operator"],
+                "mcp_templates": ["mcp/comfyui.json"],
+                "launch_profiles": [
+                    {
+                        "id": "windows_nvidia",
+                        "label": "Windows NVIDIA portable",
+                        "script": "run_nvidia_gpu.bat",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: ComfyUI Operator\ndescription: Operate ComfyUI workflows.\n---\n\n# ComfyUI Operator\n",
+        encoding="utf-8",
+    )
+    (mcp_dir / "comfyui.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "comfyui_graph": {
+                        "transport": "http",
+                        "url": "http://127.0.0.1:8188/mcp",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/plugins/packages/install",
+        headers=_auth_headers(),
+        json={"path": str(package)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["installed_plugin_id"] == "comfyui_plugin"
+    assert payload["installed_skill_ids"] == ["comfyui_operator"]
+    assert payload["installed_mcp_ids"] == ["comfyui_graph"]
+    installed_skill = next(item for item in payload["skills"] if item["id"] == "comfyui_operator")
+    installed_mcp = next(item for item in payload["mcp"] if item["id"] == "comfyui_graph")
+    assert installed_skill["title"] == "ComfyUI Operator"
+    assert installed_skill["description"] == "Operate ComfyUI workflows."
+    assert installed_mcp["title"] == "comfyui_graph"
+    assert (tmp_path / ".lucode" / "plugins" / "comfyui_plugin" / "lucode-plugin.json").exists()
+    assert (tmp_path / ".lucode" / "skills" / "comfyui_operator" / "SKILL.md").exists()
+    stored = json.loads((tmp_path / ".lucode" / "mcp_servers.json").read_text(encoding="utf-8"))
+    assert stored["mcpServers"]["comfyui_graph"]["url"] == "http://127.0.0.1:8188/mcp"
+    state = json.loads((tmp_path / ".lucode" / "gui_plugin_state.json").read_text(encoding="utf-8"))
+    assert state["installed_plugin_packages"][0]["id"] == "comfyui_plugin"
+    assert state["installed_plugin_packages"][0]["launch_profiles"][0]["script"] == "run_nvidia_gpu.bat"
+
+
+def test_plugin_package_install_endpoint_rejects_invalid_packages(tmp_path):
+    invalid_package = tmp_path / "invalid_plugin"
+    invalid_package.mkdir()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/plugins/packages/install",
+        headers=_auth_headers(),
+        json={"path": str(invalid_package)},
+    )
+
+    assert response.status_code == 400
+    assert "lucode-plugin.json" in response.json()["error"]["message"]
+
+
+def test_comfyui_sample_plugin_package_is_installable(tmp_path):
+    sample_package = Path(__file__).resolve().parents[1] / "plugins" / "comfyui"
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/plugins/packages/install",
+        headers=_auth_headers(),
+        json={"path": str(sample_package)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["installed_plugin_id"] == "comfyui"
+    assert payload["installed_skill_ids"] == ["comfyui_operator"]
+    assert payload["installed_mcp_ids"] == ["comfyui_graph"]
 
 
 def test_plugin_external_mcp_endpoint_registers_stdio_config(tmp_path):

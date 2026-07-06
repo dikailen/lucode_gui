@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "comfyui_graph": {
+      "transport": "http",
+      "url": "http://127.0.0.1:8188/mcp",
+      "description": "Template endpoint for a ComfyUI MCP gateway or external ComfyUI service adapter."
+    }
+  }
+}

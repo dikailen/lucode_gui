@@ -380,6 +380,21 @@ class RuntimeRunManager:
         payload["installed_mcp_id"] = row.id
         return payload
 
+    def install_plugin_package(self, source_path: str) -> dict[str, Any]:
+        from lucode.gui.plugin_state import PluginStateStore
+
+        clean_path = str(source_path or "").strip()
+        if not clean_path:
+            raise ValueError("path is required")
+        store = PluginStateStore(self.workspace_root)
+        installed = store.install_plugin_package_from_path(clean_path)
+        payload = self.plugin_state()
+        payload["installed_plugin_id"] = installed["id"]
+        payload["installed_skill_ids"] = installed["skill_ids"]
+        payload["installed_mcp_ids"] = installed["mcp_ids"]
+        payload["installed_launch_profile_ids"] = installed["launch_profile_ids"]
+        return payload
+
     def register_external_mcp(self, payload: dict[str, Any]) -> dict[str, Any]:
         from lucode.gui.plugin_state import PluginStateStore
 

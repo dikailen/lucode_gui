@@ -139,6 +139,13 @@ export class RuntimeClient {
     });
   }
 
+  async installPluginPackage(path: string): Promise<PluginStateResponse> {
+    return this.request<PluginStateResponse>("/api/plugins/packages/install", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+  }
+
   async registerExternalMcp(payload: ExternalMcpPayload): Promise<PluginStateResponse> {
     return this.request<PluginStateResponse>("/api/plugins/mcp/external", {
       method: "POST",

@@ -151,6 +151,10 @@ export type PluginStateResponse = {
   deleted_skill_id?: string;
   installed_skill_id?: string;
   installed_mcp_id?: string;
+  installed_plugin_id?: string;
+  installed_skill_ids?: string[];
+  installed_mcp_ids?: string[];
+  installed_launch_profile_ids?: string[];
   registered_mcp_id?: string;
 };
 

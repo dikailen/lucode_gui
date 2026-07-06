@@ -1,0 +1,26 @@
+{
+  "schema_version": "lucode_plugin.v1",
+  "id": "comfyui",
+  "title": "ComfyUI",
+  "description": "Optional ComfyUI capability package with a skill, MCP template, and launch profile hints.",
+  "skills": [
+    "skills/comfyui_operator"
+  ],
+  "mcp_templates": [
+    "mcp/comfyui.json"
+  ],
+  "launch_profiles": [
+    {
+      "id": "windows_nvidia",
+      "label": "Windows NVIDIA portable",
+      "script": "run_nvidia_gpu.bat",
+      "description": "Use with ComfyUI_windows_portable_nvidia style installations."
+    },
+    {
+      "id": "windows_cpu",
+      "label": "Windows CPU portable",
+      "script": "run_cpu.bat",
+      "description": "Fallback launch script for portable ComfyUI installations."
+    }
+  ]
+}

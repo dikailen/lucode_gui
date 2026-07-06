@@ -308,6 +308,34 @@ describe("RuntimeClient", () => {
           ],
         });
       }
+      if (url.endsWith("/api/plugins/packages/install") && init?.method === "POST") {
+        expect(init.body).toBe(JSON.stringify({ path: "D:\\plugins\\comfyui" }));
+        return response({
+          schema_version: "plugin_state.v1",
+          installed_plugin_id: "comfyui_plugin",
+          installed_skill_ids: ["comfyui_operator"],
+          installed_mcp_ids: ["comfyui_graph"],
+          skills: [
+            {
+              id: "comfyui_operator",
+              title: "ComfyUI Operator",
+              description: "Operate ComfyUI workflows.",
+              chips: ["custom", "local"],
+              core: false,
+              deletable: true,
+            },
+          ],
+          runtime_capabilities: [],
+          mcp: [
+            {
+              id: "comfyui_graph",
+              title: "comfyui_graph",
+              status: "added",
+              detail: "not connected",
+            },
+          ],
+        });
+      }
       if (url.endsWith("/api/plugins/mcp/external") && init?.method === "POST") {
         expect(JSON.parse(String(init.body))).toEqual({
           id: "local_docs",
@@ -421,6 +449,11 @@ describe("RuntimeClient", () => {
       installed_mcp_id: "demo",
       mcp: [{ id: "demo", title: "demo" }],
     });
+    await expect(client.installPluginPackage("D:\\plugins\\comfyui")).resolves.toMatchObject({
+      installed_plugin_id: "comfyui_plugin",
+      installed_skill_ids: ["comfyui_operator"],
+      installed_mcp_ids: ["comfyui_graph"],
+    });
     await expect(
       client.registerExternalMcp({
         id: "local_docs",
@@ -459,7 +492,7 @@ describe("RuntimeClient", () => {
       endpoints: { system_stats: true, queue: true },
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(21);
+    expect(fetchMock).toHaveBeenCalledTimes(22);
   });
 
   it("builds authenticated websocket urls from http base urls", () => {

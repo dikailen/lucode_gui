@@ -12,6 +12,7 @@ from lucode.gui.sidebar_data import McpRow, SkillCard
 
 
 STATE_FILE_NAME = "gui_plugin_state.json"
+PLUGIN_MANIFEST_NAME = "lucode-plugin.json"
 _PLUGIN_ID_PATTERN = re.compile(r"^[a-z0-9_][a-z0-9_-]*$")
 
 _CUSTOM_CHIP = "\u81ea\u5b9a\u4e49"
@@ -28,6 +29,7 @@ class PluginStateStore:
         self.path = self.workspace_root / ".lucode" / STATE_FILE_NAME
         self.local_skills_dir = self.workspace_root / ".lucode" / "skills"
         self.local_mcp_path = self.workspace_root / ".lucode" / "mcp_servers.json"
+        self.local_plugins_dir = self.workspace_root / ".lucode" / "plugins"
 
     def load_removed_skill_ids(self) -> set[str]:
         data = self._read_state()
@@ -133,6 +135,49 @@ class PluginStateStore:
         rows = self._upsert_mcp_servers({server_id: config}, detail_factory=_external_mcp_detail)
         return rows[0]
 
+    def install_plugin_package_from_path(self, source_path: str | Path) -> dict[str, Any]:
+        source = Path(source_path).resolve()
+        prepared = _prepare_plugin_package_source(source)
+        manifest = _read_plugin_manifest(prepared / PLUGIN_MANIFEST_NAME)
+        plugin_id = _normalize_plugin_id(manifest.get("id") or prepared.name)
+        if not plugin_id:
+            raise ValueError("Invalid plugin package id")
+        target = self.local_plugins_dir / plugin_id
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(prepared, target)
+
+        installed_skill_ids: list[str] = []
+        for relative_path in _string_list(manifest.get("skills") or []):
+            card = self.install_skill_from_path(_resolve_package_member(target, relative_path))
+            installed_skill_ids.append(card.id)
+
+        installed_mcp_ids: list[str] = []
+        for relative_path in _string_list(manifest.get("mcp_templates") or []):
+            row = self.install_mcp_from_path(_resolve_package_member(target, relative_path))
+            installed_mcp_ids.append(row.id)
+
+        launch_profiles = _plugin_launch_profiles(manifest.get("launch_profiles"))
+        self._upsert_installed_plugin_package(
+            {
+                "id": plugin_id,
+                "title": str(manifest.get("title") or _title_from_id(plugin_id)).strip(),
+                "description": str(manifest.get("description") or "").strip(),
+                "source_path": str(source),
+                "installed_path": str(target),
+                "skill_ids": installed_skill_ids,
+                "mcp_ids": installed_mcp_ids,
+                "launch_profiles": launch_profiles,
+            }
+        )
+        return {
+            "id": plugin_id,
+            "skill_ids": installed_skill_ids,
+            "mcp_ids": installed_mcp_ids,
+            "launch_profile_ids": [item["id"] for item in launch_profiles],
+        }
+
     def _upsert_mcp_servers(
         self,
         servers: dict[str, dict[str, Any]],
@@ -181,6 +226,16 @@ class PluginStateStore:
         rows = [item for item in self.load_custom_mcp_rows() if item.id != row.id]
         rows.append(row)
         data["custom_mcp_rows"] = [asdict(item) for item in rows]
+        self._write_state(data)
+
+    def _upsert_installed_plugin_package(self, package: dict[str, Any]) -> None:
+        data = self._read_state()
+        packages = data.get("installed_plugin_packages")
+        if not isinstance(packages, list):
+            packages = []
+        packages = [item for item in packages if not isinstance(item, dict) or item.get("id") != package["id"]]
+        packages.append(package)
+        data["installed_plugin_packages"] = packages
         self._write_state(data)
 
     def _read_mcp_servers(self) -> dict[str, Any]:
@@ -242,6 +297,25 @@ def _prepare_skill_source(source: Path) -> Path:
     raise ValueError("Skill install source must be a folder or zip")
 
 
+def _prepare_plugin_package_source(source: Path) -> Path:
+    if source.is_dir():
+        if not (source / PLUGIN_MANIFEST_NAME).exists():
+            raise ValueError(f"Plugin package must contain {PLUGIN_MANIFEST_NAME}")
+        return source
+    if source.is_file() and source.suffix.lower() == ".zip":
+        extract_root = source.parent / f".{source.stem}_plugin_extract"
+        if extract_root.exists():
+            shutil.rmtree(extract_root)
+        extract_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(source) as archive:
+            archive.extractall(extract_root)
+        matches = [path.parent for path in extract_root.rglob(PLUGIN_MANIFEST_NAME)]
+        if not matches:
+            raise ValueError(f"Plugin zip must contain {PLUGIN_MANIFEST_NAME}")
+        return matches[0]
+    raise ValueError("Plugin package install source must be a folder or zip")
+
+
 def _read_skill_metadata(path: Path) -> dict[str, str]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -259,6 +333,58 @@ def _read_skill_metadata(path: Path) -> dict[str, str]:
         key, value = line.split(":", 1)
         metadata[key.strip()] = value.strip().strip('"').strip("'")
     return metadata
+
+
+def _read_plugin_manifest(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"Plugin package must contain {PLUGIN_MANIFEST_NAME}") from exc
+    except Exception as exc:
+        raise ValueError("Invalid plugin manifest JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Plugin manifest must be a JSON object")
+    schema_version = str(data.get("schema_version") or "lucode_plugin.v1")
+    if schema_version != "lucode_plugin.v1":
+        raise ValueError("Unsupported plugin manifest schema_version")
+    return data
+
+
+def _resolve_package_member(package_root: Path, relative_path: str) -> Path:
+    text = str(relative_path or "").strip()
+    if not text:
+        raise ValueError("Plugin package member path is required")
+    if Path(text).is_absolute():
+        raise ValueError("Plugin package member path must be relative")
+    root = package_root.resolve()
+    target = (root / text).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Plugin package member path cannot escape the package") from exc
+    return target
+
+
+def _plugin_launch_profiles(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    profiles: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _normalize_plugin_id(item.get("id") or item.get("script") or item.get("label"))
+        if not profile_id:
+            continue
+        profile = {
+            "id": profile_id,
+            "label": str(item.get("label") or _title_from_id(profile_id)).strip(),
+            "script": str(item.get("script") or "").strip(),
+        }
+        description = str(item.get("description") or "").strip()
+        if description:
+            profile["description"] = description
+        profiles.append(profile)
+    return profiles
 
 
 def _extract_mcp_servers(data: Any) -> dict[str, dict[str, Any]]:

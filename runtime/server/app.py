@@ -194,6 +194,16 @@ def create_app(
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
 
+    async def install_plugin_package(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(manager.install_plugin_package(str(payload.get("path") or "")))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
     async def register_external_mcp(request: Request) -> JSONResponse:
         try:
             auth.require_http(request)
@@ -411,6 +421,7 @@ def create_app(
             Route("/api/plugins", plugin_state, methods=["GET"]),
             Route("/api/plugins/skills/install", install_skill, methods=["POST"]),
             Route("/api/plugins/mcp/install", install_mcp, methods=["POST"]),
+            Route("/api/plugins/packages/install", install_plugin_package, methods=["POST"]),
             Route("/api/plugins/mcp/external", register_external_mcp, methods=["POST"]),
             Route("/api/plugins/skills/{skill_id}", delete_skill, methods=["DELETE"]),
             Route("/api/comfyui", comfyui_state, methods=["GET"]),
