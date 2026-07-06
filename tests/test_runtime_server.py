@@ -57,6 +57,23 @@ def _client(tmp_path, *, token: str = TOKEN, model_catalog_provider=None, run_ex
     return TestClient(app)
 
 
+def _make_comfyui_portable(root):
+    root.mkdir(parents=True)
+    (root / "ComfyUI").mkdir()
+    (root / "ComfyUI" / "main.py").write_text("# comfyui main\n", encoding="utf-8")
+    (root / "python_embeded").mkdir()
+    (root / "python_embeded" / "python.exe").write_text("", encoding="utf-8")
+    (root / "run_nvidia_gpu.bat").write_text(
+        ".\\python_embeded\\python.exe -s ComfyUI\\main.py --windows-standalone-build\npause\n",
+        encoding="utf-8",
+    )
+    (root / "run_cpu.bat").write_text(
+        ".\\python_embeded\\python.exe -s ComfyUI\\main.py --cpu --windows-standalone-build\npause\n",
+        encoding="utf-8",
+    )
+    return root
+
+
 def _wait_terminal_idle(client: TestClient, *, timeout_seconds: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout_seconds
     payload = {}
@@ -810,6 +827,18 @@ def test_comfyui_endpoint_returns_default_state_and_requires_auth(tmp_path):
         "last_error": "",
         "checked_at": "",
         "endpoints": {},
+        "installation": {
+            "install_path": "",
+            "resolved_root": "",
+            "configured": False,
+            "valid": False,
+            "status": "unconfigured",
+            "launch_mode": "",
+            "launch_script": "",
+            "launch_command": "",
+            "available_launch_scripts": [],
+            "validation_errors": [],
+        },
     }
 
 
@@ -827,6 +856,135 @@ def test_comfyui_endpoint_saves_normalized_url(tmp_path):
     assert response.json()["configured"] is True
     stored = json.loads((tmp_path / ".lucode" / "comfyui.json").read_text(encoding="utf-8"))
     assert stored == {"base_url": "http://127.0.0.1:8188"}
+
+
+def test_comfyui_detect_accepts_portable_root_without_saving(tmp_path):
+    portable = _make_comfyui_portable(tmp_path / "ComfyUI_windows_portable")
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/comfyui/detect",
+        headers=_auth_headers(),
+        json={"install_path": str(portable)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "schema_version": "comfyui_detection.v1",
+        "install_path": str(portable),
+        "resolved_root": str(portable.resolve()),
+        "configured": False,
+        "valid": True,
+        "status": "launchable",
+        "launch_mode": "nvidia",
+        "launch_script": "run_nvidia_gpu.bat",
+        "launch_command": ".\\python_embeded\\python.exe -s ComfyUI\\main.py --windows-standalone-build",
+        "available_launch_scripts": ["run_nvidia_gpu.bat", "run_cpu.bat"],
+        "validation_errors": [],
+    }
+    assert not (tmp_path / ".lucode" / "comfyui.json").exists()
+
+
+def test_comfyui_detect_accepts_outer_wrapper_directory(tmp_path):
+    wrapper = tmp_path / "ComfyUI_windows_portable_nvidia"
+    portable = _make_comfyui_portable(wrapper / "ComfyUI_windows_portable")
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/comfyui/detect",
+        headers=_auth_headers(),
+        json={"install_path": str(wrapper)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["install_path"] == str(wrapper)
+    assert payload["resolved_root"] == str(portable.resolve())
+    assert payload["valid"] is True
+    assert payload["status"] == "launchable"
+    assert payload["launch_script"] == "run_nvidia_gpu.bat"
+
+
+def test_comfyui_detect_reports_invalid_path_without_saving(tmp_path):
+    invalid = tmp_path / "not_comfyui"
+    invalid.mkdir()
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/comfyui/detect",
+        headers=_auth_headers(),
+        json={"install_path": str(invalid)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["install_path"] == str(invalid)
+    assert payload["resolved_root"] == ""
+    assert payload["valid"] is False
+    assert payload["status"] == "invalid_path"
+    assert any("ComfyUI/main.py" in item for item in payload["validation_errors"])
+    assert not (tmp_path / ".lucode" / "comfyui.json").exists()
+
+
+def test_comfyui_endpoint_saves_install_path_and_launch_script(tmp_path):
+    wrapper = tmp_path / "ComfyUI_windows_portable_nvidia"
+    portable = _make_comfyui_portable(wrapper / "ComfyUI_windows_portable")
+    client = _client(tmp_path)
+
+    response = client.put(
+        "/api/comfyui",
+        headers=_auth_headers(),
+        json={
+            "base_url": "127.0.0.1:8188",
+            "install_path": str(wrapper),
+            "launch_script": "run_cpu.bat",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["base_url"] == "http://127.0.0.1:8188"
+    assert payload["configured"] is True
+    assert payload["installation"] == {
+        "install_path": str(wrapper),
+        "resolved_root": str(portable.resolve()),
+        "configured": True,
+        "valid": True,
+        "status": "launchable",
+        "launch_mode": "cpu",
+        "launch_script": "run_cpu.bat",
+        "launch_command": ".\\python_embeded\\python.exe -s ComfyUI\\main.py --cpu --windows-standalone-build",
+        "available_launch_scripts": ["run_nvidia_gpu.bat", "run_cpu.bat"],
+        "validation_errors": [],
+    }
+    stored = json.loads((tmp_path / ".lucode" / "comfyui.json").read_text(encoding="utf-8"))
+    assert stored == {
+        "base_url": "http://127.0.0.1:8188",
+        "install_path": str(wrapper),
+        "resolved_root": str(portable.resolve()),
+        "launch_script": "run_cpu.bat",
+        "launch_mode": "cpu",
+    }
+
+
+def test_comfyui_endpoint_rejects_invalid_install_path_without_saving(tmp_path):
+    invalid = tmp_path / "not_comfyui"
+    invalid.mkdir()
+    client = _client(tmp_path)
+
+    response = client.put(
+        "/api/comfyui",
+        headers=_auth_headers(),
+        json={
+            "base_url": "127.0.0.1:8188",
+            "install_path": str(invalid),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "ComfyUI/main.py" in response.json()["error"]["message"]
+    assert not (tmp_path / ".lucode" / "comfyui.json").exists()
 
 
 def test_comfyui_endpoint_rejects_invalid_url(tmp_path):

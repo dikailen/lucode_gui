@@ -58,7 +58,8 @@ export type WorkspacePanelProps = {
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
   refreshComfyUiState: () => void;
-  saveComfyUiUrl: (baseUrl: string) => Promise<boolean>;
+  saveComfyUiUrl: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
+  detectComfyUiInstall: (installPath: string, launchScript?: string) => Promise<boolean>;
   checkComfyUi: (baseUrl?: string) => void;
   openComfyUiInBrowser: (baseUrl?: string) => void;
 };
@@ -107,6 +108,7 @@ export function WorkspacePanel({
   registerExternalMcp,
   refreshComfyUiState,
   saveComfyUiUrl,
+  detectComfyUiInstall,
   checkComfyUi,
   openComfyUiInBrowser,
 }: WorkspacePanelProps) {
@@ -149,6 +151,7 @@ export function WorkspacePanel({
         registerExternalMcp={registerExternalMcp}
         refreshComfyUiState={refreshComfyUiState}
         saveComfyUiUrl={saveComfyUiUrl}
+        detectComfyUiInstall={detectComfyUiInstall}
         checkComfyUi={checkComfyUi}
         openComfyUiInBrowser={openComfyUiInBrowser}
       />

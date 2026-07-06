@@ -42,7 +42,12 @@ from runtime.server.execution_bridge import (
     emit_execution_event_as_run_event,
 )
 from runtime.server.approval_session import RuntimeApprovalSession
-from runtime.server.comfyui import check_comfyui_connection, comfyui_state, save_comfyui_settings
+from runtime.server.comfyui import (
+    check_comfyui_connection,
+    comfyui_state,
+    detect_comfyui_installation_payload,
+    save_comfyui_settings,
+)
 from runtime.server.event_stream import RunEventStream
 from runtime.server.schemas import (
     MODEL_LIST_SCHEMA_VERSION,
@@ -389,6 +394,9 @@ class RuntimeRunManager:
 
     def update_comfyui_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         return save_comfyui_settings(self.workspace_root, dict(payload or {}))
+
+    def detect_comfyui_installation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return detect_comfyui_installation_payload(dict(payload or {}))
 
     def check_comfyui(self, payload: dict[str, Any]) -> dict[str, Any]:
         return check_comfyui_connection(self.workspace_root, dict(payload or {}))

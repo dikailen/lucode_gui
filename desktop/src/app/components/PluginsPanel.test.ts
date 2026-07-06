@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { createTranslator } from "../i18n";
 import type { ComfyUiStateResponse, PluginRuntimeCapability } from "../../shared/types";
-import { PluginsPanel } from "./PluginsPanel";
+import { ComfyUiMcpRow, PluginsPanel } from "./PluginsPanel";
 
 function pluginState(runtimeCapabilities: PluginRuntimeCapability[] = []) {
   return {
@@ -40,6 +40,18 @@ function comfyUiState(status: ComfyUiStateResponse["status"] = "unknown"): Comfy
     last_error: "",
     checked_at: status === "unknown" ? "" : "2026-07-05T10:00:00Z",
     endpoints: status === "online" ? { system_stats: true, queue: true } : {},
+    installation: {
+      install_path: "D:\\develop\\ComfyUI_windows_portable_nvidia",
+      resolved_root: "D:\\develop\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable",
+      configured: true,
+      valid: true,
+      status: "launchable",
+      launch_mode: "nvidia",
+      launch_script: "run_nvidia_gpu.bat",
+      launch_command: ".\\python_embeded\\python.exe -s ComfyUI\\main.py --windows-standalone-build",
+      available_launch_scripts: ["run_nvidia_gpu.bat", "run_cpu.bat"],
+      validation_errors: [],
+    },
   };
 }
 
@@ -64,8 +76,29 @@ function renderPanel(
       registerExternalMcp: async () => true,
       refreshComfyUiState: () => undefined,
       saveComfyUiUrl: async () => true,
+      detectComfyUiInstall: async () => true,
       checkComfyUi: () => undefined,
       openComfyUiInBrowser: () => undefined,
+    }),
+  );
+}
+
+function renderManagedComfyUiRow(language: "zh" | "en") {
+  return renderToStaticMarkup(
+    createElement(ComfyUiMcpRow, {
+      t: createTranslator(language),
+      url: "http://127.0.0.1:8188",
+      state: comfyUiState("online"),
+      error: "",
+      busy: false,
+      managed: true,
+      onManage: () => undefined,
+      onUrlChange: () => undefined,
+      refresh: () => undefined,
+      save: async () => true,
+      detectInstall: async () => true,
+      check: () => undefined,
+      openBrowser: () => undefined,
     }),
   );
 }
@@ -127,13 +160,33 @@ describe("PluginsPanel runtime capability section", () => {
     expect(html).toContain("Page actions require approval");
   });
 
-  it("renders a compact ComfyUI connection card with actionable controls", () => {
+  it("renders ComfyUI inside the MCP list instead of a separate optional plugin section", () => {
     const html = renderPanel("en", [], comfyUiState("online"));
 
-    expect(html).toContain("ComfyUI connection");
-    expect(html).toContain("http://127.0.0.1:8188");
+    expect(html).toContain("ComfyUI MCP");
+    expect(html).toContain("MCP template");
     expect(html).toContain("Online");
+    expect(html).toContain("Launchable");
+    expect(html).toContain("Manage");
+    expect(html).not.toContain("Optional plugins");
+    expect(html).not.toContain("Install directory");
+    expect(html).not.toContain("Detect install");
+    expect(html).not.toContain("Service URL");
+    expect(html).not.toContain("D:\\develop\\ComfyUI_windows_portable_nvidia");
+  });
+
+  it("renders managed ComfyUI MCP as a compact row detail instead of the full connection card", () => {
+    const html = renderManagedComfyUiRow("en");
+
+    expect(html).toContain("ComfyUI MCP");
+    expect(html).toContain("comfyui-mcp-compact-form");
+    expect(html).toContain("Service URL");
+    expect(html).toContain("Install directory");
+    expect(html).toContain("Detect install");
     expect(html).toContain("Check connection");
     expect(html).toContain("Open right side");
+    expect(html).not.toContain("ComfyUI connection");
+    expect(html).not.toContain("comfyui-column");
+    expect(html).not.toContain("comfyui-connection-form");
   });
 });

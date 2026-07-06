@@ -421,6 +421,7 @@ button:disabled {
 }
 
 .plugins-pane {
+  container-type: inline-size;
   grid-template-rows: 72px minmax(0, 1fr);
 }
 
@@ -3510,33 +3511,30 @@ summary.work-area-header::-webkit-details-marker {
 .plugins-content {
   display: grid;
   min-height: 0;
+  align-content: start;
+  align-items: start;
+  grid-auto-rows: max-content;
   grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
   gap: 16px;
-  overflow: hidden;
+  overflow: auto;
   padding: 18px 24px 24px;
 }
 
 .plugin-column {
   display: grid;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
   gap: 10px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .mcp-plugin-column {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto;
 }
 
 .runtime-capability-column {
   grid-column: 1 / -1;
   grid-template-rows: auto auto;
-}
-
-.comfyui-column {
-  grid-column: 1 / -1;
-  grid-template-rows: auto auto auto;
-  min-height: auto;
 }
 
 .runtime-capability-heading {
@@ -3587,15 +3585,21 @@ summary.work-area-header::-webkit-details-marker {
 }
 
 .runtime-capability-card-title {
+  min-width: 0;
+  overflow: hidden;
   color: #172033;
   font-size: 14px;
   font-weight: 800;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
 }
 
 .runtime-capability-card-description {
+  min-width: 0;
   color: #667085;
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .runtime-capability-grid {
@@ -3618,21 +3622,27 @@ summary.work-area-header::-webkit-details-marker {
 }
 
 .runtime-capability-value {
+  min-width: 0;
   color: #172033;
   font-size: 12px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .runtime-capability-chip-row {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 6px;
 }
 
 .runtime-capability-chip {
   display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
   min-height: 22px;
   align-items: center;
+  overflow: hidden;
   border: 1px solid #dbe2ec;
   border-radius: 999px;
   background: #f8fafc;
@@ -3641,39 +3651,78 @@ summary.work-area-header::-webkit-details-marker {
   font-weight: 700;
   line-height: 1;
   padding: 0 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .runtime-capability-risk {
   color: #8a5a12;
 }
 
-.comfyui-connection-form {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) auto;
-  align-items: end;
-  gap: 10px;
-  border: 1px solid #e1e6f0;
-  border-radius: 8px;
-  background: #ffffff;
-  padding: 10px;
+.comfyui-mcp-row {
+  min-height: 88px;
 }
 
-.comfyui-url-field {
+.comfyui-mcp-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.comfyui-mcp-title-row .plugin-row-title {
+  min-width: 0;
+}
+
+.comfyui-mcp-detail {
+  display: grid;
+  min-width: 0;
+  border-top: 1px solid #edf1f7;
+  padding-top: 10px;
+}
+
+.comfyui-mcp-compact-form {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  border: 1px solid #e1e6f0;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 10px 10px 9px;
+}
+
+.comfyui-mcp-form {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+}
+
+.comfyui-mcp-fields {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.comfyui-mcp-field {
   display: grid;
   min-width: 0;
   gap: 5px;
 }
 
-.comfyui-url-field span {
+.comfyui-mcp-field span {
   color: #667085;
   font-size: 11px;
   font-weight: 800;
 }
 
-.comfyui-url-field input {
+.comfyui-mcp-field input,
+.comfyui-mcp-field select {
   width: 100%;
   min-width: 0;
-  min-height: 34px;
+  min-height: 32px;
   border: 1px solid #dbe3ef;
   border-radius: 8px;
   background: #ffffff;
@@ -3683,23 +3732,35 @@ summary.work-area-header::-webkit-details-marker {
   padding: 0 10px;
 }
 
-.comfyui-url-field input:focus {
+.comfyui-mcp-field input:focus,
+.comfyui-mcp-field select:focus {
   border-color: #8bb4ff;
   box-shadow: 0 0 0 3px rgba(36, 92, 246, 0.1);
 }
 
-.comfyui-actions {
+.comfyui-mcp-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.comfyui-mcp-actions .secondary-button {
+  flex: 0 0 auto;
+  min-width: max-content;
+  white-space: nowrap;
 }
 
 .secondary-button.subtle {
   color: #667085;
 }
 
-.comfyui-meta {
+.secondary-button.compact {
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.comfyui-mcp-meta {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
@@ -3708,7 +3769,7 @@ summary.work-area-header::-webkit-details-marker {
   font-size: 11px;
 }
 
-.comfyui-meta span {
+.comfyui-mcp-meta span {
   max-width: 100%;
   overflow: hidden;
   border: 1px solid #e1e7f0;
@@ -3729,9 +3790,10 @@ summary.work-area-header::-webkit-details-marker {
   color: #a33a3a;
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
   padding: 8px 10px;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .plugin-drop-zone {
@@ -3801,6 +3863,7 @@ summary.work-area-header::-webkit-details-marker {
 
 .external-mcp-form {
   display: grid;
+  min-width: 0;
   gap: 8px;
   border: 1px solid #e1e6f0;
   border-radius: 8px;
@@ -3811,6 +3874,7 @@ summary.work-area-header::-webkit-details-marker {
 .external-mcp-form-header,
 .external-mcp-form-footer {
   display: grid;
+  min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
@@ -3863,12 +3927,14 @@ summary.work-area-header::-webkit-details-marker {
   color: #667085;
   font-size: 11px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .external-mcp-form-footer .secondary-button {
   justify-self: end;
+  white-space: nowrap;
 }
 
 .external-mcp-form-footer span.external-mcp-error {
@@ -3879,7 +3945,7 @@ summary.work-area-header::-webkit-details-marker {
   display: grid;
   align-content: start;
   gap: 8px;
-  overflow: auto;
+  overflow: visible;
   padding-bottom: 2px;
 }
 
@@ -3927,7 +3993,9 @@ summary.work-area-header::-webkit-details-marker {
   min-width: 0;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
+  row-gap: 6px;
 }
 
 .plugin-chip-row {
@@ -3936,13 +4004,16 @@ summary.work-area-header::-webkit-details-marker {
   flex: 1 1 auto;
   flex-wrap: wrap;
   gap: 5px;
+  max-width: 100%;
 }
 
 .plugin-chip {
   display: inline-flex;
   max-width: 100%;
+  min-width: 0;
   min-height: 20px;
   align-items: center;
+  overflow: hidden;
   border: 1px solid #dbe2ec;
   border-radius: 999px;
   background: #f7f9fc;
@@ -3951,6 +4022,7 @@ summary.work-area-header::-webkit-details-marker {
   font-weight: 700;
   line-height: 1;
   padding: 4px 6px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -3960,7 +4032,20 @@ summary.work-area-header::-webkit-details-marker {
   color: #245cf6;
 }
 
+.plugin-chip.good {
+  border-color: #cdebd8;
+  background: #f2fbf5;
+  color: #177245;
+}
+
+.plugin-chip.danger {
+  border-color: #efcaca;
+  background: #fff4f4;
+  color: #a33a3a;
+}
+
 .plugin-delete-pill {
+  align-self: flex-start;
   flex: 0 0 auto;
   min-width: 44px;
   min-height: 22px;
@@ -3972,6 +4057,7 @@ summary.work-area-header::-webkit-details-marker {
   font-size: 11px;
   font-weight: 700;
   padding: 6px 10px;
+  white-space: nowrap;
 }
 
 .plugin-delete-pill:hover:not(:disabled) {
@@ -4634,6 +4720,73 @@ summary.work-area-header::-webkit-details-marker {
   pointer-events: none;
 }
 
+@container (max-width: 960px) {
+  .plugins-content {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px 16px 18px;
+  }
+
+  .runtime-capability-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runtime-capability-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .comfyui-mcp-fields,
+  .external-mcp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .comfyui-mcp-actions {
+    justify-content: flex-start;
+  }
+
+  .comfyui-error {
+    white-space: normal;
+  }
+
+  .plugin-drop-zone {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .plugin-drop-zone small {
+    justify-self: start;
+  }
+
+  .plugin-row-title {
+    white-space: normal;
+  }
+
+  .plugin-row-footer {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .external-mcp-form-header,
+  .external-mcp-form-footer {
+    align-items: flex-start;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .external-mcp-form select,
+  .external-mcp-form-footer .secondary-button {
+    justify-self: start;
+  }
+
+  .plugin-delete-pill,
+  .mcp-row .status-chip {
+    margin-left: auto;
+  }
+
+  .mcp-row .status-chip {
+    margin-left: 0;
+  }
+}
+
 @media (max-width: 960px) {
   .chat-header,
   .workspace-header {
@@ -4731,12 +4884,11 @@ summary.work-area-header::-webkit-details-marker {
     gap: 4px;
   }
 
-  .comfyui-connection-form {
+  .comfyui-mcp-fields {
     grid-template-columns: minmax(0, 1fr);
-    align-items: start;
   }
 
-  .comfyui-actions {
+  .comfyui-mcp-actions {
     justify-content: flex-start;
   }
 

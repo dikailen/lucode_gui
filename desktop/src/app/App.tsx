@@ -90,6 +90,7 @@ export function App() {
             registerExternalMcp={controller.registerExternalMcp}
             refreshComfyUiState={controller.refreshComfyUiState}
             saveComfyUiUrl={controller.saveComfyUiUrl}
+            detectComfyUiInstall={controller.detectComfyUiInstall}
             checkComfyUi={controller.checkComfyUi}
             openComfyUiInBrowser={controller.openComfyUiInBrowser}
           />

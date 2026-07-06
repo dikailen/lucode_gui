@@ -163,6 +163,20 @@ export type ExternalMcpPayload = {
 };
 
 export type ComfyUiStatus = "unknown" | "online" | "offline";
+export type ComfyUiInstallationStatus = "unconfigured" | "launchable" | "invalid_path" | "invalid_launch_script";
+
+export type ComfyUiInstallation = {
+  install_path: string;
+  resolved_root: string;
+  configured: boolean;
+  valid: boolean;
+  status: ComfyUiInstallationStatus;
+  launch_mode: string;
+  launch_script: string;
+  launch_command: string;
+  available_launch_scripts: string[];
+  validation_errors: string[];
+};
 
 export type ComfyUiStateResponse = {
   schema_version: "comfyui.v1";
@@ -172,10 +186,22 @@ export type ComfyUiStateResponse = {
   last_error: string;
   checked_at: string;
   endpoints: Record<string, boolean>;
+  installation: ComfyUiInstallation;
 };
 
 export type ComfyUiSettingsPayload = {
   base_url: string;
+  install_path?: string;
+  launch_script?: string;
+};
+
+export type ComfyUiDetectionPayload = {
+  install_path: string;
+  launch_script?: string;
+};
+
+export type ComfyUiDetectionResponse = ComfyUiInstallation & {
+  schema_version: "comfyui_detection.v1";
 };
 
 export type ServerSession = {

@@ -32,7 +32,8 @@ export type PluginsPanelProps = {
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
   refreshComfyUiState: () => void;
-  saveComfyUiUrl: (baseUrl: string) => Promise<boolean>;
+  saveComfyUiUrl: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
+  detectComfyUiInstall: (installPath: string, launchScript?: string) => Promise<boolean>;
   checkComfyUi: (baseUrl?: string) => void;
   openComfyUiInBrowser: (baseUrl?: string) => void;
 };
@@ -52,11 +53,13 @@ export function PluginsPanel({
   registerExternalMcp,
   refreshComfyUiState,
   saveComfyUiUrl,
+  detectComfyUiInstall,
   checkComfyUi,
   openComfyUiInBrowser,
 }: PluginsPanelProps) {
   const runtimeCapabilities = runtimeCapabilitiesForPlugins(t, pluginState?.runtime_capabilities || []);
   const [comfyUiUrl, setComfyUiUrl] = useState(comfyUiState?.base_url || "http://127.0.0.1:8188");
+  const [managedPluginId, setManagedPluginId] = useState("");
 
   useEffect(() => {
     if (comfyUiState?.base_url) {
@@ -99,19 +102,6 @@ export function PluginsPanel({
             </section>
           ) : null}
 
-          <ComfyUiConnectionCard
-            t={t}
-            url={comfyUiUrl}
-            state={comfyUiState}
-            error={comfyUiError}
-            busy={comfyUiBusy}
-            onUrlChange={setComfyUiUrl}
-            refresh={refreshComfyUiState}
-            save={saveComfyUiUrl}
-            check={checkComfyUi}
-            openBrowser={openComfyUiInBrowser}
-          />
-
           <section className="plugin-column" aria-label={t("plugins.skillList")}>
             <div className="plugin-section-header">
               <span>{t("plugins.skillList")}</span>
@@ -134,7 +124,7 @@ export function PluginsPanel({
           <section className="plugin-column mcp-plugin-column" aria-label={t("plugins.mcpList")}>
             <div className="plugin-section-header">
               <span>{t("plugins.mcpList")}</span>
-              <strong>{pluginState.mcp.length}</strong>
+              <strong>{pluginState.mcp.length + 1}</strong>
             </div>
             <PluginDropZone
               t={t}
@@ -145,6 +135,21 @@ export function PluginsPanel({
             />
             <ExternalMcpForm t={t} disabled={pluginInstallingTarget === "mcp"} registerExternalMcp={registerExternalMcp} />
             <div className="plugin-list">
+              <ComfyUiMcpRow
+                t={t}
+                url={comfyUiUrl}
+                state={comfyUiState}
+                error={comfyUiError}
+                busy={comfyUiBusy}
+                managed={managedPluginId === "comfyui"}
+                onManage={() => setManagedPluginId((current) => (current === "comfyui" ? "" : "comfyui"))}
+                onUrlChange={setComfyUiUrl}
+                refresh={refreshComfyUiState}
+                save={saveComfyUiUrl}
+                detectInstall={detectComfyUiInstall}
+                check={checkComfyUi}
+                openBrowser={openComfyUiInBrowser}
+              />
               {pluginState.mcp.map((row) => (
                 <McpRowView key={row.id} t={t} row={row} />
               ))}
@@ -156,7 +161,84 @@ export function PluginsPanel({
   );
 }
 
-function ComfyUiConnectionCard({
+export function ComfyUiMcpRow({
+  t,
+  url,
+  state,
+  error,
+  busy,
+  managed,
+  onManage,
+  onUrlChange,
+  refresh,
+  save,
+  detectInstall,
+  check,
+  openBrowser,
+}: {
+  t: Translator;
+  url: string;
+  state: ComfyUiStateResponse | null;
+  error: string;
+  busy: boolean;
+  managed: boolean;
+  onManage: () => void;
+  onUrlChange: (value: string) => void;
+  refresh: () => void;
+  save: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
+  detectInstall: (installPath: string, launchScript?: string) => Promise<boolean>;
+  check: (baseUrl?: string) => void;
+  openBrowser: (baseUrl?: string) => void;
+}) {
+  const status = state?.status || "unknown";
+  const installStatus = state?.installation?.status || "unconfigured";
+  const lastError = error || state?.last_error || "";
+
+  return (
+    <article className="plugin-row mcp-row comfyui-mcp-row">
+      <div className="plugin-row-main">
+        <div className="comfyui-mcp-title-row">
+          <div className="plugin-row-title">{t("plugins.comfyUiMcpTitle")}</div>
+          <span className="plugin-chip">{t("plugins.mcpTemplateChip")}</span>
+        </div>
+        <div className="plugin-row-description">{t("plugins.comfyUiMcpDescription")}</div>
+        <div className="plugin-row-footer">
+          <div className="plugin-chip-row">
+            <span className={`status-chip ${status === "online" ? "good" : status === "offline" ? "danger" : "muted"}`}>
+              {comfyUiStatusLabel(t, status)}
+            </span>
+            <span className={installStatus === "launchable" ? "plugin-chip good" : "plugin-chip"}>
+              {comfyUiInstallStatusLabel(t, installStatus)}
+            </span>
+            {lastError ? <span className="plugin-chip danger">{lastError}</span> : null}
+          </div>
+          <button className="secondary-button compact" type="button" aria-expanded={managed} onClick={onManage}>
+            {managed ? t("common.close") : t("plugins.managePlugin")}
+          </button>
+        </div>
+        {managed ? (
+          <div className="comfyui-mcp-detail">
+            <ComfyUiMcpCompactForm
+              t={t}
+              url={url}
+              state={state}
+              error={error}
+              busy={busy}
+              onUrlChange={onUrlChange}
+              refresh={refresh}
+              save={save}
+              detectInstall={detectInstall}
+              check={check}
+              openBrowser={openBrowser}
+            />
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function ComfyUiMcpCompactForm({
   t,
   url,
   state,
@@ -165,6 +247,7 @@ function ComfyUiConnectionCard({
   onUrlChange,
   refresh,
   save,
+  detectInstall,
   check,
   openBrowser,
 }: {
@@ -175,63 +258,110 @@ function ComfyUiConnectionCard({
   busy: boolean;
   onUrlChange: (value: string) => void;
   refresh: () => void;
-  save: (baseUrl: string) => Promise<boolean>;
+  save: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
+  detectInstall: (installPath: string, launchScript?: string) => Promise<boolean>;
   check: (baseUrl?: string) => void;
   openBrowser: (baseUrl?: string) => void;
 }) {
+  const installation = state?.installation;
+  const [installPath, setInstallPath] = useState(installation?.install_path || "");
+  const [launchScript, setLaunchScript] = useState(installation?.launch_script || "");
+
+  useEffect(() => {
+    setInstallPath(installation?.install_path || "");
+    setLaunchScript(installation?.launch_script || "");
+  }, [installation?.install_path, installation?.launch_script]);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
-    await save(url);
+    await save(url, installPath, launchScript);
   }
 
   const cleanUrl = url.trim();
-  const status = state?.status || "unknown";
+  const cleanInstallPath = installPath.trim();
   const lastError = error || state?.last_error || "";
+  const launchOptions = installation?.available_launch_scripts || [];
+  const installStatus = installation?.status || "unconfigured";
 
   return (
-    <section className="plugin-column comfyui-column" aria-label={t("plugins.comfyUiTitle")}>
-      <div className="plugin-section-header">
-        <div className="runtime-capability-heading">
-          <span>{t("plugins.comfyUiTitle")}</span>
-          <small>{t("plugins.comfyUiDescription")}</small>
+    <div className="comfyui-mcp-compact-form" aria-label={t("plugins.comfyUiMcpTitle")}>
+      <form className="comfyui-mcp-form" onSubmit={submit}>
+        <div className="comfyui-mcp-fields">
+          <label className="comfyui-mcp-field">
+            <span>{t("plugins.comfyUiUrl")}</span>
+            <input
+              value={url}
+              onChange={(event) => onUrlChange(event.target.value)}
+              placeholder="http://127.0.0.1:8188"
+              disabled={busy}
+            />
+          </label>
+          <label className="comfyui-mcp-field">
+            <span>{t("plugins.comfyUiInstallPath")}</span>
+            <input
+              value={installPath}
+              onChange={(event) => setInstallPath(event.target.value)}
+              placeholder="D:\\develop\\ComfyUI_windows_portable_nvidia"
+              disabled={busy}
+            />
+          </label>
+          <label className="comfyui-mcp-field">
+            <span>{t("plugins.comfyUiLaunchScript")}</span>
+            {launchOptions.length ? (
+              <select value={launchScript} onChange={(event) => setLaunchScript(event.target.value)} disabled={busy}>
+                {launchOptions.map((script) => (
+                  <option value={script} key={script}>
+                    {script}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={launchScript}
+                onChange={(event) => setLaunchScript(event.target.value)}
+                placeholder="run_nvidia_gpu.bat"
+                disabled={busy}
+              />
+            )}
+          </label>
         </div>
-        <span className={`status-chip ${status === "online" ? "good" : status === "offline" ? "danger" : "muted"}`}>
-          {comfyUiStatusLabel(t, status)}
-        </span>
-      </div>
-      <form className="comfyui-connection-form" onSubmit={submit}>
-        <label className="comfyui-url-field">
-          <span>{t("plugins.comfyUiUrl")}</span>
-          <input
-            value={url}
-            onChange={(event) => onUrlChange(event.target.value)}
-            placeholder="http://127.0.0.1:8188"
-            disabled={busy}
-          />
-        </label>
-        <div className="comfyui-actions">
-          <button className="secondary-button" type="submit" disabled={busy || !cleanUrl}>
+        <div className="comfyui-mcp-actions">
+          <button className="secondary-button compact" type="submit" disabled={busy || !cleanUrl}>
             {busy ? t("common.saving") : t("common.save")}
           </button>
-          <button className="secondary-button" type="button" disabled={busy || !cleanUrl} onClick={() => check(cleanUrl)}>
+          <button
+            className="secondary-button compact"
+            type="button"
+            disabled={busy || !cleanInstallPath}
+            onClick={() => void detectInstall(cleanInstallPath, launchScript)}
+          >
+            {t("plugins.comfyUiDetect")}
+          </button>
+          <button className="secondary-button compact" type="button" disabled={busy || !cleanUrl} onClick={() => check(cleanUrl)}>
             {t("plugins.comfyUiCheck")}
           </button>
-          <button className="secondary-button" type="button" disabled={busy || !cleanUrl} onClick={() => openBrowser(cleanUrl)}>
+          <button className="secondary-button compact" type="button" disabled={busy || !cleanUrl} onClick={() => openBrowser(cleanUrl)}>
             {t("plugins.comfyUiOpen")}
           </button>
-          <button className="secondary-button subtle" type="button" disabled={busy} onClick={refresh}>
+          <button className="secondary-button compact subtle" type="button" disabled={busy} onClick={refresh}>
             {t("common.refresh")}
           </button>
         </div>
       </form>
-      <div className="comfyui-meta">
+      <div className="comfyui-mcp-meta">
         <span>{state?.configured ? t("plugins.comfyUiConfigured") : t("plugins.comfyUiNotConfigured")}</span>
+        <span>{comfyUiInstallStatusLabel(t, installStatus)}</span>
+        {installation?.resolved_root ? <span title={installation.resolved_root}>{installation.resolved_root}</span> : null}
+        {installation?.launch_script ? <span>{installation.launch_script}</span> : null}
         {state?.checked_at ? <span>{t("plugins.comfyUiChecked")}: {state.checked_at}</span> : null}
         {state?.endpoints?.system_stats ? <span>/system_stats</span> : null}
         {state?.endpoints?.queue ? <span>/queue</span> : null}
       </div>
+      {installation?.validation_errors?.length ? (
+        <div className="comfyui-error">{installation.validation_errors.join("; ")}</div>
+      ) : null}
       {lastError ? <div className="comfyui-error">{lastError}</div> : null}
-    </section>
+    </div>
   );
 }
 
@@ -555,5 +685,18 @@ function comfyUiStatusLabel(t: Translator, status: ComfyUiStateResponse["status"
       return t("plugins.comfyUiOffline");
     default:
       return t("plugins.comfyUiUnknown");
+  }
+}
+
+function comfyUiInstallStatusLabel(t: Translator, status: string): string {
+  switch (status) {
+    case "launchable":
+      return t("plugins.comfyUiLaunchable");
+    case "invalid_path":
+      return t("plugins.comfyUiInvalidPath");
+    case "invalid_launch_script":
+      return t("plugins.comfyUiInvalidLaunchScript");
+    default:
+      return t("plugins.comfyUiInstallUnconfigured");
   }
 }

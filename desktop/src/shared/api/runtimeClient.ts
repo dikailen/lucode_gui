@@ -1,4 +1,6 @@
 import type {
+  ComfyUiDetectionPayload,
+  ComfyUiDetectionResponse,
   ComfyUiSettingsPayload,
   ComfyUiStateResponse,
   DeleteSessionResponse,
@@ -151,6 +153,13 @@ export class RuntimeClient {
   async saveComfyUiSettings(payload: ComfyUiSettingsPayload): Promise<ComfyUiStateResponse> {
     return this.request<ComfyUiStateResponse>("/api/comfyui", {
       method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async detectComfyUiInstallation(payload: ComfyUiDetectionPayload): Promise<ComfyUiDetectionResponse> {
+    return this.request<ComfyUiDetectionResponse>("/api/comfyui/detect", {
+      method: "POST",
       body: JSON.stringify(payload),
     });
   }

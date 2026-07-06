@@ -334,8 +334,27 @@ describe("RuntimeClient", () => {
         return response(comfyUiStateResponse());
       }
       if (url.endsWith("/api/comfyui") && init?.method === "PUT") {
-        expect(JSON.parse(String(init.body))).toEqual({ base_url: "http://127.0.0.1:8188" });
+        expect(JSON.parse(String(init.body))).toEqual({
+          base_url: "http://127.0.0.1:8188",
+          install_path: "D:\\develop\\ComfyUI_windows_portable_nvidia",
+          launch_script: "run_nvidia_gpu.bat",
+        });
         return response({ ...comfyUiStateResponse(), configured: true });
+      }
+      if (url.endsWith("/api/comfyui/detect") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          install_path: "D:\\develop\\ComfyUI_windows_portable_nvidia",
+          launch_script: "run_nvidia_gpu.bat",
+        });
+        return response({
+          schema_version: "comfyui_detection.v1",
+          ...comfyUiStateResponse().installation,
+          install_path: "D:\\develop\\ComfyUI_windows_portable_nvidia",
+          resolved_root: "D:\\develop\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable",
+          configured: false,
+          valid: true,
+          status: "launchable",
+        });
       }
       if (url.endsWith("/api/comfyui/check") && init?.method === "POST") {
         expect(JSON.parse(String(init.body))).toEqual({ base_url: "http://127.0.0.1:8188" });
@@ -418,15 +437,29 @@ describe("RuntimeClient", () => {
       base_url: "http://127.0.0.1:8188",
       status: "unknown",
     });
-    await expect(client.saveComfyUiSettings({ base_url: "http://127.0.0.1:8188" })).resolves.toMatchObject({
-      configured: true,
+    await expect(
+      client.saveComfyUiSettings({
+        base_url: "http://127.0.0.1:8188",
+        install_path: "D:\\develop\\ComfyUI_windows_portable_nvidia",
+        launch_script: "run_nvidia_gpu.bat",
+      }),
+    ).resolves.toMatchObject({ configured: true });
+    await expect(
+      client.detectComfyUiInstallation({
+        install_path: "D:\\develop\\ComfyUI_windows_portable_nvidia",
+        launch_script: "run_nvidia_gpu.bat",
+      }),
+    ).resolves.toMatchObject({
+      schema_version: "comfyui_detection.v1",
+      valid: true,
+      resolved_root: "D:\\develop\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable",
     });
     await expect(client.checkComfyUiConnection({ base_url: "http://127.0.0.1:8188" })).resolves.toMatchObject({
       status: "online",
       endpoints: { system_stats: true, queue: true },
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(20);
+    expect(fetchMock).toHaveBeenCalledTimes(21);
   });
 
   it("builds authenticated websocket urls from http base urls", () => {
@@ -730,5 +763,17 @@ function comfyUiStateResponse() {
     last_error: "",
     checked_at: "",
     endpoints: {},
+    installation: {
+      install_path: "",
+      resolved_root: "",
+      configured: false,
+      valid: false,
+      status: "unconfigured",
+      launch_mode: "",
+      launch_script: "",
+      launch_command: "",
+      available_launch_scripts: [],
+      validation_errors: [],
+    },
   };
 }

@@ -39,6 +39,7 @@ import { resolveRuntimeConfig } from "./runtimeEnv";
 import { isTerminalRunEvent } from "./runEvents";
 import { RuntimeClient } from "../shared/api/runtimeClient";
 import type {
+  ComfyUiInstallation,
   ComfyUiStateResponse,
   ExternalMcpPayload,
   ModelSettingsResponse,
@@ -121,7 +122,8 @@ export type LucodeAppController = {
   installMcp: (path: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
   refreshComfyUiState: () => void;
-  saveComfyUiUrl: (baseUrl: string) => Promise<boolean>;
+  saveComfyUiUrl: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
+  detectComfyUiInstall: (installPath: string, launchScript?: string) => Promise<boolean>;
   checkComfyUi: (baseUrl?: string) => void;
   openComfyUiInBrowser: (baseUrl?: string) => void;
   refreshTerminalState: () => void;
@@ -421,7 +423,7 @@ export function useLucodeApp(): LucodeAppController {
     }
   }
 
-  async function saveComfyUiUrl(baseUrl: string): Promise<boolean> {
+  async function saveComfyUiUrl(baseUrl: string, installPath?: string, launchScript?: string): Promise<boolean> {
     const cleanBaseUrl = baseUrl.trim();
     if (!cleanBaseUrl || comfyUiBusy) {
       return false;
@@ -429,7 +431,14 @@ export function useLucodeApp(): LucodeAppController {
     setComfyUiError("");
     setComfyUiBusy(true);
     try {
-      setComfyUiState(await client.saveComfyUiSettings({ base_url: cleanBaseUrl }));
+      const payload: { base_url: string; install_path?: string; launch_script?: string } = { base_url: cleanBaseUrl };
+      if (installPath !== undefined) {
+        payload.install_path = installPath.trim();
+      }
+      if (launchScript !== undefined) {
+        payload.launch_script = launchScript.trim();
+      }
+      setComfyUiState(await client.saveComfyUiSettings(payload));
     } catch (error) {
       setComfyUiError(error instanceof Error ? error.message : String(error));
       return false;
@@ -437,6 +446,28 @@ export function useLucodeApp(): LucodeAppController {
       setComfyUiBusy(false);
     }
     return true;
+  }
+
+  async function detectComfyUiInstall(installPath: string, launchScript = ""): Promise<boolean> {
+    const cleanPath = installPath.trim();
+    if (!cleanPath || comfyUiBusy) {
+      return false;
+    }
+    setComfyUiError("");
+    setComfyUiBusy(true);
+    try {
+      const installation = await client.detectComfyUiInstallation({
+        install_path: cleanPath,
+        launch_script: launchScript.trim() || undefined,
+      });
+      setComfyUiState((current) => mergeComfyUiInstallation(current, installation));
+      return installation.valid;
+    } catch (error) {
+      setComfyUiError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setComfyUiBusy(false);
+    }
   }
 
   async function checkComfyUi(baseUrl = "") {
@@ -903,6 +934,7 @@ export function useLucodeApp(): LucodeAppController {
     registerExternalMcp,
     refreshComfyUiState: () => void refreshComfyUiState(),
     saveComfyUiUrl,
+    detectComfyUiInstall,
     checkComfyUi: (baseUrl) => void checkComfyUi(baseUrl),
     openComfyUiInBrowser,
     refreshTerminalState: () => void refreshTerminalState(),
@@ -953,6 +985,34 @@ function actionFromToolName(toolName: string): string {
 function stringPayloadField(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
   return typeof value === "string" ? value.trim() : "";
+}
+
+function mergeComfyUiInstallation(
+  current: ComfyUiStateResponse | null,
+  installation: ComfyUiInstallation,
+): ComfyUiStateResponse {
+  const cleanInstallation = {
+    install_path: installation.install_path,
+    resolved_root: installation.resolved_root,
+    configured: installation.configured,
+    valid: installation.valid,
+    status: installation.status,
+    launch_mode: installation.launch_mode,
+    launch_script: installation.launch_script,
+    launch_command: installation.launch_command,
+    available_launch_scripts: installation.available_launch_scripts,
+    validation_errors: installation.validation_errors,
+  };
+  return {
+    schema_version: "comfyui.v1",
+    base_url: current?.base_url || DEFAULT_COMFYUI_URL,
+    configured: Boolean(current?.configured || installation.configured),
+    status: current?.status || "unknown",
+    last_error: current?.last_error || "",
+    checked_at: current?.checked_at || "",
+    endpoints: current?.endpoints || {},
+    installation: cleanInstallation,
+  };
 }
 
 function readViewportWidth(): number {
