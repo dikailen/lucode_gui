@@ -1,5 +1,28 @@
 ---
 name: project-explorer
+id: project_explorer
+category: [programming, backend]
+tags: [project, repository, structure, architecture, package, entrypoint, configuration, onboarding]
+use_when:
+  - Inspect project structure, identify technology stack, explain package entry points, map important directories, or orient a developer in an unfamiliar codebase.
+  - Answer where a feature lives, how the project starts, what configuration matters, or what files should be read first.
+do_not_use_when:
+  - The user asks to modify code, fix a bug, run a refactor, or write tests after the relevant files are already known.
+  - The task is to create or optimize a Lucode Skill.
+negative_queries:
+  - implement the fix
+  - edit SKILL.md metadata
+  - generate image
+scope_paths:
+  - README*
+  - package.json
+  - pyproject.toml
+  - requirements*.txt
+  - runtime/**
+  - desktop/**
+verification:
+  - Prefer read-only inspection commands and report concrete file entry points.
+risk_level: low
 description: 帮助开发者快速了解新项目的技能。包括分析项目架构、识别技术栈、理解目录结构、查找重要配置文件、指导开发新模块的入手点、以及了解项目部署和访问方式。当开发者刚进入新公司或接手新项目时，使用这个技能来快速掌握项目全貌。
 ---
 

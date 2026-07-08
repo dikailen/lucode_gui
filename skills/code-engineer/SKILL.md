@@ -1,5 +1,27 @@
 ---
+id: code_engineer
 name: code-engineer
+category: [programming, backend]
+tags: [code, engineering, bugfix, refactor, review, tests, pytest, runtime, python, typescript]
+use_when:
+  - Fix Python runtime bugs, implement code changes, refactor modules, write tests, review diffs, debug failures, or verify software behavior.
+  - Modify backend, frontend, CLI, desktop, provider, storage, context, or agent-loop code in an existing repository.
+do_not_use_when:
+  - The user only wants a high-level product plan, document editing, image generation, or casual chat with no codebase work.
+  - The task is specifically to create or improve Lucode Skill metadata or write a new SKILL.md.
+negative_queries:
+  - create a skill
+  - write a SKILL.md
+  - pure project overview without code changes
+scope_paths:
+  - runtime/**
+  - desktop/**
+  - planning/**
+  - catalog_system/**
+  - tests/**
+verification:
+  - Run focused tests for the touched module, then adjacent regression checks when risk crosses module boundaries.
+risk_level: medium
 description: Use for software engineering work: code implementation, bug fixes, refactors, code review, debugging, test writing, verification, API/interface design, and small product hardening tasks. Applies general engineering discipline plus language-specific guidance for Python, Java, and C++ when those files are involved.
 ---
 

@@ -1,0 +1,105 @@
+{
+  "schema_version": "skill_taxonomy.v1",
+  "categories": [
+    {
+      "id": "programming",
+      "name": "Programming",
+      "description": "Code changes, runtime logic, tests, architecture, and tool-backed engineering tasks.",
+      "children": [
+        {
+          "id": "frontend",
+          "name": "Frontend",
+          "description": "Electron, React, CSS, renderer UI layout, and interaction work."
+        },
+        {
+          "id": "backend",
+          "name": "Backend",
+          "description": "Runtime services, APIs, storage, providers, and server-side integration."
+        },
+        {
+          "id": "agent_loop",
+          "name": "Agent Loop",
+          "description": "Planner, scheduler, worker, context, memory, evidence, and execution orchestration."
+        },
+        {
+          "id": "testing",
+          "name": "Testing",
+          "description": "Unit tests, integration tests, verification, smoke checks, and regression coverage."
+        }
+      ]
+    },
+    {
+      "id": "design",
+      "name": "Design",
+      "description": "Interface design, image generation, interaction design, and creative workflows.",
+      "children": [
+        {
+          "id": "ui_design",
+          "name": "UI Design",
+          "description": "Visual hierarchy, layout, product interaction, screenshots, and design QA."
+        },
+        {
+          "id": "image_generation",
+          "name": "Image Generation",
+          "description": "Image generation, visual assets, style references, and media creation."
+        },
+        {
+          "id": "comfyui",
+          "name": "ComfyUI",
+          "description": "ComfyUI workflow graphs, nodes, image pipelines, plugins, and automation."
+        }
+      ]
+    },
+    {
+      "id": "documentation",
+      "name": "Documentation",
+      "description": "Plans, README files, technical writing, and project documentation.",
+      "children": [
+        {
+          "id": "readme",
+          "name": "README",
+          "description": "README and user-facing setup documentation."
+        },
+        {
+          "id": "planning",
+          "name": "Planning",
+          "description": "Implementation plans, architecture notes, migration plans, and risk documents."
+        }
+      ]
+    },
+    {
+      "id": "tools",
+      "name": "Tools",
+      "description": "Local tools and user-visible tool surfaces.",
+      "children": [
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Git status, diff, commit, branch, push, and repository history."
+        },
+        {
+          "id": "terminal",
+          "name": "Terminal",
+          "description": "Shell, terminal sessions, command execution, logs, and PTY behavior."
+        },
+        {
+          "id": "browser",
+          "name": "Browser",
+          "description": "Embedded browser, tabs, page summary, DOM selectors, forms, and controlled page actions."
+        }
+      ]
+    },
+    {
+      "id": "mcp",
+      "name": "MCP",
+      "description": "Model Context Protocol servers, templates, tool manifests, and external service integration.",
+      "children": [
+        {
+          "id": "integration",
+          "name": "Integration",
+          "description": "MCP stdio, HTTP, SSE, external services, tool permissions, and manifest wiring."
+        }
+      ]
+    }
+  ]
+}

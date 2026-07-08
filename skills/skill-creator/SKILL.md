@@ -1,5 +1,25 @@
 ---
+id: skill_creator
 name: skill-creator
+category: [documentation, planning]
+tags: [skill, skills, SKILL.md, metadata, frontmatter, trigger, evals, workflow]
+use_when:
+  - Create a new SKILL.md, edit an existing skill, improve skill metadata, optimize triggering descriptions, design skill evals, or package a reusable workflow as a skill.
+  - Review skill instructions, frontmatter, use_when and do_not_use_when rules, or skill performance benchmarks.
+do_not_use_when:
+  - The user asks to fix ordinary application code, inspect a repository, or run a generic project overview without changing Skill files.
+  - The task is only command safety policy or runtime tool approval.
+negative_queries:
+  - fix python runtime bug
+  - inspect project structure
+  - run shell command safely
+scope_paths:
+  - skills/**/SKILL.md
+  - core_skills/**/SKILL.md
+  - .lucode/skills/**/SKILL.md
+verification:
+  - Validate frontmatter parsing and run focused Skill Library tests when changing skill metadata.
+risk_level: medium
 description: Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.
 ---
 

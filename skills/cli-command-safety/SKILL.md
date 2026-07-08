@@ -1,5 +1,20 @@
 ---
+id: cli_command_safety
 name: cli-command-safety
+category: [tools, terminal]
+tags: [cli, command, shell, terminal, powershell, approval, safety, risk]
+use_when:
+  - Assess local shell command risk, approval requirements, destructive command hazards, sandbox preview needs, or safer read-only command alternatives.
+  - Explain why a command should be allowed, denied, previewed, or gated before execution.
+do_not_use_when:
+  - The task is ordinary code editing, project overview, skill authoring, or browser operation without local command execution.
+negative_queries:
+  - create a skill
+  - inspect project structure only
+assignable: false
+verification:
+  - Keep this as a rule-only safety contract; it must not become an automatic worker skill.
+risk_level: high
 description: Use when planning or executing local CLI commands in Lucode. Requires command intent, risk, approval, and fallback to safer read-only/native paths.
 ---
 
