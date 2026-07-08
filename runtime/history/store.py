@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime.common.conversation import append_recent_turn
 from runtime.common.text_utils import sanitize_text
 from runtime.context.compaction import redact_sensitive_text
 from runtime.history.model import HistoryDeleteResult, HistoryItem, HistoryPreview
 from runtime.sessions.store import SessionStore, SessionSummary
+from runtime.storage.context_store import ContextSQLiteStore
 
 
 HISTORY_SCHEMA_VERSION = 1
@@ -25,6 +28,7 @@ class HistoryStore(SessionStore):
         self.index_path = self.history_dir / "index.jsonl"
         self.contexts_dir = self.history_dir / "contexts"
         self.exports_dir = self.history_dir / "exports"
+        self._context_sqlite_store: ContextSQLiteStore | None = None
         super().__init__(
             self.workspace_root,
             max_message_chars=max_message_chars,
@@ -35,6 +39,7 @@ class HistoryStore(SessionStore):
         super().append_event(session_id, event)
         self._append_context_entry(session_id, event)
         self._append_index_entry(session_id)
+        self._append_sqlite_entry(session_id, event)
 
     def _append_context_entry(self, session_id: str, event: dict[str, Any]) -> None:
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
@@ -85,6 +90,139 @@ class HistoryStore(SessionStore):
             # Index is only a fast lookup/cache layer; session JSONL remains the source of truth.
             return
 
+    def _append_sqlite_entry(self, session_id: str, event: dict[str, Any]) -> None:
+        store = self._sqlite_store()
+        if store is None:
+            return
+        try:
+            payload = dict(event or {})
+            event_type = str(payload.get("type") or "").strip()
+            timestamp = str(payload.get("timestamp") or "").strip() or _now_iso()
+            if event_type == "session_metadata":
+                store.save_session(
+                    {
+                        "session_id": session_id,
+                        "title": str(payload.get("title") or ""),
+                        "created_at": timestamp,
+                        "updated_at": timestamp,
+                        "source": "jsonl",
+                    }
+                )
+                return
+            if event_type != "message":
+                return
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            run_id = str(metadata.get("run_id") or "")
+            store.save_message(
+                {
+                    "session_id": session_id,
+                    "role": str(payload.get("role") or ""),
+                    "content": str(payload.get("content") or ""),
+                    "created_at": timestamp,
+                    "metadata": metadata,
+                    "source": "jsonl",
+                }
+            )
+            self._append_sqlite_context_metadata(
+                store,
+                session_id=session_id,
+                run_id=run_id,
+                metadata=metadata,
+                created_at=timestamp,
+            )
+        except Exception:
+            # SQLite is an auxiliary cache/index in Phase 3; JSONL stays authoritative.
+            return
+
+    def _append_sqlite_context_metadata(
+        self,
+        store: ContextSQLiteStore,
+        *,
+        session_id: str,
+        run_id: str,
+        metadata: dict[str, Any],
+        created_at: str,
+    ) -> None:
+        summary = sanitize_text(str(metadata.get("run_context_summary") or "")).strip()
+        if summary:
+            store.save_context_summary(
+                {
+                    "session_id": session_id,
+                    "summary": redact_sensitive_text(summary),
+                    "created_at": created_at,
+                    "source": "jsonl",
+                    "metadata": {"run_id": run_id} if run_id else {},
+                }
+            )
+        ledger = metadata.get("context_ledger") if isinstance(metadata.get("context_ledger"), dict) else {}
+        if ledger:
+            store.save_context_ledger_result(
+                {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "mode": str(ledger.get("mode") or ""),
+                    "applied": bool(ledger.get("applied")),
+                    "triggered": bool(ledger.get("triggered")),
+                    "estimated_input_tokens": ledger.get("estimated_input_tokens"),
+                    "context_window_tokens": ledger.get("context_window_tokens"),
+                    "created_at": created_at,
+                    "metadata": {
+                        key: value
+                        for key, value in ledger.items()
+                        if key
+                        not in {
+                            "mode",
+                            "applied",
+                            "triggered",
+                            "estimated_input_tokens",
+                            "context_window_tokens",
+                        }
+                    },
+                }
+            )
+        dehydration = metadata.get("tool_dehydration") if isinstance(metadata.get("tool_dehydration"), dict) else {}
+        items = dehydration.get("items") if isinstance(dehydration.get("items"), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            evidence_ref = str(item.get("evidence_ref") or "")
+            artifact_ref = str(item.get("raw_artifact_ref") or "")
+            store.save_tool_dehydrated_result(
+                {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "tool": str(item.get("tool") or item.get("tool_name") or ""),
+                    "summary": str(item.get("summary") or ""),
+                    "evidence_ref": evidence_ref,
+                    "raw_artifact_ref": artifact_ref,
+                    "created_at": created_at,
+                    "metadata": item,
+                }
+            )
+            if evidence_ref:
+                store.save_evidence_ref(
+                    {
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "evidence_ref": evidence_ref,
+                        "artifact_ref": artifact_ref,
+                        "source_type": "tool",
+                        "created_at": created_at,
+                        "metadata": item,
+                    }
+                )
+
+    def _sqlite_store(self) -> ContextSQLiteStore | None:
+        if not _sqlite_dual_write_enabled():
+            return None
+        if self._context_sqlite_store is not None:
+            return self._context_sqlite_store
+        try:
+            self._context_sqlite_store = ContextSQLiteStore(self.workspace_root)
+        except Exception:
+            return None
+        return self._context_sqlite_store
+
 
 class HistoryFacade:
     """Stable history API backed by canonical history plus legacy JSONL sessions."""
@@ -100,11 +238,19 @@ class HistoryFacade:
         self.history_dir = self.workspace_root / ".lucode" / "history"
         self.session_store = session_store or SessionStore(self.workspace_root)
         self.history_store = history_store or HistoryStore(self.workspace_root)
+        self._context_sqlite_read_store: ContextSQLiteStore | None = None
 
     def list_items(self, limit: int = 20) -> list[HistoryItem]:
         limit = max(1, int(limit or 20))
         items: list[HistoryItem] = []
         seen: set[str] = set()
+        for summary in self._sqlite_list_sessions(limit=limit):
+            if summary.session_id in seen:
+                continue
+            if not self._sqlite_summary_is_current(summary):
+                continue
+            seen.add(summary.session_id)
+            items.append(_history_item_from_summary(summary, storage_kind="history_sqlite"))
         for storage_kind, store in (("history", self.history_store), ("legacy_session", self.session_store)):
             for summary in store.list_sessions(limit=limit):
                 if summary.session_id in seen:
@@ -228,6 +374,9 @@ class HistoryFacade:
         session_id = self.resolve(history_id)
         if not session_id:
             return ""
+        sqlite_summary = self._sqlite_load_context_summary(session_id, max_chars=max_chars)
+        if sqlite_summary:
+            return sqlite_summary
         summaries: list[str] = []
         context_path = self.history_store.contexts_dir / f"{session_id}.context.jsonl"
         if context_path.is_file():
@@ -253,13 +402,23 @@ class HistoryFacade:
         session_id = self.resolve(history_id)
         if not session_id:
             return []
-        store = self._store_for(session_id)
-        return store.load_recent_turns(session_id, max_messages=max_messages) if store else []
+        turns: list[dict[str, str]] = []
+        for message in self.load_messages(session_id, limit=max_messages):
+            append_recent_turn(
+                turns,
+                str(message.get("role") or ""),
+                str(message.get("content") or ""),
+                max_chars=800,
+            )
+        return turns
 
     def load_messages(self, history_id: str, limit: int | None = None) -> list[dict[str, str]]:
         session_id = self.resolve(history_id)
         if not session_id:
             return []
+        sqlite_messages = self._sqlite_load_messages(session_id, limit=limit)
+        if sqlite_messages:
+            return sqlite_messages
         store = self._store_for(session_id)
         return store.load_messages(session_id, limit=limit) if store else []
 
@@ -285,6 +444,74 @@ class HistoryFacade:
         shutil.copy2(source, target)
         self.history_store._append_index_entry(session_id)
         return session_id
+
+    def _sqlite_list_sessions(self, limit: int) -> list[SessionSummary]:
+        store = self._sqlite_read_store()
+        if store is None:
+            return []
+        try:
+            return store.list_sessions(limit=limit)
+        except Exception:
+            return []
+
+    def _sqlite_load_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+        store = self._sqlite_read_store()
+        if store is None:
+            return []
+        try:
+            summary = _summary_for_session(store.list_sessions(limit=200), session_id)
+            if summary is None or not self._sqlite_summary_is_current(summary):
+                return []
+            return store.load_messages(session_id, limit=limit)
+        except Exception:
+            return []
+
+    def _sqlite_load_context_summary(self, session_id: str, max_chars: int) -> str:
+        store = self._sqlite_read_store()
+        if store is None:
+            return ""
+        try:
+            summary = _summary_for_session(store.list_sessions(limit=200), session_id)
+            if summary is None or not self._sqlite_summary_is_current(summary):
+                return ""
+            return store.load_context_summary(session_id, max_chars=max_chars)
+        except Exception:
+            return ""
+
+    def _sqlite_read_store(self) -> ContextSQLiteStore | None:
+        if not _sqlite_read_through_enabled():
+            return None
+        if self._context_sqlite_read_store is not None:
+            return self._context_sqlite_read_store
+        try:
+            self._context_sqlite_read_store = ContextSQLiteStore(self.workspace_root)
+        except Exception:
+            return None
+        return self._context_sqlite_read_store
+
+    def _history_jsonl_exists(self, session_id: str) -> bool:
+        safe_id = str(session_id or "").strip()
+        if not safe_id:
+            return False
+        return (self.history_store.sessions_dir / f"{safe_id}.jsonl").is_file()
+
+    def _sqlite_summary_is_current(self, sqlite_summary: SessionSummary) -> bool:
+        history_summary = self._history_summary_for(sqlite_summary.session_id)
+        if history_summary is None:
+            return False
+        return int(sqlite_summary.message_count or 0) == int(history_summary.message_count or 0)
+
+    def _history_summary_for(self, session_id: str) -> SessionSummary | None:
+        safe_id = str(session_id or "").strip()
+        if not safe_id:
+            return None
+        path = self.history_store.sessions_dir / f"{safe_id}.jsonl"
+        if not path.is_file():
+            return None
+        try:
+            return self.history_store._summarize(path)
+        except Exception:
+            return None
 
     def _store_for(self, session_id: str) -> SessionStore | None:
         safe_id = str(session_id or "").strip()
@@ -391,6 +618,11 @@ def _history_item_from_summary(summary: SessionSummary, *, storage_kind: str) ->
     )
 
 
+def _summary_for_session(summaries: list[SessionSummary], session_id: str) -> SessionSummary | None:
+    target = str(session_id or "")
+    return next((summary for summary in summaries if summary.session_id == target), None)
+
+
 def _short(text: Any, limit: int = 88) -> str:
     normalized = _clean_truncation_marker(sanitize_text(str(text or "")).replace("\n", " ").strip())
     if len(normalized) <= limit:
@@ -419,3 +651,13 @@ def _iter_jsonl(path: Path):
                     continue
     except OSError:
         return
+
+
+def _sqlite_dual_write_enabled() -> bool:
+    mode = str(os.environ.get("LUCODE_CONTEXT_SQLITE") or "off").strip().lower()
+    return mode in {"dual_write", "read_through", "primary"}
+
+
+def _sqlite_read_through_enabled() -> bool:
+    mode = str(os.environ.get("LUCODE_CONTEXT_SQLITE") or "off").strip().lower()
+    return mode in {"read_through", "primary"}

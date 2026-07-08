@@ -19,6 +19,7 @@ from runtime.config.model_config import (
     load_lucode_config,
     load_provider_catalog,
     model_ids_from_refs,
+    model_refs_from_config,
     normalize_provider_id,
     normalize_model_role,
     provider_api_key_value,
@@ -32,7 +33,10 @@ from runtime.config.model_config import (
 from runtime.config.execution_mode import execution_mode_policy
 from runtime.config.model_selection import model_runtime_available
 from runtime.config.settings import RuntimeSettings
-from runtime.safety.privacy import normalize_privacy_mode
+from runtime.consistency.timeline import reliability_flags_from_env
+from runtime.context.token_counter import context_window_for_model
+from runtime.history.titles import smart_session_title
+from runtime.safety.privacy import PrivacyPolicy, normalize_privacy_mode
 from runtime.history.store import HistoryFacade
 from runtime.server.execution_bridge import (
     KernelAgentLoopExecutor,
@@ -587,6 +591,27 @@ class RuntimeRunManager:
             catalog = {}
         return [item for item in catalog.get("models", []) if isinstance(item, dict)]
 
+    def _context_model_info(self) -> dict[str, Any]:
+        models = self._catalog_models()
+        if not models:
+            return {}
+        settings = _runtime_settings_for_workspace(self.workspace_root)
+        policy = PrivacyPolicy(normalize_privacy_mode(str(getattr(settings, "privacy_mode", "") or "local_first")))
+        usable_by_id = _context_usable_models_by_id(models, policy=policy)
+        candidates = _context_budget_candidates(
+            settings=settings,
+            models=models,
+            usable_by_id=usable_by_id,
+            workspace_root=self.workspace_root,
+            policy=policy,
+        )
+        if not candidates:
+            candidates = list(usable_by_id.values())
+        if not candidates:
+            candidates = [item for item in models if item.get("configured")] or models
+        selected = _smallest_context_window_model(candidates)
+        return _sanitize_context_model_info(selected)
+
     def _history_contains(self, session_id: str) -> bool:
         return any(item.session_id == session_id for item in self._history_items())
 
@@ -609,7 +634,7 @@ class RuntimeRunManager:
             existing_messages = []
         if existing_messages:
             return
-        title = _clean_title(user_input)
+        title = smart_session_title(user_input)
         self._history_facade.history_store.append_event(
             session_id,
             {
@@ -650,6 +675,9 @@ class RuntimeRunManager:
             event_bus=event_bus,
             cancel_requested=cancel_requested,
             approval_session=approval_session,
+            history_facade=self._history_facade,
+            model_info=self._context_model_info(),
+            routing_input=run.user_input,
         )
         try:
             result = await call_run_executor(self._run_executor, request)
@@ -736,6 +764,161 @@ class RuntimeRunManager:
             "run_status": run.status,
             "events": [_history_run_event_payload(event) for event in events],
         }
+
+
+SENSITIVE_CONTEXT_MODEL_KEYS = {
+    "api_key",
+    "api_key_value",
+    "api_key_encrypted",
+    "authorization",
+    "password",
+    "secret",
+    "token",
+}
+
+
+def _runtime_settings_for_workspace(workspace_root: Path) -> RuntimeSettings:
+    try:
+        return RuntimeSettings.from_env(workspace_root=workspace_root)
+    except Exception:
+        return RuntimeSettings()
+
+
+def _context_usable_models_by_id(models: list[dict[str, Any]], *, policy: PrivacyPolicy) -> dict[str, dict[str, Any]]:
+    usable: dict[str, dict[str, Any]] = {}
+    for item in models:
+        model_id = str(item.get("id") or item.get("model") or "").strip()
+        if not model_id or not item.get("configured"):
+            continue
+        if not policy.model_allowed(item):
+            continue
+        if not model_runtime_available(item):
+            continue
+        usable[model_id] = item
+    return usable
+
+
+def _context_budget_candidates(
+    *,
+    settings: RuntimeSettings,
+    models: list[dict[str, Any]],
+    usable_by_id: dict[str, dict[str, Any]],
+    workspace_root: Path,
+    policy: PrivacyPolicy,
+) -> list[dict[str, Any]]:
+    role_priorities = _context_role_priorities(settings, models, workspace_root=workspace_root)
+    selected_ids: list[str] = []
+
+    def add_id(model_id: str) -> None:
+        clean_id = str(model_id or "").strip()
+        if clean_id and clean_id in usable_by_id and clean_id not in selected_ids:
+            selected_ids.append(clean_id)
+
+    def add_selected_role(role: str) -> None:
+        add_id(_first_context_model_id(role_priorities.get(role, []), usable_by_id, policy=policy))
+
+    def add_executor_candidates() -> None:
+        pool = [model_id for model_id in _string_list(settings.worker_model_pool(None)) if model_id in usable_by_id]
+        if pool:
+            for model_id in pool:
+                add_id(model_id)
+            return
+        for model_id in policy.sort_model_ids(role_priorities.get("executor", []), usable_by_id):
+            add_id(model_id)
+        add_selected_role("executor")
+
+    mode_policy = execution_mode_policy(str(getattr(settings, "execution_mode", "") or "auto"))
+    if mode_policy.fast_single_agent:
+        add_selected_role("executor")
+    else:
+        if bool(getattr(settings, "query_refiner_enabled", False)):
+            add_selected_role("query_refiner")
+        add_selected_role("orchestrator")
+        add_selected_role("final_synthesizer")
+        add_executor_candidates()
+    if _compute_placement_enforced():
+        for model_id in usable_by_id:
+            add_id(model_id)
+
+    return [usable_by_id[model_id] for model_id in selected_ids if model_id in usable_by_id]
+
+
+def _context_role_priorities(
+    settings: RuntimeSettings,
+    models: list[dict[str, Any]],
+    *,
+    workspace_root: Path,
+) -> dict[str, list[str]]:
+    priorities: dict[str, list[str]] = {}
+    for role_id, _role_info in iter_model_roles():
+        try:
+            priorities[role_id] = _dedupe_model_ids(settings.model_priority_for(role_id))
+        except Exception:
+            priorities[role_id] = []
+
+    try:
+        config = load_effective_lucode_config(workspace_root=workspace_root)
+    except Exception:
+        config = {}
+    role_config = config.get("roles") if isinstance(config.get("roles"), dict) else {}
+    default_ids = _model_ids_for_refs(model_refs_from_config(config), models) if config else []
+    for role_id, _role_info in iter_model_roles():
+        explicit_ids = _model_ids_for_refs(role_config.get(role_id) or [], models) if role_config else []
+        if explicit_ids:
+            priorities[role_id] = explicit_ids
+        elif default_ids and not priorities.get(role_id):
+            priorities[role_id] = list(default_ids)
+    return priorities
+
+
+def _first_context_model_id(
+    preferred: list[str],
+    usable_by_id: dict[str, dict[str, Any]],
+    *,
+    policy: PrivacyPolicy,
+) -> str:
+    for model_id in policy.sort_model_ids(_dedupe_model_ids(preferred), usable_by_id):
+        if model_id in usable_by_id:
+            return model_id
+    return sorted(usable_by_id)[0] if usable_by_id else ""
+
+
+def _compute_placement_enforced() -> bool:
+    try:
+        return str(reliability_flags_from_env().compute_placement or "").strip().lower() == "enforce"
+    except Exception:
+        return False
+
+
+def _smallest_context_window_model(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    if not candidates:
+        return {}
+    return min(
+        enumerate(candidates),
+        key=lambda pair: (context_window_for_model(pair[1]), pair[0]),
+    )[1]
+
+
+def _sanitize_context_model_info(item: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, value in dict(item or {}).items():
+        clean_key = str(key)
+        lower_key = clean_key.lower()
+        if lower_key in SENSITIVE_CONTEXT_MODEL_KEYS:
+            continue
+        if any(marker in lower_key for marker in ("api_key", "secret", "token", "authorization", "password")):
+            continue
+        sanitized[clean_key] = value
+    sanitized["context_window_tokens"] = context_window_for_model(item)
+    return sanitized
+
+
+def _dedupe_model_ids(model_ids: Any) -> list[str]:
+    deduped: list[str] = []
+    for model_id in _string_list(model_ids):
+        if model_id not in deduped:
+            deduped.append(model_id)
+    return deduped
 
 
 def _terminal_state_payload(session: TerminalSession) -> dict[str, Any]:

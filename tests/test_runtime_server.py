@@ -75,6 +75,244 @@ def _make_comfyui_portable(root):
     return root
 
 
+def test_run_execution_request_context_fields_are_optional(tmp_path):
+    event_bus = ExecutionEventBus()
+    request = RunExecutionRequest(
+        run_id="run_test",
+        session_id="session_test",
+        user_input="hello",
+        workspace_root=tmp_path.resolve(),
+        event_bus=event_bus,
+        cancel_requested=asyncio.Event(),
+    )
+
+    assert request.history_facade is None
+    assert request.model_info == {}
+    assert request.routing_input == ""
+
+
+def test_runtime_run_manager_passes_context_observe_inputs_to_executor(tmp_path):
+    captured = {}
+
+    async def runner(request):
+        captured["request"] = request
+        return RunExecutionResult(final_output="ok")
+
+    client = _client(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "openai/gpt-5.5",
+                    "name": "GPT-5.5",
+                    "provider": "openai",
+                    "configured": True,
+                    "context_window_tokens": 128000,
+                }
+            ]
+        },
+        run_executor=runner,
+    )
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "context observe"},
+    ).json()["session_id"]
+    run_response = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "你好"},
+    )
+
+    assert run_response.status_code == 200
+    run_id = run_response.json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+    request = captured["request"]
+    assert request.user_input == "你好"
+    assert request.routing_input == "你好"
+    assert request.history_facade is not None
+    messages = request.history_facade.load_messages(session_id)
+    assert {"role": "user", "content": "你好"} in [
+        {"role": message["role"], "content": message["content"]}
+        for message in messages
+    ]
+    assert request.model_info["id"] == "openai/gpt-5.5"
+    assert request.model_info["context_window_tokens"] == 128000
+
+
+def test_runtime_context_model_info_uses_smallest_runtime_candidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_USER_HOME", str(tmp_path / "home"))
+    for name in (
+        "AGENTS_QUERY_REFINER_MODEL_PRIORITY",
+        "AGENTS_ORCHESTRATOR_MODEL_PRIORITY",
+        "AGENTS_EXECUTOR_MODEL_PRIORITY",
+        "AGENTS_FINAL_SYNTHESIZER_MODEL_PRIORITY",
+        "AGENTS_ALLOWED_WORKER_MODELS",
+        "AGENTS_EXECUTION_MODE",
+        "AGENTS_PRIVACY_MODE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".lucode").mkdir()
+    (tmp_path / ".lucode" / "config.toml").write_text(
+        "\n".join(
+            [
+                'mode = "auto"',
+                'allowed_worker_models = ["tiny_worker_model"]',
+                "",
+                "[roles]",
+                'orchestrator = ["large_orchestrator_model"]',
+                'executor = ["medium_executor_model"]',
+                'final_synthesizer = ["large_final_model"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    async def runner(request):
+        captured["request"] = request
+        return RunExecutionResult(final_output="ok")
+
+    client = _client(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "large_orchestrator_model",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "context_window_tokens": 128000,
+                },
+                {
+                    "id": "large_final_model",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "context_window_tokens": 64000,
+                },
+                {
+                    "id": "medium_executor_model",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "context_window_tokens": 32000,
+                    "supports_tools": True,
+                },
+                {
+                    "id": "tiny_worker_model",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "context_window_tokens": 8192,
+                    "supports_tools": True,
+                },
+            ]
+        },
+        run_executor=runner,
+    )
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "context budget model"},
+    ).json()["session_id"]
+    run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "hello"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+    request = captured["request"]
+    assert request.model_info["id"] == "tiny_worker_model"
+    assert request.model_info["context_window_tokens"] == 8192
+
+
+def test_runtime_context_model_info_omits_sensitive_model_fields(tmp_path):
+    manager = RuntimeRunManager(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "secret_model",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "context_window_tokens": 4096,
+                    "api_key": "plain-secret",
+                    "api_key_value": "resolved-secret",
+                    "token": "token-secret",
+                    "authorization": "bearer secret",
+                }
+            ]
+        },
+    )
+
+    model_info = manager._context_model_info()
+
+    assert model_info["id"] == "secret_model"
+    assert model_info["context_window_tokens"] == 4096
+    serialized = json.dumps(model_info, ensure_ascii=False)
+    assert "plain-secret" not in serialized
+    assert "resolved-secret" not in serialized
+    assert "token-secret" not in serialized
+    assert "bearer secret" not in serialized
+
+
+def test_runtime_context_model_info_uses_all_candidates_when_compute_placement_enforced(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_COMPUTE_PLACEMENT", "enforce")
+    monkeypatch.setenv("LUCODE_USER_HOME", str(tmp_path / "home"))
+    (tmp_path / ".lucode").mkdir()
+    (tmp_path / ".lucode" / "config.toml").write_text(
+        "\n".join(
+            [
+                'mode = "auto"',
+                "",
+                "[roles]",
+                'orchestrator = ["large_cloud_model"]',
+                'executor = ["large_cloud_model"]',
+                'final_synthesizer = ["large_cloud_model"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manager = RuntimeRunManager(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "large_cloud_model",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "context_window_tokens": 128000,
+                },
+                {
+                    "id": "small_local_model",
+                    "provider": "ollama",
+                    "configured": True,
+                    "backend_type": "ollama",
+                    "is_local": True,
+                    "context_window_tokens": 4096,
+                    "probe": {"status": "ok"},
+                },
+            ]
+        },
+    )
+
+    model_info = manager._context_model_info()
+
+    assert model_info["id"] == "small_local_model"
+    assert model_info["context_window_tokens"] == 4096
+
+
 def _wait_terminal_idle(client: TestClient, *, timeout_seconds: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout_seconds
     payload = {}
@@ -1362,10 +1600,45 @@ def test_first_run_renames_placeholder_session_and_survives_reload(tmp_path):
 
     assert events[-1]["type"] == "run.completed"
     assert listed[0]["session_id"] == session_id
-    assert listed[0]["title"] == first_question
+    assert listed[0]["title"] == "检查 Chat MVP 历史保存恢复"
     assert len(listed[0]["display_title"]) <= 36
     assert reloaded[0]["session_id"] == session_id
-    assert reloaded[0]["title"] == first_question
+    assert reloaded[0]["title"] == "检查 Chat MVP 历史保存恢复"
+
+
+def test_first_run_smart_title_is_dual_written_to_sqlite(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_CONTEXT_SQLITE", "dual_write")
+    client = _client(tmp_path)
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "New chat"},
+    ).json()["session_id"]
+    run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "直接进入p4吧，做好风险处理"},
+    ).json()["run_id"]
+
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+        events = [websocket.receive_json() for _ in range(3)]
+
+    import sqlite3
+
+    connection = sqlite3.connect(tmp_path / ".lucode" / "lucode.db")
+    try:
+        sqlite_title = connection.execute(
+            "select title from sessions where session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    listed = client.get("/api/sessions", headers=_auth_headers()).json()["sessions"]
+
+    assert events[-1]["type"] == "run.completed"
+    assert listed[0]["title"] == "P4 风险处理"
+    assert sqlite_title == "P4 风险处理"
 
 
 def test_first_run_keeps_custom_session_title(tmp_path):
@@ -1807,6 +2080,245 @@ def test_kernel_agent_loop_executor_invokes_kernel_facade_and_reuses_event_bus(t
     assert result.metadata["turn_status"] == "完成"
     assert result.metadata["mcp_ids_used"] == ["project_filesystem_readonly"]
     assert event_bus.snapshot()[0].event_type == "PlanningStarted"
+
+
+def test_kernel_agent_loop_executor_observes_context_ledger_without_replacing_prompt(tmp_path, monkeypatch):
+    seen: dict[str, object] = {}
+
+    class BrowserHistory:
+        def load_messages(self, session_id, limit=80):
+            return [
+                {"role": "user", "content": "Use the embedded browser to open https://example.com"},
+                {"role": "assistant", "content": "desktop_browser navigation completed"},
+            ]
+
+        def load_context_summary(self, session_id, max_chars=2400):
+            return "Old summary says: use desktop_browser and click a form."
+
+    class FakeResponse:
+        final_output = "direct answer"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            pass
+
+        async def run_once(self, prompt, **kwargs):
+            seen["prompt"] = prompt
+            seen["routing_input"] = kwargs.get("routing_input")
+            return FakeResponse()
+
+    monkeypatch.delenv("LUCODE_CONTEXT_LEDGER", raising=False)
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    request = RunExecutionRequest(
+        run_id="run_test",
+        session_id="session_test",
+        user_input="你好",
+        workspace_root=tmp_path.resolve(),
+        event_bus=ExecutionEventBus(),
+        cancel_requested=asyncio.Event(),
+        history_facade=BrowserHistory(),
+        model_info={"context_window_tokens": 10_000},
+        routing_input="你好",
+    )
+
+    result = asyncio.run(KernelAgentLoopExecutor()(request))
+
+    assert seen["prompt"] == "你好"
+    assert seen["routing_input"] == "你好"
+    assert result.final_output == "direct answer"
+    assert result.metadata["context_ledger"]["applied"] is False
+    assert result.metadata["context_ledger"]["mode"] in {"normal", "soft_limit", "hard_limit"}
+    assert result.metadata["context_ledger"]["summary_chars"] > 0
+    assert result.metadata["tool_dehydration"]["count"] == 0
+    metadata_text = json.dumps(result.metadata, ensure_ascii=False)
+    assert "desktop_browser" not in metadata_text
+    assert "https://example.com" not in metadata_text
+
+
+def test_kernel_agent_loop_executor_enforce_mode_uses_ledger_prompt_with_raw_routing_input(
+    tmp_path, monkeypatch
+):
+    seen: dict[str, object] = {}
+
+    class BrowserHistory:
+        def load_messages(self, session_id, limit=80):
+            return [
+                {"role": "user", "content": "Use the embedded browser to open https://example.com"},
+                {"role": "assistant", "content": "desktop_browser navigation completed"},
+            ]
+
+        def load_context_summary(self, session_id, max_chars=2400):
+            return "Old summary says: use desktop_browser and click a form."
+
+    class FakeResponse:
+        final_output = "ledger answer"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            pass
+
+        async def run_once(self, prompt, **kwargs):
+            seen["prompt"] = prompt
+            seen["routing_input"] = kwargs.get("routing_input")
+            return FakeResponse()
+
+    monkeypatch.setenv("LUCODE_CONTEXT_LEDGER", "enforce")
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    request = RunExecutionRequest(
+        run_id="run_test",
+        session_id="session_test",
+        user_input="你好",
+        workspace_root=tmp_path.resolve(),
+        event_bus=ExecutionEventBus(),
+        cancel_requested=asyncio.Event(),
+        history_facade=BrowserHistory(),
+        model_info={"context_window_tokens": 10_000},
+        routing_input="你好",
+    )
+
+    result = asyncio.run(KernelAgentLoopExecutor()(request))
+
+    assert seen["prompt"] != "你好"
+    assert "history_background" in str(seen["prompt"])
+    assert "Old summary says: use desktop_browser" in str(seen["prompt"])
+    assert str(seen["prompt"]).rstrip().endswith("你好")
+    assert seen["routing_input"] == "你好"
+    assert result.final_output == "ledger answer"
+    assert result.metadata["context_ledger"]["applied"] is True
+    metadata_text = json.dumps(result.metadata, ensure_ascii=False)
+    assert "https://example.com" not in metadata_text
+
+
+def test_runtime_second_turn_enforce_uses_history_prompt_but_keeps_raw_routing_input(
+    tmp_path, monkeypatch
+):
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, final_output):
+            self.final_output = final_output
+            self.turn_status = "completed"
+            self.stopped = False
+            self.mcp_ids_used = []
+            self.output_already_printed = False
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            pass
+
+        async def run_once(self, prompt, **kwargs):
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "routing_input": kwargs.get("routing_input"),
+                }
+            )
+            return FakeResponse(f"answer {len(calls)}")
+
+    monkeypatch.setenv("LUCODE_CONTEXT_LEDGER", "enforce")
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    client = _client(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "openai/gpt-5.5",
+                    "name": "GPT-5.5",
+                    "provider": "openai",
+                    "configured": True,
+                    "context_window_tokens": 10_000,
+                }
+            ]
+        },
+        run_executor=KernelAgentLoopExecutor(),
+    )
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "context sequence"},
+    ).json()["session_id"]
+
+    first_run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "你好"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{first_run_id}/events?token={TOKEN}") as websocket:
+        first_events = [websocket.receive_json() for _ in range(2)]
+
+    second_run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "继续解释"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{second_run_id}/events?token={TOKEN}") as websocket:
+        second_events = [websocket.receive_json() for _ in range(2)]
+
+    assert first_events[-1]["type"] == "run.completed"
+    assert second_events[-1]["type"] == "run.completed"
+    assert len(calls) == 2
+    assert calls[0]["routing_input"] == "你好"
+    assert calls[1]["routing_input"] == "继续解释"
+    assert calls[1]["prompt"] != "继续解释"
+    assert "history_background" in str(calls[1]["prompt"])
+    assert "你好" in str(calls[1]["prompt"])
+    assert "answer 1" in str(calls[1]["prompt"])
+    assert str(calls[1]["prompt"]).rstrip().endswith("继续解释")
+    assert second_events[-1]["payload"]["context_ledger"]["applied"] is True
+
+
+def test_kernel_agent_loop_executor_context_observe_failure_keeps_original_prompt(tmp_path, monkeypatch):
+    seen: dict[str, object] = {}
+
+    class FailingHistory:
+        def load_messages(self, session_id, limit=80):
+            raise RuntimeError("history unavailable")
+
+    class FakeResponse:
+        final_output = "fallback answer"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            pass
+
+        async def run_once(self, prompt, **kwargs):
+            seen["prompt"] = prompt
+            seen["routing_input"] = kwargs.get("routing_input")
+            return FakeResponse()
+
+    monkeypatch.delenv("LUCODE_CONTEXT_LEDGER", raising=False)
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    request = RunExecutionRequest(
+        run_id="run_test",
+        session_id="session_test",
+        user_input="hello",
+        workspace_root=tmp_path.resolve(),
+        event_bus=ExecutionEventBus(),
+        cancel_requested=asyncio.Event(),
+        history_facade=FailingHistory(),
+        model_info={"context_window_tokens": 10_000},
+        routing_input="hello",
+    )
+
+    result = asyncio.run(KernelAgentLoopExecutor()(request))
+
+    assert seen["prompt"] == "hello"
+    assert seen["routing_input"] == "hello"
+    assert result.final_output == "fallback answer"
+    assert result.metadata["context_ledger"]["mode"] == "observe"
+    assert "history unavailable" in result.metadata["context_ledger"]["error"]
 
 
 def test_websocket_subscription_is_removed_after_client_disconnect(tmp_path):

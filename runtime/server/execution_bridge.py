@@ -24,6 +24,9 @@ class RunExecutionRequest:
     event_bus: ExecutionEventBus
     cancel_requested: asyncio.Event
     approval_session: Any = None
+    history_facade: Any | None = None
+    model_info: dict[str, Any] = field(default_factory=dict)
+    routing_input: str = ""
 
 
 class RunExecutor(Protocol):
@@ -35,10 +38,37 @@ class KernelAgentLoopExecutor:
     """Default Runtime Server executor backed by the existing Python Agent Loop."""
 
     async def __call__(self, request: RunExecutionRequest) -> RunExecutionResult:
+        from runtime.context.middleware import ContextCompressionMiddleware
         from runtime.config.app_home import get_app_home
         from runtime.config.settings import RuntimeSettings
         from runtime.config.workspace import discover_workspace_context
         from runtime.kernel import KernelFacade
+
+        kernel_input = request.user_input
+        routing_input = request.routing_input or request.user_input
+        context_metadata: dict[str, Any] = {}
+        try:
+            context_result = ContextCompressionMiddleware(
+                history=request.history_facade,
+            ).prepare_run_input(
+                session_id=request.session_id,
+                user_input=request.user_input,
+                model_info=request.model_info or {},
+            )
+            kernel_input = context_result.run_input
+            routing_input = request.routing_input or context_result.routing_input or request.user_input
+            context_metadata = dict(context_result.metadata or {})
+        except Exception as exc:
+            context_metadata = {
+                "context_ledger": {
+                    "mode": "observe",
+                    "error": str(exc),
+                },
+                "tool_dehydration": {
+                    "count": 0,
+                    "items": [],
+                },
+            }
 
         context = discover_workspace_context(
             get_app_home(),
@@ -46,20 +76,23 @@ class KernelAgentLoopExecutor:
             explicit_workspace=True,
         )
         response = await KernelFacade(context).run_once(
-            request.user_input,
+            kernel_input,
             show_plan=True,
             approval_session=request.approval_session,
             settings=RuntimeSettings.from_env(workspace_root=request.workspace_root),
+            routing_input=routing_input,
             event_bus=request.event_bus,
         )
+        metadata = {
+            "turn_status": str(getattr(response, "turn_status", "") or ""),
+            "stopped": bool(getattr(response, "stopped", False)),
+            "mcp_ids_used": list(getattr(response, "mcp_ids_used", []) or []),
+            "output_already_printed": bool(getattr(response, "output_already_printed", False)),
+        }
+        metadata.update(context_metadata)
         return RunExecutionResult(
             final_output=str(getattr(response, "final_output", "") or ""),
-            metadata={
-                "turn_status": str(getattr(response, "turn_status", "") or ""),
-                "stopped": bool(getattr(response, "stopped", False)),
-                "mcp_ids_used": list(getattr(response, "mcp_ids_used", []) or []),
-                "output_already_printed": bool(getattr(response, "output_already_printed", False)),
-            },
+            metadata=metadata,
         )
 
 
