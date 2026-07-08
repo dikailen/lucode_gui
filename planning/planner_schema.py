@@ -125,6 +125,7 @@ class PlannerResult:
     needs_synthesis: bool = False
     synthesis_instruction: str = ""
     memory_interface: dict[str, Any] = field(default_factory=dict)
+    skill_interface: dict[str, Any] = field(default_factory=dict)
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -231,6 +232,7 @@ def parse_planner_result(text: str, fallback_user_input: str = "") -> PlannerRes
         needs_synthesis=bool(data.get("needs_synthesis") or False),
         synthesis_instruction=str(data.get("synthesis_instruction") or ""),
         memory_interface=dict(data.get("memory_interface") or {}),
+        skill_interface=dict(data.get("skill_interface") or {}) if isinstance(data.get("skill_interface"), dict) else {},
     )
     return _normalize_planner_result(result, fallback_user_input=fallback_user_input)
 
@@ -407,6 +409,7 @@ def _fallback_desktop_browser_result(raw: str, reason: str, model: str) -> Plann
 def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = "") -> PlannerResult:
     _extract_internal_synthesizer_task(result)
     result.memory_interface = dict(result.memory_interface or {})
+    result.skill_interface = dict(result.skill_interface or {})
     fallback_route_text = _extract_user_route_text(_extract_current_turn_input(sanitize_text(fallback_user_input)))
 
     browser_text = "\n".join(
