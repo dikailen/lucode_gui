@@ -96,3 +96,160 @@ def test_auditor_keeps_readonly_browser_summary_as_soft_semantic_warning(tmp_pat
 
     assert audit.passed is True
     assert not audit.remaining_issues
+
+
+def test_readonly_browser_negative_action_constraints_do_not_force_hard_audit(tmp_path):
+    from runtime.safety.auditor import audit_execution
+
+    task = _browser_task(
+        id="browser-readonly",
+        title="ComfyUI readonly summary",
+        instruction=(
+            "READ ONLY browser validation for ComfyUI. "
+            "Allowed tools: browser_navigate and browser_get_page_summary only. "
+            "Do NOT call browser_click_element, browser_set_input_value, or browser_submit_form. "
+            "Do NOT click Queue Prompt, Generate, Submit, or any workflow control."
+        ),
+        acceptance_criteria=[
+            "Report the page title, current URL, and a short summary of visible interactive elements.",
+            "Must not call browser_click_element, browser_set_input_value, or browser_submit_form.",
+            "No interactive browser tools were used (no clicks, no form inputs, no form submissions).",
+            "No project files were read and no web search was performed.",
+        ],
+        expected_outputs=[],
+    )
+    plan = PlannerResult(
+        route_type="single_agent",
+        reason="desktop browser readonly",
+        refined_request=task.instruction,
+        tasks=[task],
+    )
+    state = PipelineRunState.create(task.instruction, plan, project_root=tmp_path, mode="auto")
+    output = "ComfyUI page loaded. Title: ComfyUI. URL: http://127.0.0.1:8188/."
+    state.record_task_result(task, output)
+
+    audit = audit_execution(plan, state, output)
+
+    assert audit.passed is True
+    assert not audit.remaining_issues
+
+
+def test_desktop_browser_task_is_not_stolen_by_project_readonly_fast_path(tmp_path):
+    from runtime.execution.task_runner import _readonly_fast_path_result
+
+    (tmp_path / "ComfyUI").mkdir()
+    (tmp_path / "ComfyUI" / "main.py").write_text("print('comfy')\n", encoding="utf-8")
+    task = _browser_task(
+        id="browser-comfyui",
+        title="Validate ComfyUI browser summary",
+        instruction=(
+            "Use the embedded desktop browser to open http://127.0.0.1:8188 "
+            "and report the page summary. The ComfyUI directory is only incidental context."
+        ),
+        mcp=["desktop_browser", "project_filesystem_readonly"],
+        read_set=["ComfyUI"],
+    )
+
+    assert _readonly_fast_path_result(tmp_path, task) is None
+
+
+def test_auditor_accepts_completed_browser_action_tool_evidence(tmp_path):
+    from runtime.safety.auditor import audit_execution
+
+    task = _browser_task(
+        id="comfyui-queue-check",
+        title="ComfyUI queue panel visibility check",
+        instruction=(
+            "Open http://127.0.0.1:8188, read the page summary, click "
+            "#comfy-view-queue-button after approval, then read the page summary again."
+        ),
+        mcp=["desktop_browser", "project_filesystem_readonly"],
+        acceptance_criteria=[
+            "成功点击 #comfy-view-queue-button 并获得用户批准",
+            "报告 URL、标题和队列面板可见性判断",
+        ],
+        expected_outputs=[
+            "第一次页面摘要（标题、URL）",
+            "点击 #comfy-view-queue-button 的用户批准记录",
+        ],
+    )
+    plan = PlannerResult(
+        route_type="single_agent",
+        reason="desktop browser action",
+        refined_request=task.instruction,
+        tasks=[task],
+    )
+    state = PipelineRunState.create(task.instruction, plan, project_root=tmp_path, mode="auto")
+    state.emit_event(
+        "ToolInvoked",
+        "Tool invoked: browser_navigate",
+        task_id=task.id,
+        status="completed",
+        payload={
+            "tool_name": "browser_navigate",
+            "tool": "browser_navigate",
+            "event_type": "sdk_tool_end",
+            "outcome": "completed",
+            "arguments_summary": {"url": "http://127.0.0.1:8188"},
+        },
+    )
+    state.emit_event(
+        "ToolInvoked",
+        "Tool invoked: browser_get_page_summary",
+        task_id=task.id,
+        status="completed",
+        payload={
+            "tool_name": "browser_get_page_summary",
+            "tool": "browser_get_page_summary",
+            "event_type": "sdk_tool_end",
+            "outcome": "completed",
+            "arguments_summary": {},
+        },
+    )
+    state.emit_event(
+        "ToolApprovalPost",
+        "Tool approval: browser_click_element",
+        task_id=task.id,
+        status="approved_once",
+        payload={
+            "tool_name": "browser_click_element",
+            "tool": "browser_click_element",
+            "event_type": "post_tool_use",
+            "decision": "approved",
+            "outcome": "approved",
+            "arguments_summary": {"selector": "#comfy-view-queue-button"},
+        },
+    )
+    state.emit_event(
+        "ToolInvoked",
+        "Tool invoked: browser_click_element",
+        task_id=task.id,
+        status="completed",
+        payload={
+            "tool_name": "browser_click_element",
+            "tool": "browser_click_element",
+            "event_type": "sdk_tool_end",
+            "outcome": "completed",
+            "arguments_summary": {"selector": "#comfy-view-queue-button"},
+        },
+    )
+    state.emit_event(
+        "ToolInvoked",
+        "Tool invoked: browser_get_page_summary",
+        task_id=task.id,
+        status="completed",
+        payload={
+            "tool_name": "browser_get_page_summary",
+            "tool": "browser_get_page_summary",
+            "event_type": "sdk_tool_end",
+            "outcome": "completed",
+            "arguments_summary": {},
+        },
+    )
+    output = "Clicked `#comfy-view-queue-button`. URL unchanged. Title ComfyUI. Queue panel visible."
+    state.record_task_result(task, output)
+
+    audit = audit_execution(plan, state, output)
+
+    assert audit.passed is True
+    assert not audit.remaining_issues

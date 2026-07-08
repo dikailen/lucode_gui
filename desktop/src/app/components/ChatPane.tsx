@@ -8,6 +8,7 @@ import {
   renderMessageParts,
   runStageMeta,
   workAreaSnapshot,
+  workAreaSnapshotFromMessage,
   type AppState,
 } from "../appState";
 import { buildChatTurns, type ChatTurn } from "../chatTurns";
@@ -64,7 +65,15 @@ export function ChatPane({
   const title = activeSessionTitle(state, t);
   const showStage = state.runStatus !== "idle";
   const snapshot = workAreaSnapshot(state, t);
-  const turns = useMemo(() => buildChatTurns(state.messages, snapshot), [state.messages, snapshot]);
+  const historicalProcesses = useMemo(() => {
+    return Object.fromEntries(
+      state.messages.map((message) => [message.id, workAreaSnapshotFromMessage(message, t)]),
+    );
+  }, [state.messages, t]);
+  const turns = useMemo(
+    () => buildChatTurns(state.messages, snapshot, historicalProcesses),
+    [state.messages, snapshot, historicalProcesses],
+  );
   const activeTurnId = [...turns].reverse().find((turn) => turn.user)?.id || "";
   const activeTurn = turns.find((turn) => turn.id === activeTurnId);
   const configuredModels = useMemo(() => modelSettings?.models.filter((model) => model.configured) ?? [], [modelSettings]);

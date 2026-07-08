@@ -15,38 +15,44 @@ DESKTOP_BROWSER_MCP_ID = "desktop_browser"
 BROWSER_SURFACE_MARKERS = (
     "embedded browser",
     "desktop browser",
-    "browser panel",
     "built-in browser",
+    "browser panel",
     "browser tab",
-    "browser",
-    "page summary",
-    "dom",
-    "selector",
-    "tab",
-    "web page",
-    "open page",
-    "navigate",
-    "click",
-    "fill",
-    "input",
-    "submit",
-    "form",
+    "desktop_browser",
     "内置浏览器",
     "桌面浏览器",
     "浏览器面板",
-    "浏览器",
-    "网页",
-    "页面摘要",
-    "地址栏",
-    "打开页面",
+    "浏览器标签",
+)
+BROWSER_TOOL_MARKERS = (
+    "browser_navigate",
+    "browser_get_page_summary",
+    "browser_click_element",
+    "browser_set_input_value",
+    "browser_submit_form",
+)
+BROWSER_ACTION_MARKERS = (
+    "open",
+    "navigate",
+    "read",
+    "page summary",
+    "click",
+    "fill",
+    "set input",
+    "submit",
+    "form",
+    "selector",
+    "dom",
+    "打开",
     "跳转",
+    "读取",
+    "页面摘要",
     "点击",
     "填表",
     "输入",
     "提交",
     "表单",
     "选择器",
-    "标签页",
 )
 WEB_SEARCH_ONLY_MARKERS = (
     "web search",
@@ -159,29 +165,20 @@ def _needs_desktop_browser(task) -> bool:
     ).lower()
     if not text.strip():
         return False
-    if any(marker in text for marker in WEB_SEARCH_ONLY_MARKERS):
+    if any(marker in text for marker in BROWSER_TOOL_MARKERS):
+        return True
+    has_page_action = any(marker in text for marker in BROWSER_ACTION_MARKERS)
+    has_url_page_action = bool(re.search(r"https?://\S+", text) and has_page_action)
+    has_browser_surface = any(marker in text for marker in BROWSER_SURFACE_MARKERS)
+    if any(marker in text for marker in WEB_SEARCH_ONLY_MARKERS) and not (
+        has_browser_surface and has_page_action
+    ) and not has_url_page_action:
         return False
-    if re.search(r"https?://\S+", text) and any(marker in text for marker in BROWSER_SURFACE_MARKERS):
+    if has_url_page_action:
         return True
-    if any(marker in text for marker in ("selector", "dom", "click", "fill", "submit", "input")):
-        return True
-    return any(marker in text for marker in BROWSER_SURFACE_MARKERS) and any(
-        marker in text
-        for marker in (
-            "open",
-            "navigate",
-            "click",
-            "fill",
-            "submit",
-            "input",
-            "打开",
-            "跳转",
-            "点击",
-            "填表",
-            "输入",
-            "提交",
-        )
-    )
+    if not has_browser_surface:
+        return False
+    return has_page_action
 
 
 def _normalize_resource(value) -> str:

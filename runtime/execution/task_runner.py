@@ -208,6 +208,8 @@ def _readonly_fast_path_output(project_root: Path, task, run_context=None) -> st
 
 
 def _readonly_fast_path_result(project_root: Path, task, run_context=None) -> ReadonlyFastPathResult | None:
+    if "desktop_browser" in set(getattr(task, "mcp", []) or []):
+        return None
     if _can_fast_path_git_diff(task):
         output = _run_git_diff_fast_path(project_root, task)
         _record_fast_path_context(run_context, "git", "diff", output, task)

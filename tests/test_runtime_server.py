@@ -805,6 +805,9 @@ def test_plugin_package_install_endpoint_installs_skills_and_mcp_templates(tmp_p
                     "comfyui_graph": {
                         "transport": "http",
                         "url": "http://127.0.0.1:8188/mcp",
+                        "approval_required": True,
+                        "side_effects": "controls_external_private_service",
+                        "risk_level": "high",
                     }
                 }
             }
@@ -836,6 +839,76 @@ def test_plugin_package_install_endpoint_installs_skills_and_mcp_templates(tmp_p
     state = json.loads((tmp_path / ".lucode" / "gui_plugin_state.json").read_text(encoding="utf-8"))
     assert state["installed_plugin_packages"][0]["id"] == "comfyui_plugin"
     assert state["installed_plugin_packages"][0]["launch_profiles"][0]["script"] == "run_nvidia_gpu.bat"
+
+
+def test_plugin_state_returns_installed_plugins_and_package_delete_uninstalls_assets(tmp_path):
+    package = tmp_path / "demo_plugin"
+    skill_dir = package / "skills" / "demo_operator"
+    mcp_dir = package / "mcp"
+    skill_dir.mkdir(parents=True)
+    mcp_dir.mkdir(parents=True)
+    (package / "lucode-plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lucode_plugin.v1",
+                "id": "demo_plugin",
+                "title": "Demo Plugin",
+                "description": "Demo optional plugin.",
+                "skills": ["skills/demo_operator"],
+                "mcp_templates": ["mcp/demo.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: Demo Operator\ndescription: Operate demo service.\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    (mcp_dir / "demo.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "demo_graph": {
+                        "transport": "http",
+                        "url": "http://127.0.0.1:8188/mcp",
+                        "approval_required": True,
+                        "side_effects": "controls_external_private_service",
+                        "risk_level": "high",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+
+    install_response = client.post(
+        "/api/plugins/packages/install",
+        headers=_auth_headers(),
+        json={"path": str(package)},
+    )
+    listed_response = client.get("/api/plugins", headers=_auth_headers())
+    delete_response = client.delete("/api/plugins/packages/demo_plugin", headers=_auth_headers())
+
+    assert install_response.status_code == 200
+    listed = listed_response.json()
+    assert listed["installed_plugins"] == [
+        {
+            "id": "demo_plugin",
+            "title": "Demo Plugin",
+            "description": "Demo optional plugin.",
+            "skill_ids": ["demo_operator"],
+            "mcp_ids": ["demo_graph"],
+            "launch_profiles": [],
+            "deletable": True,
+        }
+    ]
+    assert delete_response.status_code == 200
+    deleted = delete_response.json()
+    assert deleted["deleted_plugin_id"] == "demo_plugin"
+    assert deleted["installed_plugins"] == []
+    assert "demo_operator" not in [item["id"] for item in deleted["skills"]]
+    assert "demo_graph" not in [item["id"] for item in deleted["mcp"]]
 
 
 def test_plugin_package_install_endpoint_rejects_invalid_packages(tmp_path):
@@ -1320,7 +1393,34 @@ def test_first_run_keeps_custom_session_title(tmp_path):
 
 def test_run_appends_user_and_assistant_messages_and_messages_endpoint_loads_them(tmp_path):
     async def runner(request):
-        request.event_bus.emit("PlanningStarted", "planning started", payload={"route_type": "direct_answer"})
+        request.event_bus.emit(
+            "PlanningCompleted",
+            "planning completed",
+            payload={
+                "route_type": "single_agent",
+                "tasks": [
+                    {
+                        "id": "inspect_history",
+                        "title": "Inspect history persistence",
+                        "model": "worker",
+                        "mcp": ["project_filesystem_readonly"],
+                        "parallel_group": "1",
+                    }
+                ],
+            },
+        )
+        request.event_bus.emit(
+            "AgentMessageDelta",
+            "reading history store",
+            task_id="inspect_history",
+            payload={"text": "Read runtime/sessions/store.py"},
+        )
+        request.event_bus.emit(
+            "TaskCompleted",
+            "history persistence inspected",
+            task_id="inspect_history",
+            payload={"title": "Inspect history persistence"},
+        )
         return RunExecutionResult(final_output="这是最终回答", metadata={"turn_status": "完成"})
 
     client = _client(tmp_path, run_executor=runner)
@@ -1336,7 +1436,7 @@ def test_run_appends_user_and_assistant_messages_and_messages_endpoint_loads_the
     ).json()["run_id"]
 
     with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
-        events = [websocket.receive_json() for _ in range(3)]
+        events = [websocket.receive_json() for _ in range(5)]
 
     assert events[-1]["type"] == "run.completed"
     response = client.get(f"/api/sessions/{session_id}/messages", headers=_auth_headers())
@@ -1345,10 +1445,24 @@ def test_run_appends_user_and_assistant_messages_and_messages_endpoint_loads_the
     payload = response.json()
     assert payload["schema_version"] == "messages.v1"
     assert payload["session_id"] == session_id
-    assert payload["messages"] == [
-        {"role": "user", "content": "记住这次问题"},
-        {"role": "assistant", "content": "这是最终回答"},
+    assert payload["messages"][0] == {"role": "user", "content": "记住这次问题"}
+    assert payload["messages"][1]["role"] == "assistant"
+    assert payload["messages"][1]["content"] == "这是最终回答"
+    metadata = payload["messages"][1]["metadata"]
+    assert metadata["run_id"] == run_id
+    assert metadata["turn_status"] == "完成"
+    assert metadata["run_snapshot"]["schema_version"] == "run_snapshot.v1"
+    assert metadata["run_snapshot"]["run_status"] == "completed"
+    assert [event["type"] for event in metadata["run_snapshot"]["events"]] == [
+        "run.started",
+        "planner.completed",
+        "worker.delta",
+        "task.completed",
+        "run.completed",
     ]
+    assert metadata["run_snapshot"]["events"][2]["payload"]["text"] == "Read runtime/sessions/store.py"
+    assert "final_output" not in metadata["run_snapshot"]["events"][-1]["payload"]
+    assert metadata["run_snapshot"]["events"][-1]["payload"]["final_output_preview"] == "这是最终回答"
 
 
 def test_new_empty_session_messages_endpoint_returns_empty_list(tmp_path):

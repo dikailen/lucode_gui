@@ -10,6 +10,29 @@ from runtime.safety.command_analyzer import analyze_command
 from runtime.safety.verification_commands import extract_explicit_verification_commands
 
 
+_KNOWN_INTERNAL_MCP_IDS = {
+    "project_filesystem_readonly",
+    "skills_filesystem_readonly",
+    "code_locator",
+    "git_tools",
+    "workspace_edit",
+    "command_runner",
+    "safe_backup",
+    "desktop_browser",
+}
+_MUTATION_TOOL_MARKERS = {
+    "create",
+    "delete",
+    "mutate",
+    "patch",
+    "post",
+    "put",
+    "submit",
+    "update",
+    "write",
+}
+
+
 @dataclass(frozen=True)
 class AutoApprovalDecision:
     approve: bool
@@ -42,9 +65,17 @@ class FullModeApprovalPolicy:
         write_intent: list[str] | None = None,
         instruction: str = "",
         acceptance_criteria: list[str] | None = None,
+        mcp_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.task_id = str(task_id or "")
         self.mcp = {_normalize_token(item) for item in list(mcp or []) if _normalize_token(item)}
+        discovered_metadata = _mcp_metadata_for_ids(self.mcp)
+        provided_metadata = {
+            _normalize_token(key): dict(value)
+            for key, value in dict(mcp_metadata or {}).items()
+            if _normalize_token(key) and isinstance(value, dict)
+        }
+        self.mcp_metadata = {**discovered_metadata, **provided_metadata}
         self.read_set = [_normalize_path(item) for item in list(read_set or []) if _normalize_path(item)]
         self.write_intent = [_normalize_path(item) for item in list(write_intent or []) if _normalize_path(item)]
         self.instruction = str(instruction or "")
@@ -59,11 +90,15 @@ class FullModeApprovalPolicy:
             write_intent=list(getattr(task, "write_intent", []) or []),
             instruction=str(getattr(task, "instruction", "") or ""),
             acceptance_criteria=list(getattr(task, "acceptance_criteria", []) or []),
+            mcp_metadata=dict(getattr(task, "mcp_metadata", {}) or {}),
         )
 
     def decide(self, tool_name: str, arguments: str | None) -> AutoApprovalDecision:
         name = str(tool_name or "")
         parsed = _parse_arguments(arguments)
+        preflight_decision = self._decide_high_risk_preflight(name, parsed)
+        if preflight_decision is not None:
+            return preflight_decision
         if _is_workspace_edit_tool(name) or _is_delete_tool(name):
             if _supervisor_gate_enabled():
                 return self._decide_workspace_edit_with_supervisor_gate(name, parsed)
@@ -127,6 +162,44 @@ class FullModeApprovalPolicy:
             return False
         return all(any(_path_is_within(path, intent) for intent in allowed) for path in touched)
 
+    def _decide_high_risk_preflight(self, tool_name: str, parsed: dict[str, Any]) -> AutoApprovalDecision | None:
+        if not _evidence_gate_enforces_high_risk():
+            return None
+        lowered = str(tool_name or "").strip().lower()
+        if _is_browser_mutation_tool(lowered):
+            return _high_risk_preflight_review(
+                SupervisorApprovalRequest(
+                    task_id=self.task_id,
+                    tool_name=str(tool_name or ""),
+                    operation=_browser_operation(lowered),
+                    target_paths=_browser_targets(parsed),
+                    reason=str(parsed.get("reason") or "browser_state_mutation").strip(),
+                ),
+                "Browser click, input, and submit actions must pass high-risk preflight before execution.",
+            )
+        if _is_delete_tool(lowered):
+            return _high_risk_preflight_review(
+                SupervisorApprovalRequest(
+                    task_id=self.task_id,
+                    tool_name=str(tool_name or ""),
+                    operation=_workspace_operation(tool_name),
+                    target_paths=_tool_target_paths(tool_name, parsed),
+                    reason=str(parsed.get("reason") or "delete_operation").strip(),
+                ),
+                "Delete operations must pass high-risk preflight before execution.",
+            )
+        if _is_external_mcp_mutation_tool(lowered, self.mcp, parsed, self.mcp_metadata):
+            return _high_risk_preflight_review(
+                SupervisorApprovalRequest(
+                    task_id=self.task_id,
+                    tool_name=str(tool_name or ""),
+                    operation="external_mcp_mutation",
+                    target_paths=[str(tool_name or "").strip()],
+                    reason=str(parsed.get("reason") or "external_mcp_mutation").strip(),
+                ),
+                "External MCP mutations must pass high-risk preflight before execution.",
+            )
+        return None
 
     def _decide_command(self, parsed: dict[str, Any]) -> AutoApprovalDecision:
         command = str(parsed.get("command") or "").strip()
@@ -206,6 +279,8 @@ def _is_delete_tool(tool_name: str) -> bool:
 
 def _workspace_operation(tool_name: str) -> str:
     lowered = str(tool_name or "").lower()
+    if "safe_delete_file" in lowered:
+        return "safe_delete_file"
     for operation in ("apply_unified_patch", "replace_in_file", "write_file", "create_file", "delete_file"):
         if operation in lowered:
             return operation
@@ -243,6 +318,21 @@ def _supervisor_review(request: SupervisorApprovalRequest, fallback_reason: str)
     )
 
 
+def _high_risk_preflight_review(request: SupervisorApprovalRequest, fallback_reason: str) -> AutoApprovalDecision:
+    return AutoApprovalDecision(
+        False,
+        "high_risk_preflight_requires_supervisor",
+        requires_supervisor=True,
+        supervisor_request=request,
+        fallback_decision=_supervisor_reject(request, fallback_reason),
+    )
+
+
+def _evidence_gate_enforces_high_risk() -> bool:
+    raw = str(os.environ.get("LUCODE_EVIDENCE_GATE") or "off").strip().lower()
+    return raw in {"enforce_high_risk", "enforce_all"}
+
+
 def _is_dangerous_tool(tool_name: str) -> bool:
     lowered = tool_name.lower()
     return "git_commit" in lowered or "publish" in lowered or _is_delete_tool(lowered)
@@ -278,6 +368,160 @@ def _tool_target_paths(tool_name: str, parsed: dict[str, Any]) -> list[str]:
     return candidates
 
 
+def _is_browser_mutation_tool(tool_name: str) -> bool:
+    lowered = str(tool_name or "").lower()
+    return any(
+        marker in lowered
+        for marker in {
+            "browser_click_element",
+            "browser_set_input_value",
+            "browser_submit_form",
+        }
+    )
+
+
+def _browser_operation(tool_name: str) -> str:
+    lowered = str(tool_name or "").lower()
+    for operation in ("browser_click_element", "browser_set_input_value", "browser_submit_form"):
+        if operation in lowered:
+            return operation
+    return lowered.rsplit(".", 1)[-1] if lowered else "browser_action"
+
+
+def _browser_targets(parsed: dict[str, Any]) -> list[str]:
+    targets: list[str] = []
+    for key in ("url", "page_url", "selector", "form_selector", "target_selector"):
+        value = str(parsed.get(key) or "").strip()
+        if value and value not in targets:
+            targets.append(value)
+    return targets
+
+
+def _is_external_mcp_mutation_tool(
+    tool_name: str,
+    mcp_ids: set[str],
+    parsed: dict[str, Any],
+    mcp_metadata: dict[str, dict[str, Any]] | None = None,
+) -> bool:
+    lowered = str(tool_name or "").lower()
+    candidate_ids = _candidate_external_mcp_ids_for_tool(lowered, set(mcp_ids or set()))
+    if not candidate_ids:
+        return False
+    if _known_runtime_tool_prefix(lowered):
+        return False
+    metadata: dict[str, dict[str, Any]] = {}
+    for key, value in dict(mcp_metadata or {}).items():
+        normalized_key = _normalize_token(key)
+        if normalized_key and isinstance(value, dict):
+            metadata[normalized_key] = dict(value)
+    if any(_mcp_metadata_requires_high_risk_preflight(metadata.get(mcp_id) or {}) for mcp_id in candidate_ids):
+        return True
+    if any(marker in lowered for marker in _MUTATION_TOOL_MARKERS):
+        return True
+    method = str(parsed.get("method") or parsed.get("http_method") or "").strip().lower()
+    action = str(parsed.get("action") or parsed.get("operation") or "").strip().lower()
+    return method in {"post", "put", "patch", "delete"} or any(
+        marker in action for marker in _MUTATION_TOOL_MARKERS
+    )
+
+
+def _looks_external_mcp(mcp_id: str) -> bool:
+    clean = _normalize_token(mcp_id)
+    if not clean:
+        return False
+    return clean not in _KNOWN_INTERNAL_MCP_IDS
+
+
+def _candidate_external_mcp_ids_for_tool(tool_name: str, mcp_ids: set[str]) -> list[str]:
+    normalized = [
+        _normalize_token(item)
+        for item in set(mcp_ids or set())
+        if _normalize_token(item)
+    ]
+    external = [item for item in normalized if _looks_external_mcp(item)]
+    if not external:
+        return []
+    prefix = _normalize_token(str(tool_name or "").split(".", 1)[0])
+    if prefix:
+        matched = [item for item in external if prefix == item]
+        if matched:
+            return matched
+    return external
+
+
+def _mcp_metadata_requires_high_risk_preflight(metadata: dict[str, Any]) -> bool:
+    if not metadata:
+        return False
+    if _truthy(metadata.get("approval_required")):
+        return True
+    risk_level = str(metadata.get("risk_level") or "").strip().lower()
+    if risk_level in {"high", "critical"}:
+        return True
+    side_effects = str(metadata.get("side_effects") or "").strip().lower()
+    return _side_effects_look_mutating(side_effects)
+
+
+def _side_effects_look_mutating(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or text in {"none", "read_only", "readonly", "external_network_request"}:
+        return False
+    return any(
+        marker in text
+        for marker in {
+            "control",
+            "delete",
+            "external_private_service",
+            "mutation",
+            "submit",
+            "update",
+            "write",
+        }
+    )
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "required", "always"}
+
+
+def _known_runtime_tool_prefix(tool_name: str) -> bool:
+    prefix = _normalize_token(str(tool_name or "").split(".", 1)[0])
+    return prefix in _KNOWN_INTERNAL_MCP_IDS
+
+
+def _mcp_metadata_for_ids(mcp_ids: set[str]) -> dict[str, dict[str, Any]]:
+    wanted = {_normalize_token(item) for item in set(mcp_ids or set()) if _normalize_token(item)}
+    if not wanted:
+        return {}
+    try:
+        from runtime.config.extensions import discover_mcp_layers
+
+        layers = discover_mcp_layers()
+    except Exception:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for items in list((layers or {}).values()):
+        for raw in list(items or []):
+            if not isinstance(raw, dict):
+                continue
+            mcp_id = _normalize_token(raw.get("id"))
+            if not mcp_id or mcp_id not in wanted:
+                continue
+            result[mcp_id] = {
+                "id": mcp_id,
+                "approval_required": raw.get("approval_required"),
+                "side_effects": raw.get("side_effects"),
+                "risk_level": raw.get("risk_level"),
+                "source": raw.get("source"),
+                "trusted": raw.get("trusted"),
+                "enabled": raw.get("enabled"),
+            }
+    return result
+
+
 def _patch_paths(patch: str) -> list[str]:
     paths: list[str] = []
     for line in patch.splitlines():
@@ -295,7 +539,22 @@ def _patch_paths(patch: str) -> list[str]:
 
 
 def _normalize_token(value: Any) -> str:
-    return str(value or "").strip().lower()
+    text = str(value or "").strip().lower().replace("-", "_")
+    parts: list[str] = []
+    previous_underscore = False
+    for char in text:
+        if char.isalnum() or char == "_":
+            normalized = char
+        else:
+            normalized = "_"
+        if normalized == "_":
+            if previous_underscore:
+                continue
+            previous_underscore = True
+        else:
+            previous_underscore = False
+        parts.append(normalized)
+    return "".join(parts).strip("_")
 
 
 def _normalize_command(value: str) -> str:

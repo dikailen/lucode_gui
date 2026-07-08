@@ -3,10 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { createTranslator } from "../i18n";
-import type { ComfyUiStateResponse, PluginRuntimeCapability } from "../../shared/types";
+import type { ComfyUiStateResponse, PluginRuntimeCapability, PluginStateResponse } from "../../shared/types";
 import { ComfyUiMcpRow, PluginsPanel } from "./PluginsPanel";
 
-function pluginState(runtimeCapabilities: PluginRuntimeCapability[] = []) {
+function pluginState(runtimeCapabilities: PluginRuntimeCapability[] = []): PluginStateResponse {
   return {
     schema_version: "plugin_state.v1" as const,
     skills: [
@@ -27,6 +27,7 @@ function pluginState(runtimeCapabilities: PluginRuntimeCapability[] = []) {
         detail: "Test MCP",
       },
     ],
+    installed_plugins: [],
     runtime_capabilities: runtimeCapabilities,
   };
 }
@@ -59,11 +60,12 @@ function renderPanel(
   language: "zh" | "en",
   runtimeCapabilities: PluginRuntimeCapability[] = [],
   comfyUi: ComfyUiStateResponse | null = null,
+  state = pluginState(runtimeCapabilities),
 ) {
   return renderToStaticMarkup(
     createElement(PluginsPanel, {
       t: createTranslator(language),
-      pluginState: pluginState(runtimeCapabilities),
+      pluginState: state,
       pluginError: "",
       pluginInstallingTarget: "",
       comfyUiState: comfyUi,
@@ -73,6 +75,8 @@ function renderPanel(
       deleteSkill: () => undefined,
       installSkill: () => undefined,
       installMcp: () => undefined,
+      installPluginPackage: () => undefined,
+      deletePluginPackage: () => undefined,
       registerExternalMcp: async () => true,
       refreshComfyUiState: () => undefined,
       saveComfyUiUrl: async () => true,
@@ -188,5 +192,33 @@ describe("PluginsPanel runtime capability section", () => {
     expect(html).not.toContain("ComfyUI connection");
     expect(html).not.toContain("comfyui-column");
     expect(html).not.toContain("comfyui-connection-form");
+  });
+
+  it("renders plugin package install entry and installed plugin rows", () => {
+    const state = {
+      ...pluginState([]),
+      installed_plugins: [
+        {
+          id: "demo_plugin",
+          title: "Demo Plugin",
+          description: "Demo optional plugin.",
+          skill_ids: ["demo_operator"],
+          mcp_ids: ["demo_graph"],
+          launch_profiles: [{ id: "windows_demo", label: "Windows Demo", script: "run_demo.bat" }],
+          deletable: true,
+        },
+      ],
+    };
+
+    const html = renderPanel("zh", [], null, state);
+
+    expect(html).toContain("插件包");
+    expect(html).toContain("拖入插件包");
+    expect(html).toContain("Demo Plugin");
+    expect(html).toContain("Demo optional plugin.");
+    expect(html).toContain("Skill 1");
+    expect(html).toContain("MCP 1");
+    expect(html).toContain("启动配置 1");
+    expect(html).toContain("卸载");
   });
 });

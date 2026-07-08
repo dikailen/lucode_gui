@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Any
 
 from runtime.common.text_utils import sanitize_text
+from runtime.compute.context_sources import ContextSourceLabel, label_context_source
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ class RunContextStore:
         max_items: int = 8,
         max_summary_chars: int = 1800,
         max_excerpt_chars: int = 1200,
+        timeline=None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.max_items = max(1, int(max_items or 8))
@@ -177,12 +179,16 @@ class RunContextStore:
         self.file_snapshots: dict[str, FileSnapshotArtifact] = {}
         self.tool_outputs: list[ToolOutputArtifact] = []
         self.context_packs: dict[str, ContextPackArtifact] = {}
+        self.timeline = timeline
         self.blackboard = SharedBlackboard(
             self.project_root,
             max_entries=max_items * 6,
             max_content_chars=max_excerpt_chars,
             max_render_chars=max(800, max_summary_chars // 2),
         )
+
+    def attach_timeline(self, timeline) -> None:
+        self.timeline = timeline
 
     def record_file_snapshot(
         self,
@@ -213,6 +219,17 @@ class RunContextStore:
             summary=artifact.summary,
             source=task_id,
         )
+        self._record_timeline_event(
+            "FileSnapshotRecorded",
+            task_id=task_id,
+            message=artifact.summary,
+            resource_refs=[f"file:{relative}"],
+            payload={
+                "path": relative,
+                "sha256": sha256,
+                "artifact_id": artifact.artifact_id,
+            },
+        )
         return artifact
 
     def record_tool_output(
@@ -241,6 +258,17 @@ class RunContextStore:
             source=task_id,
             key=artifact.artifact_id,
         )
+        self._record_timeline_event(
+            "ToolOutputRecorded",
+            task_id=task_id,
+            message=artifact.summary,
+            resource_refs=[f"tool:{clean_tool}"],
+            payload={
+                "tool": clean_tool,
+                "action": clean_action,
+                "artifact_id": artifact.artifact_id,
+            },
+        )
         return artifact
 
     def record_context_pack(self, pack, *, task_id: str = "") -> ContextPackArtifact:
@@ -266,6 +294,30 @@ class RunContextStore:
                 key=artifact.artifact_id,
             )
         return artifact
+
+    def _record_timeline_event(
+        self,
+        event_type: str,
+        *,
+        task_id: str = "",
+        message: str = "",
+        resource_refs: list[str] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        timeline = getattr(self, "timeline", None)
+        if timeline is None:
+            return
+        try:
+            timeline.record(
+                event_type,
+                task_id=task_id,
+                status="completed",
+                message=message,
+                resource_refs=resource_refs or [],
+                payload=payload or {},
+            )
+        except Exception:
+            return
 
     def put_read(self, path: str | Path, *, content: str = "", summary: str = "", source: str = "") -> SharedBlackboardEntry:
         return self.blackboard.put_read(path, content=content, summary=summary, source=source)
@@ -313,6 +365,48 @@ class RunContextStore:
                 lines.append(f"- {artifact.tool}.{artifact.action}（来源 {tasks}）：{artifact.summary}")
         return _limit_text("\n".join(lines), self.max_summary_chars)
 
+    def source_labels(self) -> list[ContextSourceLabel]:
+        labels: list[ContextSourceLabel] = []
+        for artifact in list(self.file_snapshots.values())[-self.max_items :]:
+            labels.append(
+                label_context_source(
+                    "file_snapshot",
+                    text="\n".join(part for part in [artifact.summary, artifact.excerpt] if part),
+                    path=artifact.path,
+                    metadata={
+                        "artifact_id": artifact.artifact_id,
+                        "task_ids": list(artifact.task_ids),
+                    },
+                )
+            )
+        for artifact in self.tool_outputs[-self.max_items :]:
+            labels.append(
+                label_context_source(
+                    _tool_output_source_type(artifact.tool, artifact.action),
+                    text=artifact.summary,
+                    metadata={
+                        "artifact_id": artifact.artifact_id,
+                        "tool": artifact.tool,
+                        "action": artifact.action,
+                        "task_ids": list(artifact.task_ids),
+                    },
+                )
+            )
+        for artifact in list(self.context_packs.values())[-self.max_items :]:
+            labels.append(
+                label_context_source(
+                    "context_pack",
+                    text=artifact.summary,
+                    metadata={
+                        "artifact_id": artifact.artifact_id,
+                        "pack_id": artifact.pack_id,
+                        "task_ids": list(artifact.task_ids),
+                        "source_task_ids": list(artifact.source_task_ids),
+                    },
+                )
+            )
+        return labels
+
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -352,6 +446,15 @@ def _format_shared_files(shared_files: tuple[dict, ...]) -> str:
         if len(paths) >= 8:
             break
     return ", ".join(paths)
+
+
+def _tool_output_source_type(tool: str, action: str) -> str:
+    value = f"{tool} {action}".lower()
+    if "browser" in value:
+        return "browser_summary"
+    if any(marker in value for marker in ("terminal", "shell", "command")):
+        return "terminal_output"
+    return "tool_output"
 
 
 def _append_blackboard_group(lines: list[str], title: str, entries: list[SharedBlackboardEntry]) -> None:

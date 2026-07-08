@@ -39,36 +39,47 @@ ACTION_INTENT_MARKERS = (
     "edit",
     "optimize",
 )
-DESKTOP_BROWSER_HINT_MARKERS = (
+DESKTOP_BROWSER_SURFACE_MARKERS = (
     "embedded browser",
     "desktop browser",
     "built-in browser",
     "browser panel",
     "browser tab",
-    "browser",
-    "page summary",
-    "dom",
-    "selector",
-    "click",
-    "fill",
-    "input",
-    "submit",
-    "form",
-    "navigate",
+    "desktop_browser",
     "内置浏览器",
     "桌面浏览器",
     "浏览器面板",
-    "浏览器",
-    "网页",
+    "浏览器标签",
+)
+DESKTOP_BROWSER_TOOL_MARKERS = (
+    "browser_navigate",
+    "browser_get_page_summary",
+    "browser_click_element",
+    "browser_set_input_value",
+    "browser_submit_form",
+)
+DESKTOP_BROWSER_ACTION_MARKERS = (
+    "open",
+    "navigate",
+    "read",
+    "page summary",
+    "click",
+    "fill",
+    "set input",
+    "submit",
+    "form",
+    "selector",
+    "dom",
+    "打开",
+    "跳转",
+    "读取",
     "页面摘要",
-    "选择器",
     "点击",
     "填表",
     "输入",
     "提交",
     "表单",
-    "跳转",
-    "打开页面",
+    "选择器",
 )
 
 
@@ -97,6 +108,10 @@ class PlannedTask:
     write_intent: list[str] = field(default_factory=list)
     requires_unimplemented_mcp: bool = False
     risk_notes: str = ""
+    sensitivity: str = ""
+    difficulty: str = ""
+    placement: dict[str, Any] = field(default_factory=dict)
+    evidence_requirements: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -192,6 +207,12 @@ def parse_planner_result(text: str, fallback_user_input: str = "") -> PlannerRes
             write_intent=[str(value) for value in list(item.get("write_intent") or []) if str(value).strip()],
             requires_unimplemented_mcp=bool(item.get("requires_unimplemented_mcp") or False),
             risk_notes=str(item.get("risk_notes") or ""),
+            sensitivity=str(item.get("sensitivity") or ""),
+            difficulty=str(item.get("difficulty") or ""),
+            placement=dict(item.get("placement") or {}) if isinstance(item.get("placement"), dict) else {},
+            evidence_requirements=[
+                str(value) for value in list(item.get("evidence_requirements") or []) if str(value).strip()
+            ],
         )
         for index, item in enumerate(data.get("tasks") or [])
     ]
@@ -220,6 +241,7 @@ def build_fallback_planner_result(raw_user_input: str, model_output: str = "") -
     raw = _extract_current_turn_input(sanitize_text(raw_user_input)).strip()
     output = _strip_model_reasoning_noise(sanitize_text(model_output)).strip()
     text = f"{raw}\n{output}".lower()
+    user_route_text = _extract_user_route_text(raw).lower()
     reason = "本地模型未返回合法 JSON，已启用兼容兜底规划。"
 
     if not raw:
@@ -230,7 +252,7 @@ def build_fallback_planner_result(raw_user_input: str, model_output: str = "") -
             clarifying_question="主脑输出格式异常，而且缺少原始问题。请把问题再说具体一点。",
         )
 
-    if _needs_desktop_browser_route(text):
+    if _needs_desktop_browser_route(user_route_text):
         model = _fallback_model_for_skill("project_explorer", requires_tools=True) or _default_model_for_skill("project_explorer")
         return _fallback_desktop_browser_result(raw, reason, model)
 
@@ -385,14 +407,16 @@ def _fallback_desktop_browser_result(raw: str, reason: str, model: str) -> Plann
 def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = "") -> PlannerResult:
     _extract_internal_synthesizer_task(result)
     result.memory_interface = dict(result.memory_interface or {})
+    fallback_route_text = _extract_user_route_text(_extract_current_turn_input(sanitize_text(fallback_user_input)))
 
     browser_text = "\n".join(
         [
             result.refined_request,
-            fallback_user_input,
+            fallback_route_text,
         ]
     )
-    if result.route_type in {"direct_answer", "clarify"} and _needs_desktop_browser_route(browser_text):
+    needs_desktop_browser = _needs_desktop_browser_route(browser_text)
+    if result.route_type in {"direct_answer", "clarify"} and needs_desktop_browser:
         model = _fallback_model_for_skill("project_explorer", requires_tools=True) or _default_model_for_skill("project_explorer")
         browser_result = _fallback_desktop_browser_result(result.refined_request or fallback_user_input, result.reason, model)
         result.route_type = browser_result.route_type
@@ -404,8 +428,11 @@ def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = 
         result.synthesis_instruction = ""
         result.memory_interface.update(browser_result.memory_interface)
 
-    if result.route_type in {"single_agent", "multi_agent"} and _needs_desktop_browser_route(browser_text):
-        _rewrite_tasks_for_desktop_browser(result, fallback_user_input)
+    if result.route_type in {"single_agent", "multi_agent"}:
+        if needs_desktop_browser:
+            _rewrite_tasks_for_desktop_browser(result, fallback_user_input)
+        else:
+            _strip_unrequested_desktop_browser_binding(result)
 
     for task in result.tasks:
         task_requires_tools = bool(task.mcp) or _needs_desktop_browser_route(f"{task.title}\n{task.instruction}")
@@ -614,8 +641,25 @@ def _rewrite_tasks_for_desktop_browser(result: PlannerResult, fallback_user_inpu
             task.risk_notes = (task.risk_notes + " " + note).strip()
 
 
+def _strip_unrequested_desktop_browser_binding(result: PlannerResult) -> None:
+    stripped = False
+    for task in result.tasks:
+        original_mcp = list(task.mcp or [])
+        task.mcp = [mcp_id for mcp_id in original_mcp if mcp_id != "desktop_browser"]
+        if len(task.mcp) != len(original_mcp):
+            stripped = True
+            note = "Removed unrequested desktop_browser binding because the current user request did not ask for embedded browser page interaction."
+            if note not in task.risk_notes:
+                task.risk_notes = (task.risk_notes + " " + note).strip()
+    if stripped:
+        if result.memory_interface.get("execution_route") == "desktop_browser":
+            result.memory_interface.pop("execution_route", None)
+        if result.memory_interface.get("browser_binding") == "desktop_browser":
+            result.memory_interface.pop("browser_binding", None)
+
+
 def _needs_web_search(text: str) -> bool:
-    lowered = str(text or "").lower()
+    lowered = _without_negated_web_search_phrases(str(text or "").lower())
     if not lowered.strip():
         return False
 
@@ -635,6 +679,23 @@ def _needs_web_search(text: str) -> bool:
         re.search(r"\b(latest|urls?|links?)\b", lowered)
         and re.search(r"\b(search|find|look up|browse|official|docs?|documentation|return|only)\b", lowered)
     )
+
+
+def _without_negated_web_search_phrases(text: str) -> str:
+    lowered = str(text or "").lower()
+    patterns = [
+        r"\bdo\s+not\s+(?:use\s+)?(?:web\s+search|search\s+the\s+web|browse\s+the\s+web|internet\s+search|external\s+search)\b",
+        r"\bdon't\s+(?:use\s+)?(?:web\s+search|search\s+the\s+web|browse\s+the\s+web|internet\s+search|external\s+search)\b",
+        r"\bno\s+(?:web\s+search|web\s+browsing|internet\s+search|external\s+search)\b",
+        r"\bwithout\s+(?:web\s+search|web\s+browsing|internet\s+search|external\s+search)\b",
+        r"不要\s*(?:使用)?(?:联网|上网|网页|网络|搜索|检索|查找)",
+        r"不用\s*(?:使用)?(?:联网|上网|网页|网络|搜索|检索|查找)",
+        r"无需\s*(?:使用)?(?:联网|上网|网页|网络|搜索|检索|查找)",
+        r"不需要\s*(?:使用)?(?:联网|上网|网页|网络|搜索|检索|查找)",
+    ]
+    for pattern in patterns:
+        lowered = re.sub(pattern, " ", lowered, flags=re.IGNORECASE)
+    return lowered
 
 
 def _looks_like_capability_question(text: str) -> bool:
@@ -711,29 +772,18 @@ def _needs_desktop_browser_route(text: str) -> bool:
     lowered = str(text or "").lower()
     if not lowered.strip():
         return False
-    if _needs_web_search(lowered):
+    if any(marker in lowered for marker in DESKTOP_BROWSER_TOOL_MARKERS):
+        return True
+    has_page_action = any(marker in lowered for marker in DESKTOP_BROWSER_ACTION_MARKERS)
+    has_url_page_action = bool(re.search(r"https?://\S+", lowered) and has_page_action)
+    has_browser_surface = any(marker in lowered for marker in DESKTOP_BROWSER_SURFACE_MARKERS)
+    if _needs_web_search(lowered) and not (has_browser_surface and has_page_action) and not has_url_page_action:
         return False
-    if re.search(r"https?://\S+", lowered) and any(marker in lowered for marker in DESKTOP_BROWSER_HINT_MARKERS):
+    if has_url_page_action:
         return True
-    if any(marker in lowered for marker in ("selector", "dom", "page summary", "click", "fill", "submit", "input")):
-        return True
-    return any(marker in lowered for marker in DESKTOP_BROWSER_HINT_MARKERS) and any(
-        marker in lowered
-        for marker in (
-            "open",
-            "navigate",
-            "click",
-            "fill",
-            "submit",
-            "input",
-            "打开",
-            "跳转",
-            "点击",
-            "填表",
-            "输入",
-            "提交",
-        )
-    )
+    if not has_browser_surface:
+        return False
+    return has_page_action
 
 
 def _desktop_browser_bridge_available() -> bool:
@@ -788,6 +838,21 @@ def _extract_current_turn_input(raw_user_input: str) -> str:
     marker = "本轮用户问题："
     if marker in raw_user_input:
         return raw_user_input.rsplit(marker, 1)[1].strip()
+    return raw_user_input
+
+
+def _extract_user_route_text(raw_user_input: str) -> str:
+    values: list[str] = []
+    label_re = re.compile(
+        r"^(?:原始用户输入|原始问题|优化问题|refiner_raw_user_input|refined_request|raw_user_input)\s*[:：]\s*(.*)$",
+        re.IGNORECASE,
+    )
+    for line in str(raw_user_input or "").splitlines():
+        match = label_re.match(line.strip())
+        if match and match.group(1).strip():
+            values.append(match.group(1).strip())
+    if values:
+        return "\n".join(values)
     return raw_user_input
 
 

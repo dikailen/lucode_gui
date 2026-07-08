@@ -5,6 +5,7 @@ import type {
   ComfyUiStateResponse,
   ExternalMcpPayload,
   PluginMcpRow,
+  PluginPackage,
   PluginRuntimeCapability,
   PluginSkill,
   PluginStateResponse,
@@ -22,7 +23,7 @@ export type PluginsPanelProps = {
   t: Translator;
   pluginState: PluginStateResponse | null;
   pluginError: string;
-  pluginInstallingTarget: "skills" | "mcp" | "";
+  pluginInstallingTarget: "skills" | "mcp" | "packages" | "";
   comfyUiState: ComfyUiStateResponse | null;
   comfyUiError: string;
   comfyUiBusy: boolean;
@@ -30,6 +31,8 @@ export type PluginsPanelProps = {
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
+  installPluginPackage: (path: string) => void;
+  deletePluginPackage: (pluginId: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
   refreshComfyUiState: () => void;
   saveComfyUiUrl: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
@@ -50,6 +53,8 @@ export function PluginsPanel({
   deleteSkill,
   installSkill,
   installMcp,
+  installPluginPackage,
+  deletePluginPackage,
   registerExternalMcp,
   refreshComfyUiState,
   saveComfyUiUrl,
@@ -58,6 +63,7 @@ export function PluginsPanel({
   openComfyUiInBrowser,
 }: PluginsPanelProps) {
   const runtimeCapabilities = runtimeCapabilitiesForPlugins(t, pluginState?.runtime_capabilities || []);
+  const installedPlugins = pluginState?.installed_plugins || [];
   const [comfyUiUrl, setComfyUiUrl] = useState(comfyUiState?.base_url || "http://127.0.0.1:8188");
   const [managedPluginId, setManagedPluginId] = useState("");
 
@@ -101,6 +107,35 @@ export function PluginsPanel({
               </div>
             </section>
           ) : null}
+
+          <section className="plugin-column plugin-package-column" aria-label={t("plugins.packageList")}>
+            <div className="plugin-section-header">
+              <span>{t("plugins.packageList")}</span>
+              <strong>{installedPlugins.length}</strong>
+            </div>
+            <PluginDropZone
+              t={t}
+              title={t("plugins.dropPackage")}
+              description={t("plugins.dropPackageDescription")}
+              installing={pluginInstallingTarget === "packages"}
+              onInstall={installPluginPackage}
+            />
+            <div className="plugin-list">
+              {installedPlugins.length ? (
+                installedPlugins.map((plugin) => (
+                  <InstalledPluginRow
+                    key={plugin.id}
+                    t={t}
+                    plugin={plugin}
+                    busy={pluginInstallingTarget === "packages"}
+                    deletePluginPackage={deletePluginPackage}
+                  />
+                ))
+              ) : (
+                <div className="plugin-empty-row">{t("plugins.noInstalledPackages")}</div>
+              )}
+            </div>
+          </section>
 
           <section className="plugin-column" aria-label={t("plugins.skillList")}>
             <div className="plugin-section-header">
@@ -396,6 +431,45 @@ function RuntimeCapabilityCard({
         <div className="runtime-capability-row">
           <span className="runtime-capability-label">{t("plugins.runtimeCapabilityRisk")}</span>
           <span className="runtime-capability-value runtime-capability-risk">{capability.risk}</span>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function InstalledPluginRow({
+  t,
+  plugin,
+  busy,
+  deletePluginPackage,
+}: {
+  t: Translator;
+  plugin: PluginPackage;
+  busy: boolean;
+  deletePluginPackage: (pluginId: string) => void;
+}) {
+  return (
+    <article className="plugin-row installed-plugin-row">
+      <div className="plugin-row-main">
+        <div className="plugin-row-title">{plugin.title || plugin.id}</div>
+        <div className="plugin-row-description">{plugin.description || plugin.id}</div>
+        <div className="plugin-row-footer">
+          <div className="plugin-chip-row">
+            <span className="plugin-chip">{t("plugins.packageSkillCount", { count: plugin.skill_ids.length })}</span>
+            <span className="plugin-chip">{t("plugins.packageMcpCount", { count: plugin.mcp_ids.length })}</span>
+            {plugin.launch_profiles.length ? (
+              <span className="plugin-chip">{t("plugins.packageLaunchCount", { count: plugin.launch_profiles.length })}</span>
+            ) : null}
+          </div>
+          <button
+            className="plugin-delete-pill"
+            type="button"
+            disabled={busy || !plugin.deletable}
+            title={t("plugins.uninstallPlugin")}
+            onClick={() => deletePluginPackage(plugin.id)}
+          >
+            {t("plugins.uninstallPlugin")}
+          </button>
         </div>
       </div>
     </article>

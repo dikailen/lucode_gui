@@ -14,6 +14,8 @@ from lucode.gui.sidebar_data import McpRow, SkillCard
 STATE_FILE_NAME = "gui_plugin_state.json"
 PLUGIN_MANIFEST_NAME = "lucode-plugin.json"
 _PLUGIN_ID_PATTERN = re.compile(r"^[a-z0-9_][a-z0-9_-]*$")
+_PLUGIN_SCHEMA_VERSION = "lucode_plugin.v1"
+_MCP_RISK_LEVELS = {"low", "medium", "high", "critical"}
 
 _CUSTOM_CHIP = "\u81ea\u5b9a\u4e49"
 _LOCAL_CHIP = "\u672c\u5730"
@@ -97,6 +99,18 @@ class PluginStateStore:
             )
         return rows
 
+    def load_installed_plugin_packages(self) -> list[dict[str, Any]]:
+        data = self._read_state()
+        raw_packages = data.get("installed_plugin_packages") if isinstance(data, dict) else []
+        if not isinstance(raw_packages, list):
+            return []
+        packages: list[dict[str, Any]] = []
+        for item in raw_packages:
+            package = _plugin_package_summary(item)
+            if package:
+                packages.append(package)
+        return packages
+
     def install_skill_from_path(self, source_path: str | Path) -> SkillCard:
         source = Path(source_path).resolve()
         prepared = _prepare_skill_source(source)
@@ -118,15 +132,9 @@ class PluginStateStore:
         self._upsert_custom_skill_card(card)
         return card
 
-    def install_mcp_from_path(self, source_path: str | Path) -> McpRow:
+    def install_mcp_from_path(self, source_path: str | Path, *, require_risk_metadata: bool = False) -> McpRow:
         source = Path(source_path).resolve()
-        try:
-            data = json.loads(source.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise ValueError("Invalid MCP JSON file") from exc
-        servers = _extract_mcp_servers(data)
-        if not servers:
-            raise ValueError("No MCP servers found")
+        servers = _read_mcp_servers_from_path(source, require_risk_metadata=require_risk_metadata)
         rows = self._upsert_mcp_servers(servers, detail_factory=lambda config: _MCP_DISCONNECTED_DETAIL)
         return rows[0]
 
@@ -142,6 +150,15 @@ class PluginStateStore:
         plugin_id = _normalize_plugin_id(manifest.get("id") or prepared.name)
         if not plugin_id:
             raise ValueError("Invalid plugin package id")
+        skill_paths = _string_list(manifest.get("skills") or [])
+        mcp_template_paths = _string_list(manifest.get("mcp_templates") or [])
+        for relative_path in skill_paths:
+            _prepare_skill_source(_resolve_package_member(prepared, relative_path))
+        for relative_path in mcp_template_paths:
+            _read_mcp_servers_from_path(
+                _resolve_package_member(prepared, relative_path),
+                require_risk_metadata=True,
+            )
         target = self.local_plugins_dir / plugin_id
         if target.exists():
             shutil.rmtree(target)
@@ -149,13 +166,16 @@ class PluginStateStore:
         shutil.copytree(prepared, target)
 
         installed_skill_ids: list[str] = []
-        for relative_path in _string_list(manifest.get("skills") or []):
+        for relative_path in skill_paths:
             card = self.install_skill_from_path(_resolve_package_member(target, relative_path))
             installed_skill_ids.append(card.id)
 
         installed_mcp_ids: list[str] = []
-        for relative_path in _string_list(manifest.get("mcp_templates") or []):
-            row = self.install_mcp_from_path(_resolve_package_member(target, relative_path))
+        for relative_path in mcp_template_paths:
+            row = self.install_mcp_from_path(
+                _resolve_package_member(target, relative_path),
+                require_risk_metadata=True,
+            )
             installed_mcp_ids.append(row.id)
 
         launch_profiles = _plugin_launch_profiles(manifest.get("launch_profiles"))
@@ -176,6 +196,46 @@ class PluginStateStore:
             "skill_ids": installed_skill_ids,
             "mcp_ids": installed_mcp_ids,
             "launch_profile_ids": [item["id"] for item in launch_profiles],
+        }
+
+    def uninstall_plugin_package(self, plugin_id: str) -> dict[str, Any]:
+        normalized = _normalize_plugin_id(plugin_id)
+        if not normalized:
+            raise ValueError("Invalid plugin package id")
+        data = self._read_state()
+        raw_packages = data.get("installed_plugin_packages")
+        packages = raw_packages if isinstance(raw_packages, list) else []
+        package = next(
+            (item for item in packages if isinstance(item, dict) and _normalize_plugin_id(item.get("id")) == normalized),
+            None,
+        )
+        if package is None:
+            raise ValueError(f"unknown plugin package id: {normalized}")
+
+        skill_ids = _string_list(package.get("skill_ids"))
+        mcp_ids = _string_list(package.get("mcp_ids"))
+        data["installed_plugin_packages"] = [
+            item
+            for item in packages
+            if not (isinstance(item, dict) and _normalize_plugin_id(item.get("id")) == normalized)
+        ]
+        data["custom_skill_cards"] = _remove_rows_by_ids(data.get("custom_skill_cards"), skill_ids)
+        data["custom_mcp_rows"] = _remove_rows_by_ids(data.get("custom_mcp_rows"), mcp_ids)
+        removed_skill_ids = [item for item in _string_list(data.get("removed_skill_ids")) if item not in set(skill_ids)]
+        if removed_skill_ids:
+            data["removed_skill_ids"] = sorted(removed_skill_ids)
+        else:
+            data.pop("removed_skill_ids", None)
+        self._write_state(data)
+
+        for skill_id in skill_ids:
+            _remove_local_child_dir(self.local_skills_dir, skill_id)
+        _remove_local_child_dir(self.local_plugins_dir, normalized)
+        self._remove_mcp_servers(mcp_ids)
+        return {
+            "id": normalized,
+            "skill_ids": skill_ids,
+            "mcp_ids": mcp_ids,
         }
 
     def _upsert_mcp_servers(
@@ -254,6 +314,24 @@ class PluginStateStore:
         tmp_path.write_text(payload, encoding="utf-8")
         tmp_path.replace(self.local_mcp_path)
 
+    def _remove_mcp_servers(self, mcp_ids: list[str]) -> None:
+        normalized_ids = {_normalize_plugin_id(item) for item in mcp_ids}
+        normalized_ids.discard("")
+        if not normalized_ids:
+            return
+        current = self._read_mcp_servers()
+        current_servers = current.get("mcpServers")
+        if not isinstance(current_servers, dict):
+            return
+        changed = False
+        for mcp_id in normalized_ids:
+            if mcp_id in current_servers:
+                current_servers.pop(mcp_id, None)
+                changed = True
+        if changed:
+            current["mcpServers"] = current_servers
+            self._write_mcp_servers(current)
+
     def _read_state(self) -> dict[str, Any]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -276,6 +354,50 @@ def _normalize_plugin_id(value: object) -> str:
     if not text or not _PLUGIN_ID_PATTERN.match(text):
         return ""
     return text
+
+
+def _plugin_package_summary(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    plugin_id = _normalize_plugin_id(item.get("id"))
+    if not plugin_id:
+        return {}
+    title = str(item.get("title") or _title_from_id(plugin_id)).strip()
+    return {
+        "id": plugin_id,
+        "title": title,
+        "description": str(item.get("description") or "").strip(),
+        "skill_ids": _string_list(item.get("skill_ids")),
+        "mcp_ids": _string_list(item.get("mcp_ids")),
+        "launch_profiles": _plugin_launch_profiles(item.get("launch_profiles")),
+        "deletable": True,
+    }
+
+
+def _remove_rows_by_ids(value: Any, ids: list[str]) -> list[Any]:
+    normalized_ids = {_normalize_plugin_id(item) for item in ids}
+    normalized_ids.discard("")
+    if not isinstance(value, list):
+        return []
+    return [
+        item
+        for item in value
+        if not (isinstance(item, dict) and _normalize_plugin_id(item.get("id")) in normalized_ids)
+    ]
+
+
+def _remove_local_child_dir(root: Path, child_name: str) -> None:
+    normalized = _normalize_plugin_id(child_name)
+    if not normalized:
+        return
+    resolved_root = root.resolve()
+    target = (resolved_root / normalized).resolve()
+    try:
+        target.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("Plugin package uninstall target cannot escape local state") from exc
+    if target.exists():
+        shutil.rmtree(target)
 
 
 def _prepare_skill_source(source: Path) -> Path:
@@ -344,9 +466,17 @@ def _read_plugin_manifest(path: Path) -> dict[str, Any]:
         raise ValueError("Invalid plugin manifest JSON") from exc
     if not isinstance(data, dict):
         raise ValueError("Plugin manifest must be a JSON object")
-    schema_version = str(data.get("schema_version") or "lucode_plugin.v1")
-    if schema_version != "lucode_plugin.v1":
+    schema_version = str(data.get("schema_version") or _PLUGIN_SCHEMA_VERSION)
+    if schema_version != _PLUGIN_SCHEMA_VERSION:
         raise ValueError("Unsupported plugin manifest schema_version")
+    if "id" in data and not _normalize_plugin_id(data.get("id")):
+        raise ValueError("Invalid plugin manifest id")
+    for key in ("skills", "mcp_templates"):
+        if key in data and not isinstance(data.get(key), (list, tuple, str)):
+            raise ValueError(f"Plugin manifest {key} must be a string or list")
+        for relative_path in _string_list(data.get(key)):
+            if Path(relative_path).is_absolute():
+                raise ValueError(f"Plugin manifest {key} entries must be relative paths")
     return data
 
 
@@ -397,6 +527,63 @@ def _extract_mcp_servers(data: Any) -> dict[str, dict[str, Any]]:
     if server_id and ("command" in data or "url" in data):
         return {str(server_id): dict(data)}
     return {}
+
+
+def _read_mcp_servers_from_path(source: Path, *, require_risk_metadata: bool = False) -> dict[str, dict[str, Any]]:
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError("Invalid MCP JSON file") from exc
+    servers = _extract_mcp_servers(data)
+    if not servers:
+        raise ValueError("No MCP servers found")
+    _validate_mcp_servers(servers, require_risk_metadata=require_risk_metadata)
+    return servers
+
+
+def _validate_mcp_servers(servers: dict[str, dict[str, Any]], *, require_risk_metadata: bool = False) -> None:
+    for raw_id, config in servers.items():
+        server_id = _normalize_plugin_id(raw_id)
+        if not server_id:
+            raise ValueError("Invalid MCP server id")
+        if not isinstance(config, dict):
+            raise ValueError(f"MCP server {server_id} config must be an object")
+        _validate_mcp_transport(server_id, config)
+        if require_risk_metadata:
+            _validate_mcp_risk_metadata(server_id, config)
+
+
+def _validate_mcp_transport(server_id: str, config: dict[str, Any]) -> None:
+    transport = str(config.get("transport") or "").strip().lower()
+    if transport in {"http", "sse"}:
+        url = str(config.get("url") or "").strip()
+        if not url:
+            raise ValueError(f"MCP server {server_id} url is required")
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise ValueError(f"MCP server {server_id} url must start with http:// or https://")
+        return
+    if transport == "stdio":
+        if not str(config.get("command") or "").strip():
+            raise ValueError(f"MCP server {server_id} command is required")
+        return
+    if "url" in config:
+        url = str(config.get("url") or "").strip()
+        if url and not (url.startswith("http://") or url.startswith("https://")):
+            raise ValueError(f"MCP server {server_id} url must start with http:// or https://")
+    if "command" in config and not str(config.get("command") or "").strip():
+        raise ValueError(f"MCP server {server_id} command is required")
+
+
+def _validate_mcp_risk_metadata(server_id: str, config: dict[str, Any]) -> None:
+    risk_level = str(config.get("risk_level") or "").strip().lower()
+    if risk_level not in _MCP_RISK_LEVELS:
+        allowed = ", ".join(sorted(_MCP_RISK_LEVELS))
+        raise ValueError(f"MCP server {server_id} risk_level must be one of: {allowed}")
+    side_effects = str(config.get("side_effects") or "").strip()
+    if not side_effects or side_effects.lower() == "unknown":
+        raise ValueError(f"MCP server {server_id} side_effects is required")
+    if "approval_required" not in config and "requires_approval" not in config:
+        raise ValueError(f"MCP server {server_id} approval_required is required")
 
 
 def _external_mcp_config(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:

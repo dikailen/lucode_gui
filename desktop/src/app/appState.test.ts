@@ -13,8 +13,9 @@ import {
   markPendingDeleteSession,
   removeSession,
   setSessionMessages,
+  workAreaSnapshotFromMessage,
 } from "./appState";
-import type { ModelSettingsModel, ModelSettingsResponse } from "../shared/types";
+import type { ModelSettingsModel, ModelSettingsResponse, RunEvent } from "../shared/types";
 
 describe("appState", () => {
   it("selects a readable configured model label", () => {
@@ -133,6 +134,39 @@ describe("appState", () => {
     expect(state.messages.map((message) => message.content)).toEqual(["first question", "first answer"]);
   });
 
+  it("preserves persisted run snapshots from history messages", () => {
+    const events = runSnapshotEvents();
+    const state = setSessionMessages(createInitialAppState(), "session_1", [
+      { role: "user", content: "please inspect the app" },
+      {
+        role: "assistant",
+        content: "inspection complete",
+        metadata: {
+          run_snapshot: {
+            schema_version: "run_snapshot.v1",
+            run_status: "completed",
+            events,
+          },
+        },
+      },
+    ]);
+
+    const assistantMessage = state.messages[1];
+    const snapshot = workAreaSnapshotFromMessage(assistantMessage);
+
+    expect(assistantMessage.metadata).toEqual({
+      run_snapshot: {
+        schema_version: "run_snapshot.v1",
+        run_status: "completed",
+        events,
+      },
+    });
+    expect(snapshot?.runStatus).toBe("completed");
+    expect(snapshot?.taskCount).toBe(1);
+    expect(snapshot?.tasks[0].status).toBe("completed");
+    expect(snapshot?.tasks[0].latest).toBe("Read README.md");
+  });
+
   it("removes a deleted session and clears its visible messages", () => {
     const base = {
       ...createInitialAppState(),
@@ -247,4 +281,66 @@ function modelSettingsModel(
     cost_level: "medium",
     model_tier: "standard",
   };
+}
+
+function runSnapshotEvents(): RunEvent[] {
+  return [
+    {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 1,
+      type: "run.started",
+      created_at: "2026-07-07T10:00:00+08:00",
+      payload: { input: "please inspect the app" },
+    },
+    {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 2,
+      type: "planner.completed",
+      created_at: "2026-07-07T10:00:01+08:00",
+      payload: {
+        route_type: "single_agent",
+        tasks: [
+          {
+            id: "inspect",
+            title: "Inspect project",
+            model: "worker",
+            mcp: ["project_filesystem_readonly"],
+            depends_on: [],
+            parallel_group: "1",
+          },
+        ],
+      },
+    },
+    {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 3,
+      type: "worker.delta",
+      created_at: "2026-07-07T10:00:02+08:00",
+      payload: { task_id: "inspect", text: "Read README.md" },
+    },
+    {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 4,
+      type: "task.completed",
+      created_at: "2026-07-07T10:00:03+08:00",
+      payload: { task_id: "inspect", title: "Inspect project" },
+    },
+    {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 5,
+      type: "run.completed",
+      created_at: "2026-07-07T10:00:04+08:00",
+      payload: { final_output_preview: "inspection complete" },
+    },
+  ];
 }

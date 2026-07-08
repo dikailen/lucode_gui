@@ -146,6 +146,12 @@ export class RuntimeClient {
     });
   }
 
+  async deletePluginPackage(pluginId: string): Promise<PluginStateResponse> {
+    return this.request<PluginStateResponse>(`/api/plugins/packages/${encodeURIComponent(pluginId)}`, {
+      method: "DELETE",
+    });
+  }
+
   async registerExternalMcp(payload: ExternalMcpPayload): Promise<PluginStateResponse> {
     return this.request<PluginStateResponse>("/api/plugins/mcp/external", {
       method: "POST",

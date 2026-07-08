@@ -11,6 +11,7 @@ from typing import Any
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannedTask, PlannerResult
 from runtime.agents.model_capability import ModelExecutionStrategy, strategy_for_model_info
+from runtime.consistency.timeline import RunTimeline
 from runtime.events import ExecutionEventBus
 from runtime.execution.run_context import RunContextStore
 from runtime.safety.verification_commands import (
@@ -133,6 +134,14 @@ class PipelineRunState:
     model_labels: dict[str, str] = field(default_factory=dict)
     memory_pack: Any | None = None
     worker_reports: list[Any] = field(default_factory=list)
+    timeline: RunTimeline | None = None
+    evidence_mode: str = "off"
+    evidence_claims: list[Any] = field(default_factory=list)
+    evidence_refs: list[Any] = field(default_factory=list)
+    evidence_verdicts: list[Any] = field(default_factory=list)
+    accepted_evidence: dict[str, Any] = field(default_factory=dict)
+    compute_placement_mode: str = "off"
+    compute_placement_decisions: list[Any] = field(default_factory=list)
 
     @classmethod
     def create(
@@ -149,6 +158,10 @@ class PipelineRunState:
     ) -> "PipelineRunState":
         controller = output_controller or OutputController(mode=mode, route=plan.route_type)
         controller.configure(mode=mode, route=plan.route_type)
+        timeline = RunTimeline.create(project_root=project_root, user_request=user_request)
+        resolved_run_context = run_context or (RunContextStore(project_root, timeline=timeline) if project_root else None)
+        if resolved_run_context is not None and hasattr(resolved_run_context, "attach_timeline"):
+            resolved_run_context.attach_timeline(timeline)
         return cls(
             user_request=user_request,
             route_type=plan.route_type,
@@ -168,11 +181,12 @@ class PipelineRunState:
                 )
                 for task in plan.tasks
             ],
-            run_context=run_context or (RunContextStore(project_root) if project_root else None),
+            run_context=resolved_run_context,
             event_bus=event_bus or ExecutionEventBus(),
             output_controller=controller,
             memory_pack=memory_pack,
             worker_reports=list(worker_reports or []),
+            timeline=timeline,
         )
 
     def record_gate(self, decision: GateDecision) -> None:
@@ -182,6 +196,7 @@ class PipelineRunState:
                 record.mcp = sorted(set(record.mcp) | {"code_locator", "project_filesystem_readonly"})
 
     def record_task_started(self, task: PlannedTask) -> None:
+        self._timeline_record_task_started(task)
         record = self._find_task(task.id)
         if record:
             record.status = "running"
@@ -200,6 +215,7 @@ class PipelineRunState:
         record = self._find_task(task.id)
         if not record:
             return
+        self._timeline_record_task_completed(task, output)
         record.status = "completed"
         record.error = ""
         record.output_preview = _preview(output)
@@ -217,6 +233,7 @@ class PipelineRunState:
         )
 
     def record_task_error(self, task: PlannedTask, error: Exception | str) -> None:
+        self._timeline_record_task_failed(task, error)
         record = self._find_task(task.id)
         message = str(error)
         if record:
@@ -233,6 +250,7 @@ class PipelineRunState:
         )
 
     def record_fast_path_used(self, task: PlannedTask, *, tool: str, action: str) -> None:
+        self._timeline_record_fast_path_used(task, tool=tool, action=action)
         label = f"{tool} {action}".strip() or "只读快速路径"
         self.emit_event(
             "FastPathUsed",
@@ -257,9 +275,49 @@ class PipelineRunState:
             "errors": list(self.errors),
             "run_context": self.run_context.render_for_task() if self.run_context else "",
             "events": [event.to_dict() for event in self.event_bus.snapshot()],
+            "timeline": self.timeline.to_dict() if self.timeline else None,
+            "evidence": {
+                "mode": self.evidence_mode,
+                "claims": [_object_to_dict(item) for item in self.evidence_claims],
+                "evidence": [_object_to_dict(item) for item in self.evidence_refs],
+                "verdicts": [_object_to_dict(item) for item in self.evidence_verdicts],
+                "accepted_evidence": dict(self.accepted_evidence or {}),
+            },
+            "compute_placement": {
+                "mode": self.compute_placement_mode,
+                "decisions": [_object_to_dict(item) for item in self.compute_placement_decisions],
+            },
             "worker_reports": [_worker_report_to_dict(report) for report in self.worker_reports],
             "output": self.output_controller.snapshot().to_dict(),
         }
+
+    def record_evidence_gate_result(self, result: Any) -> None:
+        self.evidence_mode = str(getattr(result, "mode", "") or "off")
+        self.evidence_claims = list(getattr(result, "claims", []) or [])
+        self.evidence_refs = list(getattr(result, "evidence", []) or [])
+        self.evidence_verdicts = list(getattr(result, "verdicts", []) or [])
+        try:
+            from runtime.evidence.gate import accepted_evidence_packet
+
+            self.accepted_evidence = accepted_evidence_packet(result)
+        except Exception:
+            self.accepted_evidence = {}
+
+    def record_compute_placement_result(self, result: Any) -> None:
+        self.compute_placement_mode = str(getattr(result, "mode", "") or "off")
+        self.compute_placement_decisions = list(getattr(result, "decisions", []) or [])
+        if self.compute_placement_mode == "off":
+            return
+        self.emit_event(
+            "ComputePlacementObserved",
+            f"compute placement {self.compute_placement_mode}: {len(self.compute_placement_decisions)} decision(s)",
+            agent="runtime",
+            status="completed",
+            payload={
+                "mode": self.compute_placement_mode,
+                "decisions": [_object_to_dict(item) for item in self.compute_placement_decisions],
+            },
+        )
 
     def _find_task(self, task_id: str) -> TaskRunRecord | None:
         for record in self.tasks:
@@ -278,9 +336,63 @@ class PipelineRunState:
 
     def emit_event(self, event_type: str, message: str = "", **kwargs: Any):
         try:
-            return self.event_bus.emit(event_type, message, **kwargs)
+            event = self.event_bus.emit(event_type, message, **kwargs)
+            self._timeline_record_event(event_type, message, **kwargs)
+            return event
         except Exception:
             return None
+
+    def _timeline_record_event(self, event_type: str, message: str = "", **kwargs: Any) -> None:
+        if self.timeline is None:
+            return
+        if str(event_type or "") in {"TaskStarted", "TaskCompleted", "TaskFailed", "FastPathUsed"}:
+            return
+        payload = dict(kwargs.get("payload") or {})
+        tool = str(payload.get("tool") or payload.get("tool_name") or "").strip()
+        resource_refs = [f"tool:{tool}"] if tool else []
+        try:
+            self.timeline.record(
+                event_type,
+                task_id=str(kwargs.get("task_id") or ""),
+                status=str(kwargs.get("status") or ""),
+                message=message,
+                resource_refs=resource_refs,
+                payload=payload,
+            )
+        except Exception:
+            return
+
+    def _timeline_record_task_started(self, task: PlannedTask) -> None:
+        if self.timeline is None:
+            return
+        try:
+            self.timeline.record_task_started(task)
+        except Exception:
+            return
+
+    def _timeline_record_task_completed(self, task: PlannedTask, output: str) -> None:
+        if self.timeline is None:
+            return
+        try:
+            self.timeline.record_task_completed(task, output_preview=output)
+        except Exception:
+            return
+
+    def _timeline_record_task_failed(self, task: PlannedTask, error: Exception | str) -> None:
+        if self.timeline is None:
+            return
+        try:
+            self.timeline.record_task_failed(task, error)
+        except Exception:
+            return
+
+    def _timeline_record_fast_path_used(self, task: PlannedTask, *, tool: str, action: str) -> None:
+        if self.timeline is None:
+            return
+        try:
+            self.timeline.record_fast_path_used(task, tool=tool, action=action)
+        except Exception:
+            return
 
 
 def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecision:
@@ -503,6 +615,19 @@ def _worker_report_to_dict(report: Any) -> dict[str, Any]:
         "files_written": list(getattr(report, "files_written", []) or []),
         "tool_calls": list(getattr(report, "tool_calls", []) or []),
     }
+
+
+def _object_to_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "to_dict"):
+        try:
+            data = value.to_dict()
+            return dict(data) if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    if isinstance(value, dict):
+        return dict(value)
+    return dict(getattr(value, "__dict__", {}) or {})
+
 
 def _gate_to_dict(decision: GateDecision) -> dict[str, Any]:
     return {

@@ -105,13 +105,20 @@ class SessionStore:
             raise ValueError(f"会话前缀不唯一：{query}")
         return matches[0].session_id
 
-    def load_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, str]]:
+    def load_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         safe_id = self._validate_session_id(session_id)
-        messages = [
-            {"role": str(event.get("role") or ""), "content": str(event.get("content") or "")}
-            for event in self._iter_events(self._path_for(safe_id))
-            if event.get("type") == "message"
-        ]
+        messages = []
+        for event in self._iter_events(self._path_for(safe_id)):
+            if event.get("type") != "message":
+                continue
+            message: dict[str, Any] = {
+                "role": str(event.get("role") or ""),
+                "content": str(event.get("content") or ""),
+            }
+            metadata = _client_message_metadata(event.get("metadata"))
+            if metadata:
+                message["metadata"] = metadata
+            messages.append(message)
         messages = [item for item in messages if item["role"] and item["content"]]
         if limit is not None:
             return messages[-max(1, int(limit)) :]
@@ -278,6 +285,16 @@ def _short(text: str, limit: int = 88) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit] + f"...[truncated {len(normalized) - limit} chars]"
+
+
+def _client_message_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    metadata = dict(value)
+    # Internal run linkage alone is not useful in the visible chat history.
+    if set(metadata) <= {"run_id"}:
+        return {}
+    return metadata
 
 
 def _now_iso() -> str:

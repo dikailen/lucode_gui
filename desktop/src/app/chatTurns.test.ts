@@ -35,6 +35,22 @@ describe("buildChatTurns", () => {
     expect(turns[0].responses.map((item) => item.content)).toEqual(["runtime failed"]);
     expect(turns[1].user?.content).toBe("retry");
   });
+
+  it("keeps a historical run process on the turn that owns the assistant response", () => {
+    const messages: ChatMessage[] = [
+      message("u1", "user", "first question"),
+      message("a1", "assistant", "first answer"),
+      message("u2", "user", "second question"),
+      message("a2", "assistant", "second answer"),
+    ];
+    const historicalProcess = snapshot("completed");
+
+    const turns = buildChatTurns(messages, null, { a1: historicalProcess });
+
+    expect(turns).toHaveLength(2);
+    expect(turns[0].process).toBe(historicalProcess);
+    expect(turns[1].process).toBeNull();
+  });
 });
 
 function message(id: string, role: ChatMessage["role"], content: string): ChatMessage {

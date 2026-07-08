@@ -13,12 +13,21 @@ type MarkdownBlock =
   | { type: "table"; headers: string[]; rows: string[][] };
 
 export function MarkdownContent({ content }: MarkdownContentProps) {
-  const blocks = parseMarkdownBlocks(content);
+  const blocks = parseMarkdownBlocks(cleanVisibleFinalAnswer(content));
   return (
     <div className="markdown-content">
       {blocks.map((block, index) => renderBlock(block, index))}
     </div>
   );
+}
+
+function cleanVisibleFinalAnswer(content: string): string {
+  const text = String(content || "");
+  const successfulAuditStart = text.search(/(^|\n)\s*最终审核\s*[：:]\s*通过(?:\s|$)/);
+  if (successfulAuditStart >= 0) {
+    return text.slice(0, successfulAuditStart).trimEnd();
+  }
+  return text;
 }
 
 function parseMarkdownBlocks(content: string): MarkdownBlock[] {
@@ -98,7 +107,7 @@ function parseMarkdownBlocks(content: string): MarkdownBlock[] {
       paragraphLines.push(lines[index].trim());
       index += 1;
     }
-    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+    blocks.push({ type: "paragraph", text: paragraphLines.join("\n") });
   }
 
   return blocks.length ? blocks : [{ type: "paragraph", text: content }];
@@ -217,7 +226,7 @@ function renderEmphasis(text: string, keySeed: number): ReactNode[] {
 
   while ((match = pattern.exec(text))) {
     if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
+      nodes.push(...renderPlainText(text.slice(lastIndex, match.index), `text-${keySeed}-${nodes.length}`));
     }
     if (match[2]) {
       nodes.push(<strong key={`strong-${keySeed}-${nodes.length}`}>{match[2]}</strong>);
@@ -228,7 +237,21 @@ function renderEmphasis(text: string, keySeed: number): ReactNode[] {
   }
 
   if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
+    nodes.push(...renderPlainText(text.slice(lastIndex), `text-${keySeed}-${nodes.length}`));
   }
+  return nodes;
+}
+
+function renderPlainText(text: string, keyPrefix: string): ReactNode[] {
+  const pieces = text.split("\n");
+  const nodes: ReactNode[] = [];
+  pieces.forEach((piece, index) => {
+    if (piece) {
+      nodes.push(piece);
+    }
+    if (index < pieces.length - 1) {
+      nodes.push(<br key={`${keyPrefix}-br-${index}`} />);
+    }
+  });
   return nodes;
 }

@@ -132,6 +132,23 @@ export type PluginMcpRow = {
   detail: string;
 };
 
+export type PluginLaunchProfile = {
+  id: string;
+  label: string;
+  script: string;
+  description?: string;
+};
+
+export type PluginPackage = {
+  id: string;
+  title: string;
+  description: string;
+  skill_ids: string[];
+  mcp_ids: string[];
+  launch_profiles: PluginLaunchProfile[];
+  deletable: boolean;
+};
+
 export type PluginRuntimeCapability = {
   id: string;
   display_name: string;
@@ -147,8 +164,12 @@ export type PluginStateResponse = {
   schema_version: "plugin_state.v1";
   skills: PluginSkill[];
   mcp: PluginMcpRow[];
+  installed_plugins: PluginPackage[];
   runtime_capabilities: PluginRuntimeCapability[];
   deleted_skill_id?: string;
+  deleted_plugin_id?: string;
+  deleted_skill_ids?: string[];
+  deleted_mcp_ids?: string[];
   installed_skill_id?: string;
   installed_mcp_id?: string;
   installed_plugin_id?: string;
@@ -259,6 +280,7 @@ export type ChatMessage = {
   role: ChatRole;
   content: string;
   status?: "streaming" | "completed" | "failed" | "cancelled";
+  metadata?: Record<string, unknown>;
 };
 
 export type RenderedMessagePart =
@@ -275,6 +297,7 @@ export type RenderedMessagePart =
 export type PersistedChatMessage = {
   role: ChatRole;
   content: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type SessionMessagesResponse = {

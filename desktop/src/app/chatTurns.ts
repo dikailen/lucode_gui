@@ -8,7 +8,11 @@ export type ChatTurn = {
   process: WorkAreaSnapshot | null;
 };
 
-export function buildChatTurns(messages: ChatMessage[], activeProcess: WorkAreaSnapshot | null): ChatTurn[] {
+export function buildChatTurns(
+  messages: ChatMessage[],
+  activeProcess: WorkAreaSnapshot | null,
+  historicalProcessByMessageId: Record<string, WorkAreaSnapshot | null> = {},
+): ChatTurn[] {
   const turns: ChatTurn[] = [];
   let current: ChatTurn | null = null;
 
@@ -34,6 +38,10 @@ export function buildChatTurns(messages: ChatMessage[], activeProcess: WorkAreaS
       turns.push(current);
     }
     current.responses.push(message);
+    const historicalProcess = historicalProcessByMessageId[message.id];
+    if (historicalProcess) {
+      current.process = historicalProcess;
+    }
   }
 
   if (activeProcess) {

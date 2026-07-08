@@ -113,7 +113,7 @@ export function SessionSidebar({
       </nav>
 
       {activeWorkspace === "chat" ? (
-        <>
+        <div className="sidebar-chat-panel">
           <button className="new-session-button" type="button" onClick={createNewSession}>
             {t("sidebar.newChat")}
           </button>
@@ -165,7 +165,7 @@ export function SessionSidebar({
               })
             )}
           </div>
-        </>
+        </div>
       ) : (
         <div className="sidebar-plugin-hint">
           <strong>{t("sidebar.pluginsHintTitle")}</strong>

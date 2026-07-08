@@ -87,6 +87,8 @@ export function App() {
             deleteSkill={controller.deleteSkill}
             installSkill={controller.installSkill}
             installMcp={controller.installMcp}
+            installPluginPackage={controller.installPluginPackage}
+            deletePluginPackage={controller.deletePluginPackage}
             registerExternalMcp={controller.registerExternalMcp}
             refreshComfyUiState={controller.refreshComfyUiState}
             saveComfyUiUrl={controller.saveComfyUiUrl}

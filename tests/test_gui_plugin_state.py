@@ -7,6 +7,55 @@ import pytest
 from lucode.gui.plugin_state import PluginStateStore
 
 
+def _write_plugin_package(root):
+    package = root / "demo_plugin"
+    skill_dir = package / "skills" / "demo_operator"
+    mcp_dir = package / "mcp"
+    skill_dir.mkdir(parents=True)
+    mcp_dir.mkdir(parents=True)
+    (package / "lucode-plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "lucode_plugin.v1",
+                "id": "demo_plugin",
+                "title": "Demo Plugin",
+                "description": "Demo optional plugin.",
+                "skills": ["skills/demo_operator"],
+                "mcp_templates": ["mcp/demo.json"],
+                "launch_profiles": [
+                    {
+                        "id": "windows_demo",
+                        "label": "Windows Demo",
+                        "script": "run_demo.bat",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: Demo Operator\ndescription: Operate demo service.\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    (mcp_dir / "demo.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "demo_graph": {
+                        "transport": "http",
+                        "url": "http://127.0.0.1:8188/mcp",
+                        "approval_required": True,
+                        "side_effects": "controls_external_private_service",
+                        "risk_level": "high",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return package
+
+
 def test_plugin_state_persists_removed_skill_ids(tmp_path):
     store = PluginStateStore(tmp_path)
 
@@ -125,3 +174,81 @@ def test_plugin_state_rejects_external_mcp_without_required_endpoint(tmp_path):
 
     with pytest.raises(ValueError, match="url is required"):
         store.register_external_mcp({"id": "bad_http", "transport": "http"})
+
+
+def test_plugin_state_lists_and_uninstalls_plugin_package(tmp_path):
+    package = _write_plugin_package(tmp_path)
+    workspace = tmp_path / "workspace"
+    store = PluginStateStore(workspace)
+
+    installed = store.install_plugin_package_from_path(package)
+
+    assert installed["id"] == "demo_plugin"
+    assert store.load_installed_plugin_packages() == [
+        {
+            "id": "demo_plugin",
+            "title": "Demo Plugin",
+            "description": "Demo optional plugin.",
+            "skill_ids": ["demo_operator"],
+            "mcp_ids": ["demo_graph"],
+            "launch_profiles": [
+                {
+                    "id": "windows_demo",
+                    "label": "Windows Demo",
+                    "script": "run_demo.bat",
+                }
+            ],
+            "deletable": True,
+        }
+    ]
+
+    removed = store.uninstall_plugin_package("demo_plugin")
+
+    assert removed == {
+        "id": "demo_plugin",
+        "skill_ids": ["demo_operator"],
+        "mcp_ids": ["demo_graph"],
+    }
+    assert store.load_installed_plugin_packages() == []
+    assert store.load_custom_skill_cards() == []
+    assert store.load_custom_mcp_rows() == []
+    assert not (workspace / ".lucode" / "plugins" / "demo_plugin").exists()
+    assert not (workspace / ".lucode" / "skills" / "demo_operator").exists()
+    mcp_data = json.loads((workspace / ".lucode" / "mcp_servers.json").read_text(encoding="utf-8"))
+    assert "demo_graph" not in mcp_data["mcpServers"]
+
+
+def test_plugin_package_rejects_mcp_template_without_risk_metadata(tmp_path):
+    package = _write_plugin_package(tmp_path)
+    (package / "mcp" / "demo.json").write_text(
+        json.dumps({"mcpServers": {"demo_graph": {"transport": "http", "url": "http://127.0.0.1:8188/mcp"}}}),
+        encoding="utf-8",
+    )
+    store = PluginStateStore(tmp_path / "workspace")
+
+    with pytest.raises(ValueError, match="risk_level"):
+        store.install_plugin_package_from_path(package)
+
+
+def test_plugin_package_rejects_mcp_template_with_invalid_risk_metadata(tmp_path):
+    package = _write_plugin_package(tmp_path)
+    (package / "mcp" / "demo.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "demo_graph": {
+                        "transport": "http",
+                        "url": "http://127.0.0.1:8188/mcp",
+                        "approval_required": True,
+                        "side_effects": "controls_external_private_service",
+                        "risk_level": "severe",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = PluginStateStore(tmp_path / "workspace")
+
+    with pytest.raises(ValueError, match="risk_level"):
+        store.install_plugin_package_from_path(package)

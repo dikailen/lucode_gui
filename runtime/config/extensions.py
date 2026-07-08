@@ -54,8 +54,14 @@ def discover_mcp_layers(workspace_context=None) -> dict[str, list[dict[str, Any]
     roots = extension_roots(workspace_context)
     return {
         "core": _discover_core_mcp(roots.app_home),
-        "user": _discover_mcp_dir(roots.user_home / "mcp", "user"),
-        "workspace": _discover_mcp_dir(roots.workspace_root / ".lucode" / "mcp", "workspace"),
+        "user": [
+            *_discover_mcp_dir(roots.user_home / "mcp", "user"),
+            *_discover_mcp_servers_file(roots.user_home / "mcp_servers.json", "user"),
+        ],
+        "workspace": [
+            *_discover_mcp_dir(roots.workspace_root / ".lucode" / "mcp", "workspace"),
+            *_discover_mcp_servers_file(roots.workspace_root / ".lucode" / "mcp_servers.json", "workspace"),
+        ],
     }
 
 
@@ -240,13 +246,51 @@ def _discover_mcp_dir(root: Path, source: str) -> list[dict[str, Any]]:
             "source": source,
             "path": str(path),
             "risk_level": raw.get("risk_level") or "unknown",
+            "side_effects": raw.get("side_effects") or "unknown",
             "trusted": bool(raw.get("trusted")) if source == "workspace" else raw.get("trusted", True) is not False,
             "enabled": bool(raw.get("enabled")) if source == "workspace" else raw.get("enabled", True) is not False,
-            "approval_required": raw.get("approval_required", True),
+            "approval_required": _approval_required_value(raw),
         }
         if source == "workspace":
             item["trusted"] = bool(raw.get("trusted", False))
             item["enabled"] = bool(raw.get("enabled", False))
+        items.append(item)
+    return items
+
+
+def _discover_mcp_servers_file(path: Path, source: str) -> list[dict[str, Any]]:
+    data = _load_json_object(path)
+    raw_servers = data.get("mcpServers")
+    if not isinstance(raw_servers, dict):
+        return []
+    items: list[dict[str, Any]] = []
+    for raw_id, raw_config in sorted(raw_servers.items(), key=lambda item: str(item[0])):
+        if not isinstance(raw_config, dict):
+            continue
+        mcp_id = _normalize_id(str(raw_config.get("id") or raw_id))
+        item = {
+            "id": mcp_id,
+            "display_name_zh": raw_config.get("display_name_zh")
+            or raw_config.get("display_name")
+            or raw_config.get("name")
+            or mcp_id,
+            "summary_zh": raw_config.get("summary_zh") or raw_config.get("summary") or "",
+            "tools": _as_list(raw_config.get("tools") or []),
+            "prompts": raw_config.get("prompts") or [],
+            "source": source,
+            "path": str(path),
+            "risk_level": raw_config.get("risk_level") or "unknown",
+            "side_effects": raw_config.get("side_effects") or "unknown",
+            "trusted": bool(raw_config.get("trusted")) if source == "workspace" else raw_config.get("trusted", True) is not False,
+            "enabled": bool(raw_config.get("enabled")) if source == "workspace" else raw_config.get("enabled", True) is not False,
+            "approval_required": _approval_required_value(raw_config),
+            "transport": raw_config.get("transport"),
+            "url": raw_config.get("url"),
+            "command": raw_config.get("command"),
+        }
+        if source == "workspace":
+            item["trusted"] = bool(raw_config.get("trusted", False))
+            item["enabled"] = bool(raw_config.get("enabled", False))
         items.append(item)
     return items
 
@@ -368,9 +412,15 @@ def _preferred_skill_detail_item(items: list[dict[str, Any]]) -> dict[str, Any]:
 def _load_json_object(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _approval_required_value(raw: dict[str, Any]) -> Any:
+    if "approval_required" in raw:
+        return raw.get("approval_required")
+    return raw.get("requires_approval")
 
 
 def _as_list(value: Any) -> list[str]:

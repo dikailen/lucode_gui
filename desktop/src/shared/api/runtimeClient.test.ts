@@ -258,6 +258,7 @@ describe("RuntimeClient", () => {
           schema_version: "plugin_state.v1",
           skills: [],
           mcp: [],
+          installed_plugins: [],
           runtime_capabilities: [
             {
               id: "desktop_browser",
@@ -288,6 +289,7 @@ describe("RuntimeClient", () => {
             },
           ],
           mcp: [],
+          installed_plugins: [],
           runtime_capabilities: [],
         });
       }
@@ -297,6 +299,7 @@ describe("RuntimeClient", () => {
           schema_version: "plugin_state.v1",
           installed_mcp_id: "demo",
           skills: [],
+          installed_plugins: [],
           runtime_capabilities: [],
           mcp: [
             {
@@ -315,6 +318,17 @@ describe("RuntimeClient", () => {
           installed_plugin_id: "comfyui_plugin",
           installed_skill_ids: ["comfyui_operator"],
           installed_mcp_ids: ["comfyui_graph"],
+          installed_plugins: [
+            {
+              id: "comfyui_plugin",
+              title: "ComfyUI Plugin",
+              description: "Optional ComfyUI capability package.",
+              skill_ids: ["comfyui_operator"],
+              mcp_ids: ["comfyui_graph"],
+              launch_profiles: [],
+              deletable: true,
+            },
+          ],
           skills: [
             {
               id: "comfyui_operator",
@@ -336,6 +350,18 @@ describe("RuntimeClient", () => {
           ],
         });
       }
+      if (url.endsWith("/api/plugins/packages/comfyui_plugin") && init?.method === "DELETE") {
+        return response({
+          schema_version: "plugin_state.v1",
+          deleted_plugin_id: "comfyui_plugin",
+          deleted_skill_ids: ["comfyui_operator"],
+          deleted_mcp_ids: ["comfyui_graph"],
+          skills: [],
+          mcp: [],
+          installed_plugins: [],
+          runtime_capabilities: [],
+        });
+      }
       if (url.endsWith("/api/plugins/mcp/external") && init?.method === "POST") {
         expect(JSON.parse(String(init.body))).toEqual({
           id: "local_docs",
@@ -347,6 +373,7 @@ describe("RuntimeClient", () => {
           schema_version: "plugin_state.v1",
           registered_mcp_id: "local_docs",
           skills: [],
+          installed_plugins: [],
           runtime_capabilities: [],
           mcp: [
             {
@@ -453,6 +480,13 @@ describe("RuntimeClient", () => {
       installed_plugin_id: "comfyui_plugin",
       installed_skill_ids: ["comfyui_operator"],
       installed_mcp_ids: ["comfyui_graph"],
+      installed_plugins: [{ id: "comfyui_plugin" }],
+    });
+    await expect(client.deletePluginPackage("comfyui_plugin")).resolves.toMatchObject({
+      deleted_plugin_id: "comfyui_plugin",
+      deleted_skill_ids: ["comfyui_operator"],
+      deleted_mcp_ids: ["comfyui_graph"],
+      installed_plugins: [],
     });
     await expect(
       client.registerExternalMcp({
@@ -492,7 +526,7 @@ describe("RuntimeClient", () => {
       endpoints: { system_stats: true, queue: true },
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(22);
+    expect(fetchMock).toHaveBeenCalledTimes(23);
   });
 
   it("builds authenticated websocket urls from http base urls", () => {

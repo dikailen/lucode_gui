@@ -82,7 +82,7 @@ export type LucodeAppController = {
   sidebarCollapsed: boolean;
   settingsError: string;
   pluginError: string;
-  pluginInstallingTarget: "skills" | "mcp" | "";
+  pluginInstallingTarget: "skills" | "mcp" | "packages" | "";
   comfyUiState: ComfyUiStateResponse | null;
   comfyUiError: string;
   comfyUiBusy: boolean;
@@ -120,6 +120,8 @@ export type LucodeAppController = {
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
+  installPluginPackage: (path: string) => void;
+  deletePluginPackage: (pluginId: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
   refreshComfyUiState: () => void;
   saveComfyUiUrl: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
@@ -160,7 +162,7 @@ export function useLucodeApp(): LucodeAppController {
   const [rightDockWidth, setRightDockWidth] = useState(() => loadRightDockWidth(readViewportWidth(), false));
   const [settingsError, setSettingsError] = useState("");
   const [pluginError, setPluginError] = useState("");
-  const [pluginInstallingTarget, setPluginInstallingTarget] = useState<"skills" | "mcp" | "">("");
+  const [pluginInstallingTarget, setPluginInstallingTarget] = useState<"skills" | "mcp" | "packages" | "">("");
   const [comfyUiState, setComfyUiState] = useState<ComfyUiStateResponse | null>(null);
   const [comfyUiError, setComfyUiError] = useState("");
   const [comfyUiBusy, setComfyUiBusy] = useState(false);
@@ -390,6 +392,38 @@ export function useLucodeApp(): LucodeAppController {
     setPluginInstallingTarget("mcp");
     try {
       setPluginState(await client.installMcp(cleanPath));
+    } catch (error) {
+      setPluginError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPluginInstallingTarget("");
+    }
+  }
+
+  async function installPluginPackage(path: string) {
+    const cleanPath = path.trim();
+    if (!cleanPath || pluginInstallingTarget) {
+      return;
+    }
+    setPluginError("");
+    setPluginInstallingTarget("packages");
+    try {
+      setPluginState(await client.installPluginPackage(cleanPath));
+    } catch (error) {
+      setPluginError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPluginInstallingTarget("");
+    }
+  }
+
+  async function deletePluginPackage(pluginId: string) {
+    const cleanPluginId = pluginId.trim();
+    if (!cleanPluginId || pluginInstallingTarget) {
+      return;
+    }
+    setPluginError("");
+    setPluginInstallingTarget("packages");
+    try {
+      setPluginState(await client.deletePluginPackage(cleanPluginId));
     } catch (error) {
       setPluginError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -931,6 +965,8 @@ export function useLucodeApp(): LucodeAppController {
     deleteSkill: (skillId) => void deleteSkill(skillId),
     installSkill: (path) => void installSkill(path),
     installMcp: (path) => void installMcp(path),
+    installPluginPackage: (path) => void installPluginPackage(path),
+    deletePluginPackage: (pluginId) => void deletePluginPackage(pluginId),
     registerExternalMcp,
     refreshComfyUiState: () => void refreshComfyUiState(),
     saveComfyUiUrl,

@@ -130,6 +130,7 @@ export function setSessionMessages(
       sessionId,
       role: message.role,
       content: message.content,
+      metadata: message.metadata,
       status: "completed",
     })),
   };
@@ -248,7 +249,25 @@ export function recentRunEvents(state: AppState, limit = 4): RunEvent[] {
 }
 
 export function workAreaSnapshot(state: AppState, t?: Translator): WorkAreaSnapshot | null {
-  const planEvent = [...state.events].reverse().find((event) => {
+  return workAreaSnapshotFromEvents(state.events, state.runStatus, t);
+}
+
+export function workAreaSnapshotFromMessage(message: ChatMessage, t?: Translator): WorkAreaSnapshot | null {
+  const snapshot = objectValue(message.metadata?.run_snapshot);
+  const events = runEventsFromSnapshot(snapshot.events);
+  if (!events.length) {
+    return null;
+  }
+  return workAreaSnapshotFromEvents(events, normalizeRunStatus(snapshot.run_status), t);
+}
+
+export function workAreaSnapshotFromEvents(
+  events: RunEvent[],
+  runStatus: RunStatus = "completed",
+  t?: Translator,
+): WorkAreaSnapshot | null {
+  const status = normalizeRunStatus(runStatus);
+  const planEvent = [...events].reverse().find((event) => {
     const tasks = event.payload?.tasks;
     return event.type === "planner.completed" && Array.isArray(tasks) && tasks.length > 0;
   });
@@ -261,9 +280,9 @@ export function workAreaSnapshot(state: AppState, t?: Translator): WorkAreaSnaps
     return null;
   }
   const taskById = new Map(tasks.map((task) => [task.id, task]));
-  const runEvents = state.events.filter((event) => event.run_id === planEvent.run_id);
+  const runEvents = events.filter((event) => event.run_id === planEvent.run_id);
   const startedAt = runStartTime(runEvents);
-  const endedAt = runEndTime(state.runStatus, runEvents);
+  const endedAt = runEndTime(status, runEvents);
   const durationText = formatRunDuration(startedAt, endedAt || runEvents.at(-1)?.created_at || "");
   let supervisorActivity = "";
   const globalActivities: WorkAreaActivity[] = [];
@@ -304,13 +323,13 @@ export function workAreaSnapshot(state: AppState, t?: Translator): WorkAreaSnaps
     }
   }
   return {
-    runStatus: state.runStatus,
+    runStatus: status,
     routeType,
     taskCount: tasks.length,
     supervisorActivity,
     globalActivities,
-    collapsedSummary: workAreaSummary(state, tasks, t),
-    processSummary: processSummary(state.runStatus, durationText, t),
+    collapsedSummary: workAreaSummary(status, tasks, t),
+    processSummary: processSummary(status, durationText, t),
     durationText,
     startedAt,
     endedAt,
@@ -709,6 +728,37 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function runEventsFromSnapshot(value: unknown): RunEvent[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item, index) => ({
+      schema_version: "run_event.v1" as const,
+      run_id: stringValue(item.run_id),
+      session_id: stringValue(item.session_id),
+      seq: numberValue(item.seq) || index + 1,
+      type: stringValue(item.type),
+      created_at: stringValue(item.created_at),
+      payload: objectValue(item.payload),
+    }))
+    .filter((event) => event.run_id && event.type);
+}
+
+function normalizeRunStatus(value: unknown): RunStatus {
+  const status = stringValue(value);
+  if (status === "running" || status === "completed" || status === "failed" || status === "cancelled") {
+    return status;
+  }
+  return "completed";
+}
+
+function numberValue(value: unknown): number {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
 function normalizePlanTasks(value: unknown): WorkAreaTask[] {
   if (!Array.isArray(value)) {
     return [];
@@ -743,8 +793,8 @@ function truncateLine(value: string, limit = 96): string {
   return line.length > limit ? `${line.slice(0, limit - 1)}...` : line;
 }
 
-function workAreaSummary(state: AppState, tasks: WorkAreaTask[], t?: Translator): string {
-  if (state.runStatus === "running") {
+function workAreaSummary(runStatus: RunStatus, tasks: WorkAreaTask[], t?: Translator): string {
+  if (runStatus === "running") {
     const running = tasks.filter((task) => task.status === "running").length;
     return running
       ? translate(t, "workArea.runningSummary", `${running} \u4e2a\u4efb\u52a1\u8fd0\u884c\u4e2d`, { count: running })
@@ -759,7 +809,7 @@ function workAreaSummary(state: AppState, tasks: WorkAreaTask[], t?: Translator)
       failed,
     });
   }
-  if (state.runStatus === "cancelled") {
+  if (runStatus === "cancelled") {
     return translate(t, "workArea.cancelledSummary", "\u5df2\u505c\u6b62");
   }
   return translate(t, "workArea.completedSummary", `${tasks.length} \u4e2a\u4efb\u52a1\u5b8c\u6210`, { count: tasks.length });

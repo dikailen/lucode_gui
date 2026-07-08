@@ -23,7 +23,7 @@ export type WorkspacePanelProps = {
   runtimeError: string;
   pluginState: PluginStateResponse | null;
   pluginError: string;
-  pluginInstallingTarget: "skills" | "mcp" | "";
+  pluginInstallingTarget: "skills" | "mcp" | "packages" | "";
   comfyUiState: ComfyUiStateResponse | null;
   comfyUiError: string;
   comfyUiBusy: boolean;
@@ -56,6 +56,8 @@ export type WorkspacePanelProps = {
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
   installMcp: (path: string) => void;
+  installPluginPackage: (path: string) => void;
+  deletePluginPackage: (pluginId: string) => void;
   registerExternalMcp: (payload: ExternalMcpPayload) => Promise<boolean>;
   refreshComfyUiState: () => void;
   saveComfyUiUrl: (baseUrl: string, installPath?: string, launchScript?: string) => Promise<boolean>;
@@ -105,6 +107,8 @@ export function WorkspacePanel({
   deleteSkill,
   installSkill,
   installMcp,
+  installPluginPackage,
+  deletePluginPackage,
   registerExternalMcp,
   refreshComfyUiState,
   saveComfyUiUrl,
@@ -148,6 +152,8 @@ export function WorkspacePanel({
         deleteSkill={deleteSkill}
         installSkill={installSkill}
         installMcp={installMcp}
+        installPluginPackage={installPluginPackage}
+        deletePluginPackage={deletePluginPackage}
         registerExternalMcp={registerExternalMcp}
         refreshComfyUiState={refreshComfyUiState}
         saveComfyUiUrl={saveComfyUiUrl}

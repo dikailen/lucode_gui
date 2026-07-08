@@ -196,6 +196,15 @@ button:disabled {
   gap: 6px;
 }
 
+.sidebar-chat-panel {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
+}
+
 .sidebar-nav-item {
   min-height: 36px;
   border: 0;
@@ -277,6 +286,8 @@ button:disabled {
   gap: 6px;
   overflow: auto;
   padding-right: 1px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .session-row {
@@ -743,7 +754,7 @@ button:disabled {
   color: #111827;
   font-size: 15px;
   line-height: 1.72;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .markdown-content > *:first-child {
@@ -804,7 +815,9 @@ button:disabled {
   color: #172033;
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
   font-size: 0.88em;
+  overflow-wrap: anywhere;
   padding: 1px 5px;
+  white-space: break-spaces;
 }
 
 .markdown-code {
@@ -3514,7 +3527,7 @@ summary.work-area-header::-webkit-details-marker {
   align-content: start;
   align-items: start;
   grid-auto-rows: max-content;
-  grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
+  grid-template-columns: minmax(240px, 0.9fr) minmax(260px, 1fr) minmax(300px, 1.1fr);
   gap: 16px;
   overflow: auto;
   padding: 18px 24px 24px;
@@ -3530,6 +3543,10 @@ summary.work-area-header::-webkit-details-marker {
 
 .mcp-plugin-column {
   grid-template-rows: auto auto auto auto;
+}
+
+.plugin-package-column {
+  grid-template-rows: auto auto auto;
 }
 
 .runtime-capability-column {
@@ -3947,6 +3964,18 @@ summary.work-area-header::-webkit-details-marker {
   gap: 8px;
   overflow: visible;
   padding-bottom: 2px;
+}
+
+.plugin-empty-row {
+  min-width: 0;
+  border: 1px solid #e1e6f0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  padding: 12px 14px;
 }
 
 .plugin-row {

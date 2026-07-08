@@ -65,6 +65,9 @@ from lucode.gui.i18n import load_gui_language, save_gui_language
 
 
 ModelCatalogProvider = Callable[[], dict[str, Any]]
+RUN_SNAPSHOT_SCHEMA_VERSION = "run_snapshot.v1"
+MAX_RUN_SNAPSHOT_EVENTS = 180
+MAX_RUN_SNAPSHOT_TEXT_CHARS = 700
 
 
 class RuntimeRunManager:
@@ -334,6 +337,7 @@ class RuntimeRunManager:
             "schema_version": "plugin_state.v1",
             "skills": skills,
             "mcp": mcp_rows,
+            "installed_plugins": store.load_installed_plugin_packages(),
             "runtime_capabilities": _runtime_capabilities_payload(self.workspace_root),
         }
 
@@ -393,6 +397,20 @@ class RuntimeRunManager:
         payload["installed_skill_ids"] = installed["skill_ids"]
         payload["installed_mcp_ids"] = installed["mcp_ids"]
         payload["installed_launch_profile_ids"] = installed["launch_profile_ids"]
+        return payload
+
+    def uninstall_plugin_package(self, plugin_id: str) -> dict[str, Any]:
+        from lucode.gui.plugin_state import PluginStateStore
+
+        clean_plugin_id = str(plugin_id or "").strip()
+        if not clean_plugin_id:
+            raise ValueError("plugin_id is required")
+        store = PluginStateStore(self.workspace_root)
+        removed = store.uninstall_plugin_package(clean_plugin_id)
+        payload = self.plugin_state()
+        payload["deleted_plugin_id"] = removed["id"]
+        payload["deleted_skill_ids"] = removed["skill_ids"]
+        payload["deleted_mcp_ids"] = removed["mcp_ids"]
         return payload
 
     def register_external_mcp(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -656,19 +674,23 @@ class RuntimeRunManager:
         run.updated_at = now
         payload = {"final_output": str(final_output or "")}
         payload.update(dict(metadata or {}))
-        self._history_facade.history_store.append_message(
-            run.session_id,
-            "assistant",
-            str(final_output or ""),
-            metadata={"run_id": run.run_id, **dict(metadata or {})},
-        )
-        self._touch_memory_session(run.session_id, updated_at=now)
         self.events.emit(
             run_id=run.run_id,
             session_id=run.session_id,
             event_type="run.completed",
             payload=payload,
         )
+        history_metadata = {"run_id": run.run_id, **dict(metadata or {})}
+        run_snapshot = self._run_snapshot_for_history(run)
+        if run_snapshot["events"]:
+            history_metadata["run_snapshot"] = run_snapshot
+        self._history_facade.history_store.append_message(
+            run.session_id,
+            "assistant",
+            str(final_output or ""),
+            metadata=history_metadata,
+        )
+        self._touch_memory_session(run.session_id, updated_at=now)
 
     def _mark_failed(self, run: ServerRun, *, error: str) -> None:
         now = utc_now_iso()
@@ -706,6 +728,14 @@ class RuntimeRunManager:
             created_at=session.created_at,
             updated_at=updated_at,
         )
+
+    def _run_snapshot_for_history(self, run: ServerRun) -> dict[str, Any]:
+        events = self.events.snapshot(run.run_id)[-MAX_RUN_SNAPSHOT_EVENTS:]
+        return {
+            "schema_version": RUN_SNAPSHOT_SCHEMA_VERSION,
+            "run_status": run.status,
+            "events": [_history_run_event_payload(event) for event in events],
+        }
 
 
 def _terminal_state_payload(session: TerminalSession) -> dict[str, Any]:
@@ -799,6 +829,48 @@ def _terminal_timeout(value: Any) -> int:
     except (TypeError, ValueError):
         timeout = 60
     return max(1, min(timeout, 300))
+
+
+def _history_run_event_payload(event: Any) -> dict[str, Any]:
+    payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+    payload["payload"] = _history_run_event_inner_payload(payload.get("payload"))
+    return payload
+
+
+def _history_run_event_inner_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    payload: dict[str, Any] = {}
+    for key, item in value.items():
+        clean_key = str(key)
+        if clean_key == "final_output":
+            preview = _snapshot_text(item)
+            if preview:
+                payload["final_output_preview"] = preview
+            continue
+        payload[clean_key] = _snapshot_value(item)
+    return payload
+
+
+def _snapshot_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _snapshot_text(value)
+    if isinstance(value, list):
+        return [_snapshot_value(item) for item in value[:80]]
+    if isinstance(value, tuple):
+        return [_snapshot_value(item) for item in value[:80]]
+    if isinstance(value, dict):
+        return {str(key): _snapshot_value(item) for key, item in list(value.items())[:80]}
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _snapshot_text(value)
+
+
+def _snapshot_text(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= MAX_RUN_SNAPSHOT_TEXT_CHARS:
+        return text
+    return text[:MAX_RUN_SNAPSHOT_TEXT_CHARS] + f"...[truncated {len(text) - MAX_RUN_SNAPSHOT_TEXT_CHARS} chars]"
 
 
 def _sanitize_model(item: dict[str, Any]) -> dict[str, Any]:

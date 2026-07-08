@@ -7,7 +7,9 @@ from runtime.agent.supervisor import WorkerReport
 from runtime.execution.supervisor_scheduler import supervisor_normalize_resource
 
 
-REWORKABLE_FINDING_KINDS = frozenset({"task_failed", "blocker", "missing_evidence", "unauthorized_write"})
+REWORKABLE_FINDING_KINDS = frozenset(
+    {"task_failed", "blocker", "missing_evidence", "unauthorized_write", "evidence_gate_enforced"}
+)
 
 
 @dataclass(frozen=True)

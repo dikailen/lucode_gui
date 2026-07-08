@@ -25,6 +25,43 @@ def test_parse_planner_result_forces_browser_worker_route_when_desktop_browser_i
     assert "browser" in result.tasks[0].instruction.lower()
 
 
+def test_parse_planner_result_does_not_route_simple_chat_to_browser_from_malformed_model_output(monkeypatch):
+    from planning.planner_schema import parse_planner_result
+
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_URL", "http://127.0.0.1:41011")
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN", "token_1")
+
+    result = parse_planner_result(
+        "I will open the browser at http://localhost:8000 and list browser tabs.",
+        fallback_user_input="raw_user_input: \u4f60\u597d\nrefined_request: \u4f60\u597d",
+    )
+
+    assert result.route_type == "direct_answer"
+    assert result.tasks == []
+
+
+def test_parse_planner_result_does_not_route_simple_chat_json_to_browser_from_context_labels(monkeypatch):
+    from planning.planner_schema import parse_planner_result
+
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_URL", "http://127.0.0.1:41011")
+    monkeypatch.setenv("LUCODE_DESKTOP_BROWSER_BRIDGE_TOKEN", "token_1")
+
+    result = parse_planner_result(
+        """
+        {
+          "route_type": "direct_answer",
+          "reason": "simple greeting",
+          "refined_request": "\u4f60\u597d",
+          "direct_answer_instruction": "Answer the greeting directly."
+        }
+        """,
+        fallback_user_input="原始用户输入：\u4f60\u597d\nrefiner_raw_user_input：\u4f60\u597d\nrefined_request：\u4f60\u597d",
+    )
+
+    assert result.route_type == "direct_answer"
+    assert result.tasks == []
+
+
 def test_parse_planner_result_rewrites_web_search_task_for_explicit_desktop_browser(monkeypatch):
     from planning.planner_schema import parse_planner_result
     from runtime.capabilities.resolver import CapabilityResolver
@@ -151,3 +188,44 @@ def test_parse_planner_result_clarify_browser_refusal_routes_to_desktop_browser(
     assert result.tasks[0].id == "desktop_browser_task"
     assert result.tasks[0].mcp == ["desktop_browser"]
     assert result.memory_interface["browser_binding"] == "desktop_browser"
+
+
+def test_parse_planner_result_preserves_p7_reliability_fields():
+    from planning.planner_schema import parse_planner_result
+
+    result = parse_planner_result(
+        """
+        {
+          "route_type": "single_agent",
+          "reason": "needs code inspection",
+          "refined_request": "Inspect runtime auth flow.",
+          "tasks": [
+            {
+              "id": "inspect_auth",
+              "title": "Inspect auth",
+              "instruction": "Read runtime/auth.py and summarize the auth flow.",
+              "skill_id": "project_explorer",
+              "model": "worker-model",
+              "mcp": ["project_filesystem_readonly"],
+              "read_set": ["runtime/auth.py"],
+              "sensitivity": "project_private",
+              "difficulty": "simple",
+              "placement": {
+                "planner_side": "local",
+                "executor_side": "local"
+              },
+              "evidence_requirements": [
+                "file_snapshot:runtime/auth.py"
+              ]
+            }
+          ]
+        }
+        """,
+        fallback_user_input="Inspect runtime auth flow.",
+    )
+
+    task = result.tasks[0]
+    assert task.sensitivity == "project_private"
+    assert task.difficulty == "simple"
+    assert task.placement == {"planner_side": "local", "executor_side": "local"}
+    assert task.evidence_requirements == ["file_snapshot:runtime/auth.py"]

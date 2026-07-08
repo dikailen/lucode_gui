@@ -41,4 +41,43 @@ describe("MarkdownContent", () => {
     expect(html).toContain('class="markdown-code"');
     expect(html).toContain("const status = &#x27;ok&#x27;;");
   });
+
+  it("hides successful audit trailers from the visible final answer", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(MarkdownContent, {
+        content: [
+          "### 结果",
+          "",
+          "已经完成页面检查。",
+          "",
+          "最终审核：通过",
+          "本轮执行满足计划验收要求。",
+          "",
+          "修改内容：",
+          "- Use embedded desktop browser: 读取页面摘要",
+          "",
+          "审核提醒（不影响通过）：",
+          "- 任务 desktop_browser_task 的语义验收未完全确认",
+        ].join("\n"),
+      }),
+    );
+
+    expect(html).toContain("已经完成页面检查");
+    expect(html).not.toContain("最终审核");
+    expect(html).not.toContain("修改内容");
+    expect(html).not.toContain("审核提醒");
+  });
+
+  it("preserves paragraph line breaks instead of merging long technical lines together", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(MarkdownContent, {
+        content: ["第一行说明", "selector: #app form input[name='query']", "URL: https://example.com/search?q=lucode"].join("\n"),
+      }),
+    );
+
+    expect(html).toContain("第一行说明");
+    expect(html).toContain("<br/>");
+    expect(html).toContain("selector:");
+    expect(html).toContain("https://example.com/search");
+  });
 });

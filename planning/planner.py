@@ -87,6 +87,7 @@ async def preview_plan(
     project_root: Path | str | None = None,
     run_context=None,
     memory_pack=None,
+    allow_project_scout: bool = True,
 ) -> tuple[object, PlannerResult]:
     """Run query refinement and planner preview without creating execution Agents."""
 
@@ -99,10 +100,14 @@ async def preview_plan(
     else:
         refined = build_refined_request_without_refiner(raw_user_input)
 
-    scout_context = scout_project_context_for_planning(
-        "\n".join([refined.raw_user_input, refined.refined_request]),
-        project_root=project_root,
-        run_context=run_context,
+    scout_context = (
+        scout_project_context_for_planning(
+            "\n".join([refined.raw_user_input, refined.refined_request]),
+            project_root=project_root,
+            run_context=run_context,
+        )
+        if allow_project_scout
+        else ""
     )
     planner = build_orchestrator_planner(planner_model, allowed_worker_models=allowed_worker_models)
     context_lines = [

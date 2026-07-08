@@ -1,5 +1,4 @@
 import os
-import hashlib
 import shutil
 import subprocess
 import zipfile
@@ -10,9 +9,11 @@ from mcp.server.fastmcp import FastMCP
 
 try:
     from mcp_servers.core.operation_log import append_operation_log
+    from runtime.consistency.commit_guard import assert_expected_file_sha256
     from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 except ModuleNotFoundError:
     from operation_log import append_operation_log
+    from runtime.consistency.commit_guard import assert_expected_file_sha256
     from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 
 
@@ -193,43 +194,19 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _strict_sha256_enabled() -> bool:
     raw = str(os.environ.get("WORKSPACE_EDIT_STRICT_SHA256") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off", "disable", "disabled"}
 
 
 def _verify_expected_sha256(target: Path, expected_sha256: str | None, *, require_for_existing: bool = False) -> None:
-    expected = str(expected_sha256 or "").strip().lower()
-    if not expected:
-        if require_for_existing and _strict_sha256_enabled() and target.exists() and target.is_file():
-            raise ValueError(
-                f"expected_sha256 is required for existing file {_relative_target(target)}. "
-                "Read the file first and pass its current SHA-256 digest before editing."
-            )
-        return
-    if not target.exists():
-        raise ValueError(
-            f"expected_sha256 was provided for {_relative_target(target)}, but the target does not exist"
-        )
-    if not target.is_file():
-        raise ValueError(f"expected_sha256 can only verify files: {_relative_target(target)}")
-    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
-        raise ValueError("expected_sha256 must be a 64-character lowercase hex SHA-256 digest")
-    current = _sha256_file(target)
-    if current != expected:
-        raise ValueError(
-            "expected_sha256 mismatch for "
-            f"{_relative_target(target)}: expected {expected}, current {current}. "
-            "The file changed after it was read; re-read the file before editing."
-        )
+    assert_expected_file_sha256(
+        _project_root(),
+        target,
+        expected_sha256=expected_sha256,
+        require_for_existing=require_for_existing,
+        strict=_strict_sha256_enabled(),
+    )
 
 
 def _parse_patch_paths(patch: str) -> list[Path]:

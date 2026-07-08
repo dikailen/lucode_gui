@@ -104,6 +104,8 @@ def audit_execution(
                     record.output_preview,
                     final_output,
                 ):
+                    if _desktop_browser_tool_evidence_satisfies(state, task, criterion):
+                        continue
                     message = f"任务 {task.id} 的语义验收未完全确认：{criterion}"
                     if _should_enforce_semantic_acceptance(task, record, criterion):
                         remaining_issues.append(message)
@@ -126,6 +128,8 @@ def audit_execution(
                             f"任务 {task.id} 的预期输出未出现：{needle}"
                         )
                 elif not _criterion_looks_satisfied(expected_text, record.output_preview, final_output):
+                    if _desktop_browser_tool_evidence_satisfies(state, task, expected_text):
+                        continue
                     message = f"任务 {task.id} 的预期输出语义未完全确认：{expected_text}"
                     if _should_enforce_semantic_acceptance(task, record, expected_text):
                         remaining_issues.append(message)
@@ -217,17 +221,16 @@ def _should_enforce_semantic_acceptance(task, record=None, criterion: str = "") 
 
 
 def _looks_like_desktop_browser_action_requirement(task, criterion: str = "") -> bool:
-    text = _normalize_text(
-        "\n".join(
-            [
-                str(criterion or ""),
-                str(getattr(task, "title", "") or ""),
-                str(getattr(task, "instruction", "") or ""),
-                " ".join(str(item or "") for item in list(getattr(task, "acceptance_criteria", []) or [])),
-                " ".join(str(item or "") for item in list(getattr(task, "expected_outputs", []) or [])),
-            ]
-        )
+    raw_text = "\n".join(
+        [
+            str(criterion or ""),
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "instruction", "") or ""),
+            " ".join(str(item or "") for item in list(getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item or "") for item in list(getattr(task, "expected_outputs", []) or [])),
+        ]
     )
+    text = _normalize_text(_strip_browser_non_action_policy(raw_text))
     if not text:
         return False
     action_markers = [
@@ -249,6 +252,285 @@ def _looks_like_desktop_browser_action_requirement(task, criterion: str = "") ->
         "selector",
     ]
     return any(_normalize_text(marker) in text for marker in action_markers)
+
+
+def _strip_browser_non_action_policy(value: str) -> str:
+    text = str(value or "")
+    policy_patterns = [
+        r"\ballowed\s+(?:browser\s+)?tools?\s*:[^.\n;；。]*",
+        r"\bonly\s+use\s+browser_click_element[^.\n;；。]*",
+        r"\bonly\s+use\s+browser_set_input_value[^.\n;；。]*",
+        r"\bonly\s+use\s+browser_submit_form[^.\n;；。]*",
+        r"\bmust\s+not\s+(?:call|use|click|fill|submit|modify|set|change|read)[^.\n;；。]*",
+        r"\bdo\s+not\s+(?:call|use|click|fill|submit|modify|set|change|read)[^.\n;；。]*",
+        r"\bdon't\s+(?:call|use|click|fill|submit|modify|set|change|read)[^.\n;；。]*",
+        r"\bnever\s+(?:call|use|click|fill|submit|modify|set|change|read)[^.\n;；。]*",
+        r"\bno\s+interactive\s+browser\s+tools?\s+were\s+used[^.\n;；。]*",
+        r"\bno\s+clicks?[^.\n;；。]*",
+        r"\bno\s+form\s+inputs?[^.\n;；。]*",
+        r"\bno\s+form\s+submissions?[^.\n;；。]*",
+        r"\bno\s+(?:project\s+files?|files?)\s+were\s+read[^.\n;；。]*",
+        r"\bno\s+(?:external\s+)?web\s+search\s+was\s+performed[^.\n;；。]*",
+        r"(?:不要|不得|不允许|禁止)\s*(?:调用|使用|点击|填写|填入|提交|读取|修改|设置|更改)[^.\n;；。]*",
+    ]
+    for pattern in policy_patterns:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    return text
+
+
+def _desktop_browser_tool_evidence_satisfies(state, task, requirement: str) -> bool:
+    if "desktop_browser" not in set(getattr(task, "mcp", []) or []):
+        return False
+    required = _desktop_browser_requirement(str(requirement or ""))
+    if not required["browser_related"]:
+        return False
+    evidence = _desktop_browser_tool_evidence(state, str(getattr(task, "id", "") or ""))
+    if not evidence["has_browser_event"]:
+        return False
+
+    selectors = required["selectors"]
+    if required["requires_click"] and not _selector_completed(evidence["clicked_selectors"], selectors):
+        return False
+    if required["requires_fill"] and not _selector_completed(evidence["filled_selectors"], selectors):
+        return False
+    if required["requires_submit"] and not _selector_completed(evidence["submitted_selectors"], selectors):
+        return False
+    if required["requires_approval"] and not _selector_completed(evidence["approved_selectors"], selectors):
+        return False
+    if required["requires_summary"] and evidence["summary_count"] < 1:
+        return False
+    if required["requires_navigation"] and not evidence["navigate_completed"]:
+        return False
+    return True
+
+
+def _desktop_browser_requirement(value: str) -> dict:
+    text = _strip_browser_non_action_policy(str(value or ""))
+    normalized = _normalize_text(text)
+    selectors = _selectors_in_text(text)
+
+    click_markers = [
+        "browser_click_element",
+        "click",
+        "selector",
+        "\u70b9\u51fb",
+        "\u9009\u62e9\u5668",
+    ]
+    fill_markers = [
+        "browser_set_input_value",
+        "set_input",
+        "setinput",
+        "fill",
+        "input",
+        "\u586b\u5199",
+        "\u586b\u5165",
+        "\u8f93\u5165",
+    ]
+    submit_markers = [
+        "browser_submit_form",
+        "submit",
+        "\u63d0\u4ea4",
+        "\u8868\u5355",
+    ]
+    approval_markers = [
+        "approval",
+        "approved",
+        "approve",
+        "toolapprovalpost",
+        "\u5ba1\u6279",
+        "\u6279\u51c6",
+        "\u6388\u6743",
+        "\u7528\u6237\u6279\u51c6",
+    ]
+    summary_markers = [
+        "browser_get_page_summary",
+        "summary",
+        "title",
+        "url",
+        "visible",
+        "element",
+        "page",
+        "queuepanel",
+        "\u6458\u8981",
+        "\u6807\u9898",
+        "\u9875\u9762",
+        "\u53ef\u89c1",
+        "\u5143\u7d20",
+        "\u961f\u5217",
+        "\u9762\u677f",
+    ]
+    navigation_markers = [
+        "browser_navigate",
+        "navigate",
+        "openhttp",
+        "http://",
+        "https://",
+        "\u6253\u5f00",
+        "\u5bfc\u822a",
+    ]
+
+    requires_click = bool(selectors) or _contains_normalized_marker(normalized, click_markers)
+    requires_fill = _contains_normalized_marker(normalized, fill_markers)
+    requires_submit = _contains_normalized_marker(normalized, submit_markers)
+    requires_approval = _contains_normalized_marker(normalized, approval_markers)
+    requires_summary = _contains_normalized_marker(normalized, summary_markers)
+    requires_navigation = _contains_normalized_marker(normalized, navigation_markers)
+    browser_related = any(
+        [
+            bool(selectors),
+            requires_click,
+            requires_fill,
+            requires_submit,
+            requires_approval,
+            requires_summary,
+            requires_navigation,
+            "browser_" in normalized,
+        ]
+    )
+    return {
+        "browser_related": browser_related,
+        "selectors": selectors,
+        "requires_click": requires_click,
+        "requires_fill": requires_fill,
+        "requires_submit": requires_submit,
+        "requires_approval": requires_approval,
+        "requires_summary": requires_summary,
+        "requires_navigation": requires_navigation,
+    }
+
+
+def _desktop_browser_tool_evidence(state, task_id: str) -> dict:
+    evidence = {
+        "has_browser_event": False,
+        "navigate_completed": False,
+        "summary_count": 0,
+        "clicked_selectors": set(),
+        "filled_selectors": set(),
+        "submitted_selectors": set(),
+        "approved_selectors": set(),
+    }
+    event_bus = getattr(state, "event_bus", None)
+    if event_bus is None or not hasattr(event_bus, "snapshot"):
+        return evidence
+    try:
+        events = event_bus.snapshot()
+    except Exception:
+        return evidence
+
+    for event in events:
+        event_task_id = str(getattr(event, "task_id", "") or "")
+        if task_id and event_task_id and event_task_id != task_id:
+            continue
+        payload = getattr(event, "payload", {}) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        tool = str(
+            payload.get("tool_name")
+            or payload.get("tool")
+            or payload.get("action")
+            or getattr(event, "message", "")
+            or ""
+        )
+        if "browser_" not in tool:
+            continue
+        evidence["has_browser_event"] = True
+        selector = _event_selector(payload)
+        event_type = str(getattr(event, "event_type", "") or "")
+        if event_type == "ToolApprovalPost" and _event_approved(event, payload):
+            if selector:
+                evidence["approved_selectors"].add(selector)
+            else:
+                evidence["approved_selectors"].add("*")
+            continue
+        if event_type != "ToolInvoked" or not _event_completed(event, payload):
+            continue
+        if "browser_navigate" in tool:
+            evidence["navigate_completed"] = True
+        elif "browser_get_page_summary" in tool:
+            evidence["summary_count"] += 1
+        elif "browser_click_element" in tool:
+            evidence["clicked_selectors"].add(selector or "*")
+        elif "browser_set_input_value" in tool:
+            evidence["filled_selectors"].add(selector or "*")
+        elif "browser_submit_form" in tool:
+            evidence["submitted_selectors"].add(selector or "*")
+    return evidence
+
+
+def _event_selector(payload: dict) -> str:
+    arguments = payload.get("arguments_summary")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    for key in ("selector", "css_selector", "target_selector", "form_selector"):
+        value = _normalize_selector(arguments.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _event_completed(event, payload: dict) -> bool:
+    text = _normalize_text(
+        " ".join(
+            [
+                str(getattr(event, "status", "") or ""),
+                str(payload.get("outcome") or ""),
+                str(payload.get("decision") or ""),
+                str(payload.get("event_type") or ""),
+            ]
+        )
+    )
+    return any(marker in text for marker in ("completed", "success", "succeeded", "ok"))
+
+
+def _event_approved(event, payload: dict) -> bool:
+    text = _normalize_text(
+        " ".join(
+            [
+                str(getattr(event, "status", "") or ""),
+                str(payload.get("outcome") or ""),
+                str(payload.get("decision") or ""),
+            ]
+        )
+    )
+    return any(marker in text for marker in ("approved", "approvedonce", "allow", "allowed"))
+
+
+def _selector_completed(actual_selectors, required_selectors: list[str]) -> bool:
+    actual = {_normalize_selector(item) for item in actual_selectors if _normalize_selector(item)}
+    if not required_selectors:
+        return bool(actual)
+    if "*" in actual:
+        return True
+    for required in required_selectors:
+        normalized_required = _normalize_selector(required)
+        if not normalized_required:
+            continue
+        if not any(
+            normalized_required == item
+            or normalized_required in item
+            or item in normalized_required
+            for item in actual
+        ):
+            return False
+    return True
+
+
+def _selectors_in_text(value: str) -> list[str]:
+    selectors: list[str] = []
+    selector_pattern = r"#[A-Za-z][A-Za-z0-9_-]*|\.[A-Za-z][A-Za-z0-9_-]*|\[[^\]\n]{2,}\]"
+    for match in re.findall(selector_pattern, str(value or "")):
+        selector = _normalize_selector(match)
+        if selector and selector not in selectors:
+            selectors.append(selector)
+    return selectors
+
+
+def _normalize_selector(value) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().strip("`'\""))
+
+
+def _contains_normalized_marker(text: str, markers: list[str]) -> bool:
+    return any(_normalize_text(marker) in text for marker in markers)
 
 
 def _desktop_browser_action_stopped_at_prose_approval(task, record, final_output: str) -> bool:

@@ -137,3 +137,14 @@ description: 动态多智能体系统的主脑规划技能。根据优化后的�
   }
 }
 ```
+
+## P7 Reliability Fields
+
+For every task in `tasks`, include these optional runtime contract fields when you can infer them without guessing:
+
+- `sensitivity`: one of `public`, `project_private`, `secret`, `local_only`.
+- `difficulty`: one of `simple`, `moderate`, `complex`, `long_context`.
+- `placement`: an object such as `{"planner_side": "local|cloud", "executor_side": "local|edge|cloud"}`. This is a hint only; runtime ComputePlacementGuard is authoritative.
+- `evidence_requirements`: a short list of runtime-owned evidence the worker should produce, such as `file_snapshot:path`, `tool_output:tool`, `command_output:command`, `browser_summary:url`, or `timeline_event:event_type`.
+
+Do not invent evidence refs. `evidence_requirements` describes what evidence should be produced later; it is not proof that the evidence already exists.

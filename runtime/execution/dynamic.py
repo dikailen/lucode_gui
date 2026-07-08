@@ -80,6 +80,13 @@ from runtime.safety.privacy import PrivacyPolicy
 from runtime.safety.repair_loop import build_repair_request, should_retry
 from runtime.config.settings import RuntimeSettings
 from runtime.config.model_selection import model_usable_for_task
+from runtime.compute.context_sources import labels_from_memory_pack
+from runtime.compute.placement_guard import ComputePlacementGuard
+from runtime.compute.placement_policy import (
+    ComputePlacementViolation,
+    observe_compute_placement_for_plan,
+)
+from runtime.consistency.timeline import reliability_flags_from_env
 from runtime.events import ExecutionEventBus
 from runtime.ui.plan_display import planning_status, render_compact_plan_summary
 
@@ -177,14 +184,50 @@ async def _execute_dynamic_attempt(
     event_bus=None,
 ) -> tuple[str, object | None]:
     visible_input = str(display_input or raw_user_input or "").strip()
-    refiner_model_id = (
-        settings.select_model_id(model_registry, "query_refiner") if settings.query_refiner_enabled else None
+    compute_placement_mode = reliability_flags_from_env().compute_placement
+    planner_input = raw_user_input
+    planner_refiner_enabled = settings.query_refiner_enabled
+    planner_allow_project_scout = True
+    planner_placement_decision = None
+    memory_pack = _resolve_planner_memory_pack(project_root, flywheel, raw_user_input)
+    compute_guard = ComputePlacementGuard(
+        model_registry=model_registry,
+        privacy_mode=settings.privacy_mode,
+        mode=compute_placement_mode,
+        context_labels=labels_from_memory_pack(memory_pack),
     )
-    planner_model_id = settings.select_model_id(model_registry, "orchestrator")
+    try:
+        if compute_placement_mode == "enforce":
+            planner_placement_decision = compute_guard.guard_planner_request(
+                raw_user_input,
+                settings.model_priority_for("orchestrator"),
+            )
+            planner_model_id = planner_placement_decision.model_id
+            planner_input = compute_guard.guard_planning_packet(planner_placement_decision)
+            planner_refiner_enabled = settings.query_refiner_enabled and planner_placement_decision.refiner_enabled
+            planner_allow_project_scout = planner_placement_decision.allow_project_scout
+        else:
+            planner_model_id = settings.select_model_id(model_registry, "orchestrator")
+    except ComputePlacementViolation as exc:
+        event_bus = event_bus or ExecutionEventBus()
+        event_bus.emit(
+            "ComputePlacementBlocked",
+            str(exc),
+            mode=settings.execution_mode,
+            agent="orchestrator",
+            status="blocked",
+            payload={"privacy_mode": settings.privacy_mode, "reason": str(exc)[:300]},
+        )
+        return DynamicExecutionResult(
+            _format_compute_placement_error(exc),
+            run_context_summary=_render_event_summary(event_bus),
+        ), None
+    refiner_model_id = (
+        settings.select_model_id(model_registry, "query_refiner") if planner_refiner_enabled else None
+    )
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
     event_bus = event_bus or ExecutionEventBus()
     planning_run_context = RunContextStore(project_root) if project_root else None
-    memory_pack = _resolve_planner_memory_pack(project_root, flywheel, raw_user_input)
     event_bus.emit(
         "PlanningStarted",
         "开始规划本轮任务",
@@ -195,15 +238,16 @@ async def _execute_dynamic_attempt(
     try:
         with planning_status(visible_input, mode=settings.execution_mode, enabled=show_plan):
             refined, plan = await preview_plan(
-                raw_user_input,
+                planner_input,
                 refiner_model=model_registry.get_model(refiner_model_id) if refiner_model_id else None,
                 planner_model=model_registry.get_model(planner_model_id),
                 hooks=hooks,
-                refiner_enabled=settings.query_refiner_enabled,
+                refiner_enabled=planner_refiner_enabled,
                 allowed_worker_models=settings.worker_model_pool(model_registry),
                 project_root=project_root,
                 run_context=planning_run_context,
                 memory_pack=memory_pack,
+                allow_project_scout=planner_allow_project_scout,
             )
     except Exception as exc:
         event_bus.emit(
@@ -218,7 +262,26 @@ async def _execute_dynamic_attempt(
             format_planning_error(exc, planner_model_id=planner_model_id),
             run_context_summary=_render_event_summary(event_bus),
         ), None
-    _apply_executor_model_defaults(plan, settings, model_registry)
+    try:
+        _apply_executor_model_defaults_with_mode(
+            plan,
+            settings,
+            model_registry,
+            compute_placement_mode=compute_placement_mode,
+        )
+    except ComputePlacementViolation as exc:
+        event_bus.emit(
+            "ComputePlacementBlocked",
+            str(exc),
+            mode=settings.execution_mode,
+            agent="supervisor",
+            status="blocked",
+            payload={"privacy_mode": settings.privacy_mode, "reason": str(exc)[:300]},
+        )
+        return DynamicExecutionResult(
+            _format_compute_placement_error(exc),
+            run_context_summary=_render_event_summary(event_bus),
+        ), None
     plan_before_normalize = plan
     plan, normalization_notes = normalize_plan_for_execution(plan)
     plan_was_normalized = plan is not plan_before_normalize
@@ -241,6 +304,21 @@ async def _execute_dynamic_attempt(
     run_state.model_labels = _model_label_map(
         model_registry,
         [planner_model_id, synthesizer_model_id, *(getattr(task, "model", "") for task in plan.tasks)],
+    )
+    if planner_placement_decision is not None:
+        run_state.emit_event(
+            "ComputePlacementEnforced",
+            "compute placement enforced for planner",
+            mode=settings.execution_mode,
+            agent="orchestrator",
+            status="completed",
+            payload=planner_placement_decision.to_dict(),
+        )
+    _record_compute_placement_observation(
+        plan,
+        refined.refined_request,
+        run_state,
+        privacy_mode=settings.privacy_mode,
     )
     run_state.output_controller.enter_planning("planning completed")
     if plan_was_normalized:
@@ -466,6 +544,34 @@ def _full_mode_approval_policy_factory(execution_mode: str):
     return FullModeApprovalPolicy.from_task
 
 
+def _record_compute_placement_observation(
+    plan,
+    refined_request: str,
+    run_state: PipelineRunState | None,
+    *,
+    privacy_mode: str,
+    mode: str | None = None,
+) -> None:
+    if run_state is None:
+        return
+    try:
+        result = observe_compute_placement_for_plan(
+            plan,
+            refined_request,
+            privacy_mode=privacy_mode,
+            mode=mode,
+        )
+        run_state.record_compute_placement_result(result)
+    except Exception as exc:
+        run_state.emit_event(
+            "ComputePlacementFailed",
+            str(exc) or exc.__class__.__name__,
+            agent="runtime",
+            status="warning",
+            payload={"reason": str(exc)[:240]},
+        )
+
+
 def _render_event_summary(event_bus) -> str:
     if event_bus is None or not hasattr(event_bus, "snapshot"):
         return ""
@@ -478,6 +584,16 @@ def _render_event_summary(event_bus) -> str:
         return render_execution_events(events, limit=8)
     except Exception:
         return ""
+
+
+def _format_compute_placement_error(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    return (
+        "Compute placement blocked this run before model/tool execution.\n"
+        f"Reason: {message}\n"
+        "What to do: configure a local model for sensitive/private planning or a tool-capable local executor, "
+        "or turn off LUCODE_COMPUTE_PLACEMENT=enforce if you are intentionally running the legacy route."
+    )
 
 
 def format_planning_error(exc: Exception, planner_model_id: str = "") -> str:
@@ -498,7 +614,37 @@ def format_planning_error(exc: Exception, planner_model_id: str = "") -> str:
     )
 
 
-def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
+def _apply_executor_model_defaults_with_mode(
+    plan,
+    settings,
+    model_registry,
+    *,
+    compute_placement_mode: str,
+) -> None:
+    try:
+        _apply_executor_model_defaults(
+            plan,
+            settings,
+            model_registry,
+            compute_placement_mode=compute_placement_mode,
+        )
+    except TypeError as exc:
+        if (
+            str(compute_placement_mode or "").strip().lower() != "enforce"
+            and "compute_placement_mode" in str(exc)
+        ):
+            _apply_executor_model_defaults(plan, settings, model_registry)
+            return
+        raise
+
+
+def _apply_executor_model_defaults(
+    plan,
+    settings,
+    model_registry,
+    *,
+    compute_placement_mode: str = "off",
+) -> None:
     """Fill empty / invalid / out-of-pool task.model, distributing across models.
 
     Strategy:
@@ -527,6 +673,16 @@ def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
     if not candidate_ids:
         return
 
+    enforce_compute_placement = str(compute_placement_mode or "").strip().lower() == "enforce"
+    compute_guard = (
+        ComputePlacementGuard(
+            model_registry=model_registry,
+            privacy_mode=privacy_mode,
+            mode=compute_placement_mode,
+        )
+        if enforce_compute_placement
+        else None
+    )
     rr_index = 0
     for task in plan.tasks:
         needs_tools = bool(task.mcp)
@@ -534,25 +690,52 @@ def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
         if (
             task.model
             and in_pool
-            and _task_model_is_usable(
+            and _executor_model_allowed_for_mode(
                 model_registry,
+                task,
                 task.model,
                 privacy_mode=privacy_mode,
                 requires_tools=needs_tools,
+                compute_guard=compute_guard,
             )
         ):
             continue
         chosen = _next_usable_candidate(
-            candidate_ids, rr_index, model_registry, privacy_mode, needs_tools
+            candidate_ids,
+            rr_index,
+            model_registry,
+            privacy_mode,
+            task,
+            needs_tools,
+            compute_guard,
         )
         if chosen is not None:
-            task.model = chosen[0]
-            rr_index = chosen[1] + 1
+            task.model = chosen.model_id
+            rr_index = chosen.candidate_index + 1
+        elif str(compute_placement_mode or "").strip().lower() == "enforce":
+            raise ComputePlacementViolation(
+                "Compute placement blocked: no configured execution model satisfies "
+                f"task={getattr(task, 'id', '') or 'unknown'}; "
+                f"requires_tools={needs_tools}; privacy={privacy_mode}."
+            )
 
 
 def _next_usable_candidate(
-    candidate_ids, start, model_registry, privacy_mode, needs_tools
-) -> tuple[str, int] | None:
+    candidate_ids,
+    start,
+    model_registry,
+    privacy_mode,
+    task,
+    needs_tools,
+    compute_guard,
+):
+    if compute_guard is not None:
+        return compute_guard.select_executor_model(
+            task,
+            candidate_ids,
+            start_index=start,
+            requires_tools=needs_tools,
+        )
     count = len(candidate_ids)
     for offset in range(count):
         idx = (start + offset) % count
@@ -563,8 +746,29 @@ def _next_usable_candidate(
             privacy_mode=privacy_mode,
             requires_tools=needs_tools,
         ):
-            return model_id, idx
+            from types import SimpleNamespace
+
+            return SimpleNamespace(model_id=model_id, candidate_index=idx)
     return None
+
+
+def _executor_model_allowed_for_mode(
+    model_registry,
+    task,
+    model_id: str,
+    *,
+    privacy_mode: str,
+    requires_tools: bool,
+    compute_guard,
+) -> bool:
+    if compute_guard is not None:
+        return compute_guard.executor_model_allowed(task, model_id, requires_tools=requires_tools)
+    return _task_model_is_usable(
+        model_registry,
+        model_id,
+        privacy_mode=privacy_mode,
+        requires_tools=requires_tools,
+    )
 
 
 def _model_label_map(model_registry, model_ids) -> dict[str, str]:

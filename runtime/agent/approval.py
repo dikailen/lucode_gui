@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 
 from runtime.agent.approval_policy import FullModeApprovalPolicy
 from runtime.agent.runner import run_agent_once
+from runtime.agent.tool_invocation_guard import ToolInvocationGuard
+from runtime.agent.tool_invocation_guard import approval_tool_rule as _guard_approval_tool_rule
 from runtime.common.text_utils import sanitize_text
 from runtime.hooks import record_post_tool_use, record_pre_tool_use
 from runtime.safety.command_analyzer import analyze_command, render_command_analysis
@@ -29,9 +31,7 @@ async def run_with_approval(
 ):
     """Run an agent and ask the user before executing approval-required tools."""
 
-    once_approved_signatures = set()
-    approved_tools_for_session = set()
-    approved_tool_rules = set()
+    guard = ToolInvocationGuard(approval_policy=approval_policy)
     result = await run_agent_once(
         agent,
         run_input,
@@ -46,10 +46,10 @@ async def run_with_approval(
 
         for item in result.interruptions:
             tool_name = item.qualified_name or item.name
-            signature = (tool_name, item.arguments or "")
-            tool_rule = approval_tool_rule(tool_name)
+            invocation = guard.build_invocation(tool_name, item.arguments)
+            tool_rule = invocation.tool_rule
             pre_event = record_pre_tool_use(hooks, tool_name, item.arguments, tool_rule=tool_rule)
-            policy_decision = approval_policy.decide(tool_name, item.arguments) if approval_policy is not None else None
+            policy_decision = guard.decide_policy(invocation)
             if policy_decision is not None and getattr(policy_decision, "requires_supervisor", False):
                 supervisor_decision = await _decide_with_supervisor_agent(
                     supervisor_approval_decider,
@@ -111,10 +111,7 @@ async def run_with_approval(
                     reason=policy_decision.reason or "full_supervisor_policy_rejected",
                 )
                 continue
-            if (
-                tool_name in approved_tools_for_session
-                or tool_rule in approved_tool_rules
-            ):
+            if guard.session_approval_allows(invocation):
                 state.approve(item)
                 record_post_tool_use(
                     hooks,
@@ -124,7 +121,7 @@ async def run_with_approval(
                     reason="session_or_rule_approval",
                 )
                 continue
-            if signature in once_approved_signatures:
+            if guard.once_approval_was_used(invocation):
                 state.reject(
                     item,
                     rejection_message=(
@@ -166,7 +163,7 @@ async def run_with_approval(
                     answer = ""
             if answer in {"yes", "y", "once", "o", "1"}:
                 state.approve(item)
-                once_approved_signatures.add(signature)
+                guard.mark_once_approved(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -176,7 +173,7 @@ async def run_with_approval(
                 )
             elif answer in {"session", "s", "all", "2"}:
                 state.approve(item)
-                approved_tools_for_session.add(tool_name)
+                guard.mark_session_tool_approved(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -186,7 +183,7 @@ async def run_with_approval(
                 )
             elif answer in {"rule", "r", "3"}:
                 state.approve(item)
-                approved_tool_rules.add(tool_rule)
+                guard.mark_session_rule_approved(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -315,12 +312,7 @@ def approval_prompt() -> str:
 
 
 def approval_tool_rule(tool_name: str) -> str:
-    name = str(tool_name or "")
-    if "." in name:
-        return name.split(".", 1)[0]
-    if "_" in name:
-        return name.split("_", 1)[0]
-    return name
+    return _guard_approval_tool_rule(tool_name)
 
 
 def format_tool_arguments(arguments):
