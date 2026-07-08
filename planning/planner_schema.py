@@ -99,6 +99,7 @@ class PlannedTask:
     instruction: str
     skill_id: str
     model: str
+    bound_skill_ids: list[str] = field(default_factory=list)
     mcp: list[str] = field(default_factory=list)
     parallel_group: int = 1
     depends_on: list[str] = field(default_factory=list)
@@ -197,6 +198,7 @@ def parse_planner_result(text: str, fallback_user_input: str = "") -> PlannerRes
             instruction=str(item.get("instruction") or ""),
             skill_id=str(item.get("skill_id") or ""),
             model=str(item.get("model") or ""),
+            bound_skill_ids=_string_list(item.get("bound_skill_ids")),
             mcp=list(item.get("mcp") or []),
             parallel_group=int(item.get("parallel_group") or 1),
             depends_on=[str(value) for value in list(item.get("depends_on") or []) if str(value).strip()],
@@ -477,6 +479,7 @@ def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = 
         _preserve_web_search_constraints(result, fallback_user_input)
 
     _preserve_remote_lookup_constraints(result, fallback_user_input)
+    _apply_skill_interface_task_bindings(result)
 
     if result.route_type == "multi_agent":
         if not result.needs_synthesis:
@@ -829,6 +832,34 @@ def _dedupe(values: list[str]) -> list[str]:
             result.append(value)
             seen.add(value)
     return result
+
+
+def _string_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return []
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = value
+    else:
+        raw_values = [value]
+    return [text for text in (str(item).strip() for item in raw_values) if text]
+
+
+def _apply_skill_interface_task_bindings(result: PlannerResult) -> None:
+    interface = result.skill_interface if isinstance(result.skill_interface, dict) else {}
+    bindings = interface.get("task_bindings")
+    if not isinstance(bindings, dict):
+        return
+
+    tasks_by_id = {str(task.id): task for task in result.tasks}
+    for task_id, skill_ids in bindings.items():
+        task = tasks_by_id.get(str(task_id))
+        if task is None:
+            continue
+        task.bound_skill_ids = _dedupe([*task.bound_skill_ids, *_string_list(skill_ids)])
 
 
 def _strip_model_reasoning_noise(text: str) -> str:

@@ -8,6 +8,10 @@ from runtime.agents.sdk import agent_class
 from skills.loader import load_skill, skill_runtime_metadata
 
 
+MAX_BOUND_SKILL_BODIES = 2
+MAX_BOUND_SKILL_BODY_CHARS = 6000
+
+
 class AgentFactory:
     """Create temporary execution Agents from planner tasks."""
 
@@ -92,6 +96,7 @@ class AgentFactory:
             self._role_contract_for_mode(execution_mode)
             + load_skill(task.skill_id)
             + self._skill_runtime_context(task)
+            + self._bound_skill_context(task)
             + "\n\n## 本次临时任务\n"
             + task.instruction
             + self._execution_contract(task)
@@ -177,6 +182,56 @@ class AgentFactory:
                 "do not say the workspace skill was not used just because you did not read .lucode during this task."
             )
         return "\n".join(lines)
+
+    def _bound_skill_context(self, task: PlannedTask) -> str:
+        skill_ids = self._normalized_bound_skill_ids(task)
+        if not skill_ids:
+            return ""
+
+        sections = [
+            "\n\n## Bound Skill Context",
+            (
+                "These additional Skill bodies were explicitly bound through "
+                "Planner skill_interface.task_bindings. They are additive context; "
+                "do not rewrite or replace task.skill_id."
+            ),
+        ]
+        injected = 0
+        for skill_id in skill_ids:
+            if injected >= MAX_BOUND_SKILL_BODIES:
+                break
+            try:
+                body = load_skill(skill_id)
+            except Exception:
+                continue
+            sections.append(
+                f"\n### Bound Skill: {skill_id}\n{self._truncate_bound_skill_body(body)}"
+            )
+            injected += 1
+
+        if injected == 0:
+            return ""
+        return "\n".join(sections)
+
+    @staticmethod
+    def _normalized_bound_skill_ids(task: PlannedTask) -> list[str]:
+        primary = str(getattr(task, "skill_id", "") or "").strip()
+        seen = {primary} if primary else set()
+        result: list[str] = []
+        for value in list(getattr(task, "bound_skill_ids", []) or []):
+            skill_id = str(value or "").strip()
+            if not skill_id or skill_id in seen:
+                continue
+            result.append(skill_id)
+            seen.add(skill_id)
+        return result
+
+    @staticmethod
+    def _truncate_bound_skill_body(body) -> str:
+        text = str(body or "")
+        if len(text) <= MAX_BOUND_SKILL_BODY_CHARS:
+            return text
+        return text[:MAX_BOUND_SKILL_BODY_CHARS] + "\n...[truncated]"
 
     def _execution_contract(self, task: PlannedTask) -> str:
         lines = []
