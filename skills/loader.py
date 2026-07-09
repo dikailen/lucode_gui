@@ -3,6 +3,7 @@ from pathlib import Path
 from catalog_system.refresher import build_skill_catalog
 from runtime.common.text_utils import sanitize_text
 from runtime.config.app_home import get_app_home
+from runtime.config.skill_policy import INTERNAL_SKILLS, RULE_ONLY_SKILLS
 from skills.registry import SKILLS
 
 
@@ -62,13 +63,25 @@ def skill_runtime_metadata(skill_name: str) -> dict:
             "source": item.get("source") or "registry",
             "summary": item.get("summary_zh") or item.get("description") or item.get("display_name_zh") or "",
             "path": item.get("path") or "",
+            "enabled": item.get("enabled", True) is not False,
+            "assignable": bool(item.get("assignable", True)),
+            "internal": bool(item.get("internal", False)),
+            "blocked": bool(item.get("blocked", False)),
+            "metadata_status": str(item.get("metadata_status") or "ready"),
         }
     if skill_name in SKILLS:
+        internal = skill_name in INTERNAL_SKILLS
+        rule_only = skill_name in RULE_ONLY_SKILLS
         return {
             "id": skill_name,
             "source": "registry",
             "summary": SKILLS[skill_name].get("description") or "",
             "path": SKILLS[skill_name].get("folder") or "",
+            "enabled": True,
+            "assignable": not internal and not rule_only,
+            "internal": internal,
+            "blocked": False,
+            "metadata_status": "ready",
         }
     raise KeyError(f"Unknown skill: {skill_name}")
 

@@ -850,8 +850,17 @@ def _string_list(value) -> list[str]:
 
 def _apply_skill_interface_task_bindings(result: PlannerResult) -> None:
     interface = result.skill_interface if isinstance(result.skill_interface, dict) else {}
+    candidate_ids = set(_string_list(interface.get("candidate_skill_ids")))
+    adopted_ids = set(_string_list(interface.get("adopted_skill_ids")))
+    allowed_ids = set(adopted_ids)
+    if candidate_ids:
+        allowed_ids &= candidate_ids
+
+    for task in result.tasks:
+        task.bound_skill_ids = []
+
     bindings = interface.get("task_bindings")
-    if not isinstance(bindings, dict):
+    if not allowed_ids or not isinstance(bindings, dict):
         return
 
     tasks_by_id = {str(task.id): task for task in result.tasks}
@@ -859,7 +868,8 @@ def _apply_skill_interface_task_bindings(result: PlannerResult) -> None:
         task = tasks_by_id.get(str(task_id))
         if task is None:
             continue
-        task.bound_skill_ids = _dedupe([*task.bound_skill_ids, *_string_list(skill_ids)])
+        bound_ids = [skill_id for skill_id in _string_list(skill_ids) if skill_id in allowed_ids]
+        task.bound_skill_ids = _dedupe([*task.bound_skill_ids, *bound_ids])
 
 
 def _strip_model_reasoning_noise(text: str) -> str:

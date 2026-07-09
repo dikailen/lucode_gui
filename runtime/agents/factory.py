@@ -200,6 +200,8 @@ class AgentFactory:
         for skill_id in skill_ids:
             if injected >= MAX_BOUND_SKILL_BODIES:
                 break
+            if not self._is_bound_skill_injectable(skill_id):
+                continue
             try:
                 body = load_skill(skill_id)
             except Exception:
@@ -225,6 +227,23 @@ class AgentFactory:
             result.append(skill_id)
             seen.add(skill_id)
         return result
+
+    @staticmethod
+    def _is_bound_skill_injectable(skill_id: str) -> bool:
+        try:
+            meta = skill_runtime_metadata(skill_id)
+        except Exception:
+            return False
+        if not isinstance(meta, dict):
+            return False
+        if meta.get("enabled") is False:
+            return False
+        if meta.get("assignable") is False:
+            return False
+        if meta.get("internal") is True or meta.get("blocked") is True:
+            return False
+        metadata_status = str(meta.get("metadata_status") or "ready").strip().lower()
+        return metadata_status in {"", "ready"}
 
     @staticmethod
     def _truncate_bound_skill_body(body) -> str:

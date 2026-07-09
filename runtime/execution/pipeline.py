@@ -18,6 +18,7 @@ from runtime.safety.verification_commands import (
     extract_explicit_verification_commands,
     format_verification_command_lock,
 )
+from runtime.skill_library.usage import SkillUsageTracker
 from runtime.ui.output_controller import OutputController
 
 
@@ -142,6 +143,8 @@ class PipelineRunState:
     accepted_evidence: dict[str, Any] = field(default_factory=dict)
     compute_placement_mode: str = "off"
     compute_placement_decisions: list[Any] = field(default_factory=list)
+    project_root: Path | None = None
+    skill_usage_tracker: SkillUsageTracker | None = None
 
     @classmethod
     def create(
@@ -162,7 +165,7 @@ class PipelineRunState:
         resolved_run_context = run_context or (RunContextStore(project_root, timeline=timeline) if project_root else None)
         if resolved_run_context is not None and hasattr(resolved_run_context, "attach_timeline"):
             resolved_run_context.attach_timeline(timeline)
-        return cls(
+        state = cls(
             user_request=user_request,
             route_type=plan.route_type,
             reason=plan.reason,
@@ -187,7 +190,11 @@ class PipelineRunState:
             memory_pack=memory_pack,
             worker_reports=list(worker_reports or []),
             timeline=timeline,
+            project_root=project_root,
+            skill_usage_tracker=SkillUsageTracker(project_root) if project_root else None,
         )
+        state._record_skill_planner_rejections(plan)
+        return state
 
     def record_gate(self, decision: GateDecision) -> None:
         self.gate = decision
@@ -220,6 +227,7 @@ class PipelineRunState:
         record.error = ""
         record.output_preview = _preview(output)
         self._clear_task_error(task.id)
+        self._record_bound_skill_task_usage(task, "success", reason="task completed")
         if self._all_tasks_terminal():
             if self.errors or any(str(getattr(item, "status", "")) == "failed" for item in self.tasks):
                 self.output_controller.enter_failed("task failed")
@@ -240,6 +248,7 @@ class PipelineRunState:
             record.status = "failed"
             record.error = message
         self.errors.append(f"{task.id}: {message}")
+        self._record_bound_skill_task_usage(task, "failure", reason=message)
         self.output_controller.enter_failed(message)
         self.emit_event(
             "TaskFailed",
@@ -333,6 +342,57 @@ class PipelineRunState:
     def _clear_task_error(self, task_id: str) -> None:
         prefix = f"{task_id}:"
         self.errors = [error for error in self.errors if not str(error).startswith(prefix)]
+
+    def _record_skill_planner_rejections(self, plan: PlannerResult) -> None:
+        tracker = self.skill_usage_tracker
+        if tracker is None:
+            return
+        interface = plan.skill_interface if isinstance(plan.skill_interface, dict) else {}
+        candidate_ids = set(_clean_string_list(interface.get("candidate_skill_ids")))
+        adopted_ids = set(_clean_string_list(interface.get("adopted_skill_ids")))
+        rejected_ids = set(_clean_string_list(interface.get("rejected_skill_ids")))
+        rejected_ids.update(candidate_ids - adopted_ids)
+        rejected_ids.difference_update(adopted_ids)
+        if not rejected_ids:
+            return
+        reason_map = interface.get("rejection_reasons")
+        if not isinstance(reason_map, dict):
+            reason_map = {}
+        for skill_id in sorted(rejected_ids):
+            try:
+                tracker.record(
+                    skill_id=skill_id,
+                    query=self.user_request,
+                    task_id="",
+                    result="rejected_by_planner",
+                    reason=str(reason_map.get(skill_id) or "candidate not adopted by planner"),
+                )
+            except Exception:
+                continue
+
+    def _record_bound_skill_task_usage(self, task: PlannedTask, result: str, *, reason: str) -> None:
+        tracker = self.skill_usage_tracker
+        if tracker is None:
+            return
+        bound_skill_ids = _clean_string_list(getattr(task, "bound_skill_ids", None))
+        if not bound_skill_ids:
+            return
+        record = self._find_task(str(getattr(task, "id", "") or ""))
+        files_touched = list(record.write_intent) if record else list(getattr(task, "write_intent", []) or [])
+        verification = record.verification if record and record.verification else []
+        for skill_id in bound_skill_ids:
+            try:
+                tracker.record(
+                    skill_id=skill_id,
+                    query=self.user_request,
+                    task_id=str(getattr(task, "id", "") or ""),
+                    result=result,
+                    files_touched=files_touched,
+                    verification=verification,
+                    reason=reason,
+                )
+            except Exception:
+                continue
 
     def emit_event(self, event_type: str, message: str = "", **kwargs: Any):
         try:
@@ -646,6 +706,25 @@ def _preview(value: str, limit: int = 800) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"...[truncated {len(value) - limit} chars]"
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            items.append(text)
+            seen.add(text)
+    return items
 
 
 def _append_gate_instruction(

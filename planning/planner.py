@@ -1,4 +1,6 @@
+import re
 from pathlib import Path
+from types import SimpleNamespace
 
 from catalog_system.loader import (
     compact_cli_safety_rules_for_prompt,
@@ -17,6 +19,7 @@ from planning.planner_schema import (
 from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class, runner_class
 from runtime.execution.inline_context import _safe_inline_project_file, _read_project_file_excerpt
+from runtime.skill_library.resolver import SkillResolver
 from skills.loader import load_skill
 
 
@@ -30,6 +33,7 @@ PLANNING_SCOUT_FILE_NAMES = (
     "main.py",
     "app.py",
 )
+PLANNING_SKILL_CANDIDATE_LIMIT = 5
 
 
 def build_query_refiner(model):
@@ -88,6 +92,8 @@ async def preview_plan(
     run_context=None,
     memory_pack=None,
     allow_project_scout: bool = True,
+    skill_resolver=None,
+    allow_skill_resolver: bool = True,
 ) -> tuple[object, PlannerResult]:
     """Run query refinement and planner preview without creating execution Agents."""
 
@@ -127,6 +133,21 @@ async def preview_plan(
     rendered_memory = _render_memory_pack(memory_pack)
     if rendered_memory:
         context_lines.append(rendered_memory + "\n\n")
+    rendered_skill_candidates = _render_skill_candidates_for_planning(
+        "\n".join(
+            [
+                refined.raw_user_input,
+                refined.refined_request,
+                " ".join(refined.explicit_constraints),
+                scout_context,
+            ]
+        ),
+        project_root=project_root,
+        skill_resolver=skill_resolver,
+        allow_skill_resolver=allow_skill_resolver,
+    )
+    if rendered_skill_candidates:
+        context_lines.append(rendered_skill_candidates + "\n\n")
     context_lines.extend(
         [
             f"原始问题：{refined.raw_user_input}\n",
@@ -194,6 +215,82 @@ def _render_memory_pack(memory_pack) -> str:
         return sanitize_text(str(renderer() or "")).strip()
     except Exception:
         return ""
+
+
+def _render_skill_candidates_for_planning(
+    request_text: str,
+    *,
+    project_root: Path | str | None,
+    skill_resolver=None,
+    allow_skill_resolver: bool = True,
+) -> str:
+    if not allow_skill_resolver:
+        return ""
+    resolver = skill_resolver or SkillResolver(workspace_context=_skill_workspace_context(project_root))
+    clean_request = sanitize_text(str(request_text or "")).strip()
+    if not clean_request:
+        return ""
+    paths = _extract_skill_path_hints(clean_request)
+    try:
+        pack = resolver.resolve_for_planner(
+            clean_request,
+            paths=paths,
+            limit=PLANNING_SKILL_CANDIDATE_LIMIT,
+        )
+        rendered = sanitize_text(str(resolver.render_for_planner(pack) or "")).strip()
+    except Exception:
+        return ""
+    if not rendered:
+        return ""
+    candidate_ids = [
+        str(item).strip()
+        for item in list(getattr(pack, "candidate_skill_ids", ()) or [])
+        if str(item).strip()
+    ]
+    return "\n\n".join(
+        [
+            "## Skill Resolver Candidates",
+            rendered,
+            _skill_interface_adoption_contract(candidate_ids),
+        ]
+    )
+
+
+def _skill_interface_adoption_contract(candidate_ids: list[str]) -> str:
+    candidates = ", ".join(candidate_ids) if candidate_ids else "none"
+    return "\n".join(
+        [
+            "Skill candidate adoption contract:",
+            f"- candidate_skill_ids must only contain these ids: {candidates}.",
+            "- Do not adopt every candidate by default; adopt only when it clearly helps this request.",
+            "- If adopting candidates, output top-level skill_interface with version, candidate_skill_ids, adopted_skill_ids, task_bindings, reasons, rejected_skill_ids, and rejection_reasons.",
+            "- task_bindings keys must be real task ids from this plan; values must be adopted skill ids only.",
+            "- Keep task.skill_id as the executable primary worker skill. Use skill_interface.task_bindings only for extra bound Skill context.",
+            "- If no candidate is useful, keep adopted_skill_ids empty and explain rejected candidates in rejection_reasons.",
+        ]
+    )
+
+
+def _skill_workspace_context(project_root: Path | str | None):
+    root = _resolve_scout_root(project_root)
+    if root is None:
+        return None
+    return SimpleNamespace(workspace_root=root)
+
+
+def _extract_skill_path_hints(text: str, *, limit: int = 12) -> list[str]:
+    seen: set[str] = set()
+    paths: list[str] = []
+    for match in re.findall(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./\\*-]+", str(text or "")):
+        clean = match.replace("\\", "/").strip("`'\".,;:()[]{}<>")
+        if not clean or clean in seen:
+            continue
+        paths.append(clean)
+        seen.add(clean)
+        if len(paths) >= max(1, int(limit or 12)):
+            break
+    return paths
+
 
 def scout_project_context_for_planning(
     request_text: str,
