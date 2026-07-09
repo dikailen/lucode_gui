@@ -69,6 +69,51 @@ def test_usage_tracker_is_exported_from_skill_library_package():
     assert SkillUsageTracker.__name__ == "SkillUsageTracker"
 
 
+def test_usage_summary_aggregates_feedback_records(tmp_path):
+    from runtime.skill_library.usage import SkillUsageTracker, load_usage_summary
+
+    tracker = SkillUsageTracker(tmp_path)
+    tracker.record(skill_id="electron-ui-refactor", query="Fix UI.", task_id="task_ui", result="success")
+    tracker.record(skill_id="electron_ui_refactor", query="Fix UI.", task_id="task_ui", result="failure")
+    tracker.record(
+        skill_id="electron_ui_refactor",
+        query="Fix UI.",
+        task_id="task_ui",
+        result="success",
+        misfire=True,
+    )
+    tracker.record(
+        skill_id="context_ledger",
+        query="Fix UI.",
+        task_id="",
+        result="rejected_by_planner",
+    )
+
+    summary = load_usage_summary(tmp_path)
+
+    assert summary["electron_ui_refactor"]["used_count"] == 3
+    assert summary["electron_ui_refactor"]["success_count"] == 2
+    assert summary["electron_ui_refactor"]["failure_count"] == 1
+    assert summary["electron_ui_refactor"]["misfire_count"] == 1
+    assert summary["electron_ui_refactor"]["rejected_by_planner_count"] == 0
+    assert summary["electron_ui_refactor"]["last_used_at"]
+    assert summary["context_ledger"]["used_count"] == 0
+    assert summary["context_ledger"]["rejected_by_planner_count"] == 1
+
+
+def test_usage_summary_accepts_workspace_or_skill_directory(tmp_path):
+    from runtime.skill_library.usage import SkillUsageTracker, load_usage_summary
+
+    tracker = SkillUsageTracker(tmp_path)
+    tracker.record(skill_id="electron_ui_refactor", query="Fix UI.", task_id="task_ui", result="success")
+
+    from_workspace = load_usage_summary(tmp_path)
+    from_skill_dir = load_usage_summary(tmp_path / ".lucode" / "skills")
+
+    assert from_workspace["electron_ui_refactor"]["used_count"] == 1
+    assert from_skill_dir["electron_ui_refactor"]["used_count"] == 1
+
+
 def test_pipeline_records_planner_rejections_and_bound_skill_success(tmp_path):
     task = _task(bound_skill_ids=["electron_ui_refactor"])
     plan = PlannerResult(

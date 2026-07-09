@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from runtime.skill_library.indexer import build_skill_index, load_skill_index
+from runtime.skill_library.usage import SkillUsageTracker
 
 
 def _context(tmp_path):
@@ -106,3 +107,43 @@ do_not_use_when: [Never]
     assert by_id["code_engineer"].source == "core"
     assert by_id["code_engineer"].core is True
     assert by_id["code_engineer"].assignable is False
+
+
+def test_skill_index_merges_usage_summary_and_refreshes_loaded_index(tmp_path):
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "electron-ui-refactor",
+        """
+id: electron-ui-refactor
+name: Electron UI Refactor
+description: Improve Electron React UI.
+category: [programming, frontend]
+tags: [electron, react, ui]
+use_when: [Modify Electron UI]
+do_not_use_when: [Modify Python runtime]
+""".strip(),
+    )
+    tracker = SkillUsageTracker(ctx.workspace_root)
+    tracker.record(skill_id="electron_ui_refactor", query="Fix UI.", task_id="task_ui", result="success")
+    tracker.record(skill_id="electron_ui_refactor", query="Fix UI.", task_id="task_ui", result="failure")
+    tracker.record(
+        skill_id="electron_ui_refactor",
+        query="Fix UI.",
+        task_id="task_ui",
+        result="success",
+        misfire=True,
+    )
+
+    built = build_skill_index(ctx, write=True)
+
+    assert built[0].usage["used_count"] == 3
+    assert built[0].usage["success_count"] == 2
+    assert built[0].usage["failure_count"] == 1
+    assert built[0].usage["misfire_count"] == 1
+
+    tracker.record(skill_id="electron_ui_refactor", query="Fix UI.", task_id="", result="rejected_by_planner")
+    loaded = load_skill_index(ctx, rebuild_if_missing=False)
+
+    assert loaded[0].usage["used_count"] == 3
+    assert loaded[0].usage["rejected_by_planner_count"] == 1

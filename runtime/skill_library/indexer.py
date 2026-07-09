@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from runtime.skill_library.schema import (
     skill_entry_from_dict,
     skill_entry_to_dict,
 )
+from runtime.skill_library.usage import load_usage_summary
 
 
 SOURCE_PRIORITY = {"workspace": 0, "user": 1, "sample": 2, "core": 3}
@@ -27,6 +29,7 @@ def build_skill_index(workspace_context=None, *, write: bool = True) -> list[Ski
             discovered.append(entry)
 
     entries = _dedupe_entries(discovered)
+    entries = _merge_usage_summary(entries, workspace_context)
     entries.sort(key=lambda entry: (SOURCE_PRIORITY.get(entry.source, 9), entry.id))
     if write:
         _write_index(entries, workspace_context)
@@ -47,7 +50,7 @@ def load_skill_index(workspace_context=None, *, rebuild_if_missing: bool = True)
             continue
         if isinstance(data, dict):
             entries.append(skill_entry_from_dict(data))
-    return entries
+    return _merge_usage_summary(entries, workspace_context)
 
 
 def _entry_from_discovered_item(item: dict[str, Any]) -> SkillIndexEntry:
@@ -108,6 +111,27 @@ def _write_index(entries: list[SkillIndexEntry], workspace_context=None) -> None
     path.write_text((text + "\n") if text else "", encoding="utf-8")
 
 
+def _merge_usage_summary(entries: list[SkillIndexEntry], workspace_context=None) -> list[SkillIndexEntry]:
+    try:
+        summary = load_usage_summary(_usage_path(workspace_context))
+    except Exception:
+        return entries
+    if not summary:
+        return entries
+    merged: list[SkillIndexEntry] = []
+    for entry in entries:
+        usage = summary.get(entry.id)
+        if not usage:
+            merged.append(entry)
+            continue
+        merged.append(replace(entry, usage={**dict(entry.usage or {}), **usage}))
+    return merged
+
+
 def _index_path(workspace_context=None) -> Path:
     roots = extension_roots(workspace_context)
     return roots.workspace_root / ".lucode" / "skills" / "index.jsonl"
+
+
+def _usage_path(workspace_context=None) -> Path:
+    return _index_path(workspace_context).parent / "usage.jsonl"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,7 +79,8 @@ class SkillUsageTracker:
 def load_usage_records(path: str | Path) -> list[dict[str, Any]]:
     usage_path = Path(path)
     if usage_path.is_dir():
-        usage_path = usage_path / DEFAULT_USAGE_RELATIVE_PATH
+        direct_usage_path = usage_path / "usage.jsonl"
+        usage_path = direct_usage_path if direct_usage_path.exists() else usage_path / DEFAULT_USAGE_RELATIVE_PATH
     if not usage_path.exists():
         return []
     records: list[dict[str, Any]] = []
@@ -93,6 +95,45 @@ def load_usage_records(path: str | Path) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             records.append(value)
     return records
+
+
+def load_usage_summary(path: str | Path) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for record in load_usage_records(path):
+        skill_id = _normalize_skill_id(record.get("skill_id"))
+        if not skill_id:
+            continue
+        item = summary.setdefault(
+            skill_id,
+            {
+                "used_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "misfire_count": 0,
+                "rejected_by_planner_count": 0,
+                "last_used_at": "",
+                "last_rejected_at": "",
+            },
+        )
+        result = _clean_text(record.get("result"), limit=80)
+        timestamp = _clean_text(record.get("timestamp"), limit=80)
+        if result == "success":
+            item["used_count"] += 1
+            item["success_count"] += 1
+            item["last_used_at"] = _latest_timestamp(str(item.get("last_used_at") or ""), timestamp)
+        elif result == "failure":
+            item["used_count"] += 1
+            item["failure_count"] += 1
+            item["last_used_at"] = _latest_timestamp(str(item.get("last_used_at") or ""), timestamp)
+        elif result == "rejected_by_planner":
+            item["rejected_by_planner_count"] += 1
+            item["last_rejected_at"] = _latest_timestamp(str(item.get("last_rejected_at") or ""), timestamp)
+        elif result:
+            item["used_count"] += 1
+            item["last_used_at"] = _latest_timestamp(str(item.get("last_used_at") or ""), timestamp)
+        if bool(record.get("misfire")):
+            item["misfire_count"] += 1
+    return summary
 
 
 def _utc_timestamp() -> str:
@@ -121,3 +162,17 @@ def _clean_list(value: list[str] | tuple[str, ...] | str | None, *, limit: int) 
             cleaned.append(text)
             seen.add(text)
     return cleaned
+
+
+def _normalize_skill_id(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    normalized = re.sub(r"[^a-z0-9_]+", "_", normalized)
+    return re.sub(r"_+", "_", normalized).strip("_")
+
+
+def _latest_timestamp(current: str, candidate: str) -> str:
+    if not candidate:
+        return current
+    if not current:
+        return candidate
+    return max(current, candidate)
