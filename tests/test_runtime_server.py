@@ -1617,6 +1617,67 @@ def test_sessions_support_cursor_pagination_beyond_one_hundred_items(tmp_path):
     assert oldest.json()["session_id"] == "session-000"
 
 
+def test_session_cursor_stays_stable_when_newer_sessions_are_added(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(80):
+        store.append_event(
+            f"stable-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"Stable session {index:03d}",
+                "timestamp": started_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?limit=20", headers=_auth_headers()).json()
+    first_ids = [item["session_id"] for item in first["sessions"]]
+    store.append_event(
+        "stable-session-new",
+        {
+            "type": "session_metadata",
+            "title": "Newer session",
+            "timestamp": (started_at + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    second = client.get(
+        f"/api/sessions?limit=20&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    second_ids = [item["session_id"] for item in second["sessions"]]
+
+    assert not set(first_ids).intersection(second_ids)
+    assert second_ids[0] == "stable-session-059"
+    assert "stable-session-new" not in second_ids
+
+
+def test_session_cursor_stays_stable_when_a_prior_page_session_is_deleted(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(80):
+        store.append_event(
+            f"delete-stable-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"Stable session {index:03d}",
+                "timestamp": started_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?limit=20", headers=_auth_headers()).json()
+    first_ids = [item["session_id"] for item in first["sessions"]]
+    deleted = client.delete(f"/api/sessions/{first_ids[0]}", headers=_auth_headers())
+    second = client.get(
+        f"/api/sessions?limit=20&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+
+    assert deleted.status_code == 200
+    assert second["sessions"][0]["session_id"] == "delete-stable-session-059"
+
+
 def test_session_search_uses_an_independent_cursor_from_normal_history(tmp_path):
     client = _client(tmp_path)
     store = client.app.state.lucode_run_manager._history_facade.history_store

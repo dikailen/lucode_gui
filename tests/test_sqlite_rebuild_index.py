@@ -4,6 +4,7 @@ import sqlite3
 
 from runtime.history.store import HistoryFacade, HistoryStore
 from runtime.storage.context_store import ContextSQLiteStore
+from runtime.storage.freshness import jsonl_source_fingerprint
 from runtime.storage.sqlite_store import connect
 
 
@@ -231,3 +232,17 @@ def test_existing_sqlite_database_adds_source_fingerprint_column(tmp_path):
     with sqlite3.connect(db_path) as connection:
         columns = {row[1] for row in connection.execute("pragma table_info(sessions)").fetchall()}
     assert "source_fingerprint" in columns
+
+
+def test_jsonl_source_fingerprint_uses_file_metadata_without_reading_full_content(tmp_path, monkeypatch):
+    path = tmp_path / "session.jsonl"
+    path.write_text('{"type":"message","content":"large history"}\n', encoding="utf-8")
+
+    def fail_open(*_args, **_kwargs):
+        raise AssertionError("freshness fingerprint must not read the JSONL body")
+
+    monkeypatch.setattr(type(path), "open", fail_open)
+
+    fingerprint = jsonl_source_fingerprint(path)
+
+    assert fingerprint.startswith("stat:v1:")

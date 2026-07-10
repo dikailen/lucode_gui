@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -252,13 +253,7 @@ class HistoryFacade:
         limit: int = 20,
         cursor: str | None = None,
     ) -> tuple[list[HistoryItem], str, bool]:
-        safe_limit = max(1, int(limit or 20))
-        offset = _decode_page_cursor(cursor)
-        items = self._list_items_up_to(offset + safe_limit + 1)
-        page = items[offset : offset + safe_limit]
-        has_more = len(items) > offset + safe_limit
-        next_cursor = str(offset + len(page)) if has_more else ""
-        return page, next_cursor, has_more
+        return _page_history_items(self._list_all_items(), limit=limit, cursor=cursor)
 
     def _list_items_up_to(self, limit: int) -> list[HistoryItem]:
         items: list[HistoryItem] = []
@@ -278,6 +273,18 @@ class HistoryFacade:
                 items.append(_history_item_from_summary(summary, storage_kind=storage_kind))
         items.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
         return items[:limit]
+
+    def _list_all_items(self) -> list[HistoryItem]:
+        items: list[HistoryItem] = []
+        seen: set[str] = set()
+        for storage_kind, store in (("history", self.history_store), ("legacy_session", self.session_store)):
+            for summary in store.list_sessions(limit=None):
+                if summary.session_id in seen:
+                    continue
+                seen.add(summary.session_id)
+                items.append(_history_item_from_summary(summary, storage_kind=storage_kind))
+        items.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
+        return items
 
     def preview(self, history_id: str) -> HistoryPreview:
         session_id = self.resolve(history_id)
@@ -404,7 +411,7 @@ class HistoryFacade:
         cursor: str | None = None,
     ) -> tuple[list[HistoryItem], str, bool]:
         safe_limit = max(1, int(limit or 20))
-        offset = _decode_page_cursor(cursor)
+        offset = _decode_offset_page_cursor(cursor)
         matches = self.search(query, limit=offset + safe_limit + 1)
         page = matches[offset : offset + safe_limit]
         has_more = len(matches) > offset + safe_limit
@@ -497,7 +504,7 @@ class HistoryFacade:
         self.history_store._append_index_entry(session_id)
         return session_id
 
-    def _sqlite_list_sessions(self, limit: int) -> list[SessionSummary]:
+    def _sqlite_list_sessions(self, limit: int | None) -> list[SessionSummary]:
         store = self._sqlite_read_store()
         if store is None:
             return []
@@ -703,7 +710,55 @@ def _summary_for_session(summaries: list[SessionSummary], session_id: str) -> Se
     return next((summary for summary in summaries if summary.session_id == target), None)
 
 
-def _decode_page_cursor(cursor: str | None) -> int:
+def _page_history_items(
+    items: list[HistoryItem],
+    *,
+    limit: int,
+    cursor: str | None,
+) -> tuple[list[HistoryItem], str, bool]:
+    safe_limit = max(1, int(limit or 20))
+    boundary = _decode_page_cursor(cursor)
+    candidates = items
+    if boundary is not None:
+        candidates = [
+            item
+            for item in items
+            if (item.updated_at, item.session_id) < boundary
+        ]
+    page = candidates[:safe_limit]
+    has_more = len(candidates) > safe_limit
+    next_cursor = _encode_page_cursor(page[-1]) if page and has_more else ""
+    return page, next_cursor, has_more
+
+
+def _encode_page_cursor(item: HistoryItem) -> str:
+    payload = json.dumps(
+        {"version": 2, "updated_at": item.updated_at, "session_id": item.session_id},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_page_cursor(cursor: str | None) -> tuple[str, str] | None:
+    text = str(cursor or "").strip()
+    if not text:
+        return None
+    try:
+        padded = text + ("=" * (-len(text) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid session cursor") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        raise ValueError("invalid session cursor")
+    updated_at = str(payload.get("updated_at") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    if not updated_at or not session_id:
+        raise ValueError("invalid session cursor")
+    return updated_at, session_id
+
+
+def _decode_offset_page_cursor(cursor: str | None) -> int:
     text = str(cursor or "").strip()
     if not text:
         return 0

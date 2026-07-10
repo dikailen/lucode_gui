@@ -26,7 +26,11 @@ from runtime.execution.parallel_scheduler import _format_parallel_batch_audit, e
 from runtime.execution.pipeline import PipelineRunState
 from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.supervisor_observer import emit_supervisor_observation, render_supervisor_context_for_workers
-from runtime.execution.task_runner import _run_agent_kwargs, _run_planned_task
+from runtime.execution.task_runner import (
+    _run_agent_kwargs,
+    _run_planned_task,
+    runtime_context_placement_error_for_model,
+)
 from runtime.execution.worker_reporter import build_worker_report, render_worker_report
 from runtime.evidence.gate import enforced_gate_verdicts, run_evidence_gate_for_reports
 from runtime.ui.live_status import dynamic_status
@@ -274,6 +278,14 @@ async def _run_multi_agent(
         )
 
         if mode == "full" and route == "team" and not use_summary_helper:
+            placement_error = _final_role_context_placement_error(
+                factory,
+                run_state,
+                model_id=model_id,
+                role="supervisor",
+            )
+            if placement_error:
+                return placement_error
             if run_state:
                 run_state.emit_event(
                     "LeadFinalizing",
@@ -327,6 +339,14 @@ async def _run_multi_agent(
             final_synthesis_dir,
             "run_workspace_readonly",
         ) as run_workspace_server:
+            placement_error = _final_role_context_placement_error(
+                factory,
+                run_state,
+                model_id=model_id,
+                role="final_synthesizer",
+            )
+            if placement_error:
+                return placement_error
             synthesizer = factory.create_synthesizer_agent(model_id, run_workspace_server)
             synthesis_prompt = _render_final_synthesis_prompt(plan, run_state)
             with dynamic_status(
@@ -351,6 +371,29 @@ async def _run_multi_agent(
             return result.final_output
     finally:
         workspace.cleanup()
+
+
+def _final_role_context_placement_error(factory, run_state, *, model_id: str, role: str) -> str:
+    error = runtime_context_placement_error_for_model(
+        factory,
+        run_state,
+        model_id=model_id,
+        role=role,
+    )
+    if not error or run_state is None:
+        return error
+    run_state.emit_event(
+        "ComputePlacementBlocked",
+        error,
+        agent=role,
+        status="blocked",
+        payload={
+            "model_id": str(model_id or ""),
+            "reason": error,
+            "stage": "runtime_context_final_recheck",
+        },
+    )
+    return error
 
 
 def _tasks_by_parallel_group(plan: PlannerResult) -> dict[int, list]:

@@ -78,7 +78,7 @@ class SessionStore:
         with self._path_for(safe_id).open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
-    def list_sessions(self, limit: int = 10) -> list[SessionSummary]:
+    def list_sessions(self, limit: int | None = 10) -> list[SessionSummary]:
         if not self.sessions_dir.is_dir():
             return []
         summaries = []
@@ -87,6 +87,8 @@ class SessionStore:
             if summary is not None:
                 summaries.append(summary)
         summaries.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
+        if limit is None:
+            return summaries
         return summaries[: max(1, int(limit or 10))]
 
     def resolve_session_id(self, selector: str | None = None) -> str | None:

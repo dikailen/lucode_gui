@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import sqlite3
 from pathlib import Path
@@ -10,14 +8,11 @@ from typing import Any
 
 def jsonl_source_fingerprint(path: Path | str) -> str:
     source = Path(path)
-    digest = hashlib.sha256()
     try:
-        with source.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        stat = source.stat()
     except OSError:
         return ""
-    return f"sha256:{digest.hexdigest()}"
+    return f"stat:v1:{int(stat.st_size)}:{int(stat.st_mtime_ns)}"
 
 
 def jsonl_message_count(path: Path | str) -> int:
@@ -49,10 +44,8 @@ def source_snapshot_matches_jsonl(
     source = Path(path)
     if not expected or not source.is_file():
         return False
-    if int(message_count or 0) != jsonl_message_count(source):
-        return False
     actual = jsonl_source_fingerprint(source)
-    return bool(actual) and hmac.compare_digest(expected, actual)
+    return bool(actual) and expected == actual
 
 
 def sqlite_session_matches_jsonl(

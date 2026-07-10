@@ -201,3 +201,31 @@ def test_runtime_context_recheck_blocks_local_only_context_from_cloud_worker(tmp
     assert "cloud" in blocked
     assert observed == ""
     assert local == ""
+
+
+def test_runtime_context_recheck_blocks_local_only_context_from_cloud_final_role(tmp_path):
+    from types import SimpleNamespace
+
+    from runtime.execution.run_context import RunContextStore
+    from runtime.execution.task_runner import runtime_context_placement_error_for_model
+
+    store = RunContextStore(tmp_path)
+    store.record_tool_output(
+        tool="desktop_terminal",
+        action="command",
+        summary="local command result",
+        task_id="terminal-task",
+    )
+    factory = SimpleNamespace(model_registry=_Registry())
+    run_state = SimpleNamespace(run_context=store, compute_placement_mode="enforce")
+
+    blocked = runtime_context_placement_error_for_model(
+        factory,
+        run_state,
+        model_id="cloud",
+        role="final_synthesizer",
+    )
+
+    assert "final_synthesizer" in blocked
+    assert "local-only" in blocked
+    assert "cloud" in blocked

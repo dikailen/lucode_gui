@@ -309,6 +309,22 @@ def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
 
 
 def _runtime_context_placement_error(factory, run_state: PipelineRunState | None, task) -> str:
+    task_id = str(getattr(task, "id", "") or "worker")
+    return runtime_context_placement_error_for_model(
+        factory,
+        run_state,
+        model_id=str(getattr(task, "model", "") or "").strip(),
+        role=f"task {task_id}",
+    )
+
+
+def runtime_context_placement_error_for_model(
+    factory,
+    run_state: PipelineRunState | None,
+    *,
+    model_id: str,
+    role: str,
+) -> str:
     if run_state is None:
         return ""
     mode = str(getattr(run_state, "compute_placement_mode", "") or "").strip().lower()
@@ -326,19 +342,19 @@ def _runtime_context_placement_error(factory, run_state: PipelineRunState | None
         return ""
     if sensitivity != "local_only":
         return ""
-    model_id = str(getattr(task, "model", "") or "").strip()
+    clean_model_id = str(model_id or "").strip()
     registry = getattr(factory, "model_registry", None)
     getter = getattr(registry, "get_model_info", None)
     try:
-        model_info = dict(getter(model_id) or {}) if callable(getter) else {}
+        model_info = dict(getter(clean_model_id) or {}) if callable(getter) else {}
     except Exception:
         model_info = {}
     if model_info_is_local(model_info):
         return ""
-    task_id = str(getattr(task, "id", "") or "worker")
+    clean_role = str(role or "worker").strip() or "worker"
     return (
-        f"task {task_id} cannot send local-only runtime context to cloud model "
-        f"{model_id or 'unknown'}"
+        f"{clean_role} cannot send local-only runtime context to cloud model "
+        f"{clean_model_id or 'unknown'}"
     )
 
 
