@@ -34,7 +34,11 @@ def rebuild_fts_index(workspace_root: Path | str) -> bool:
     return True
 
 
-def search_history(workspace_root: Path | str, query: str, limit: int = 20) -> list[HistorySearchResult]:
+def search_history(
+    workspace_root: Path | str,
+    query: str,
+    limit: int | None = 20,
+) -> list[HistorySearchResult]:
     """Search indexed history without making SQLite the authoritative history source."""
 
     root = Path(workspace_root).resolve()
@@ -44,7 +48,8 @@ def search_history(workspace_root: Path | str, query: str, limit: int = 20) -> l
     if not database_path(root).is_file():
         return []
 
-    safe_limit = max(1, int(limit or 20))
+    safe_limit = max(1, int(limit or 20)) if limit is not None else None
+    candidate_limit = safe_limit * 4 if safe_limit is not None else None
     try:
         initialize_sqlite_store(root)
         with connect(root) as connection:
@@ -53,11 +58,11 @@ def search_history(workspace_root: Path | str, query: str, limit: int = 20) -> l
             if _ensure_fts_schema(connection):
                 if not fts_exists:
                     _rebuild_fts_tables(connection)
-                results = _search_fts(connection, normalized_query, limit=safe_limit * 4)
+                results = _search_fts(connection, normalized_query, limit=candidate_limit)
             else:
                 results = []
             if not results:
-                results = _search_like(connection, normalized_query, limit=safe_limit * 4)
+                results = _search_like(connection, normalized_query, limit=candidate_limit)
             return _filter_current_jsonl_sessions(connection, root, results, limit=safe_limit)
     except (OSError, sqlite3.Error, ValueError):
         return []
@@ -181,7 +186,7 @@ def _rebuild_fts_tables(connection: sqlite3.Connection) -> None:
     )
 
 
-def _search_fts(connection: sqlite3.Connection, query: str, *, limit: int) -> list[HistorySearchResult]:
+def _search_fts(connection: sqlite3.Connection, query: str, *, limit: int | None) -> list[HistorySearchResult]:
     fts_query = _fts_query(query)
     if not fts_query:
         return []
@@ -190,11 +195,11 @@ def _search_fts(connection: sqlite3.Connection, query: str, *, limit: int) -> li
     rows.extend(_search_messages_fts(connection, fts_query, limit=limit))
     rows.extend(_search_summaries_fts(connection, fts_query, limit=limit))
     rows.sort(key=lambda item: (-item.score, _source_priority(item.source), item.updated_at), reverse=False)
-    return rows[:limit]
+    return rows if limit is None else rows[:limit]
 
 
 def _search_session_titles_fts(
-    connection: sqlite3.Connection, fts_query: str, *, limit: int
+    connection: sqlite3.Connection, fts_query: str, *, limit: int | None
 ) -> list[HistorySearchResult]:
     rows = connection.execute(
         """
@@ -210,7 +215,7 @@ def _search_session_titles_fts(
         order by rank
         limit ?
         """,
-        (fts_query, limit),
+        (fts_query, _sqlite_limit(limit)),
     ).fetchall()
     return [
         HistorySearchResult(
@@ -226,7 +231,7 @@ def _search_session_titles_fts(
 
 
 def _search_messages_fts(
-    connection: sqlite3.Connection, fts_query: str, *, limit: int
+    connection: sqlite3.Connection, fts_query: str, *, limit: int | None
 ) -> list[HistorySearchResult]:
     rows = connection.execute(
         """
@@ -244,7 +249,7 @@ def _search_messages_fts(
         order by rank
         limit ?
         """,
-        (fts_query, limit),
+        (fts_query, _sqlite_limit(limit)),
     ).fetchall()
     return [
         HistorySearchResult(
@@ -261,7 +266,7 @@ def _search_messages_fts(
 
 
 def _search_summaries_fts(
-    connection: sqlite3.Connection, fts_query: str, *, limit: int
+    connection: sqlite3.Connection, fts_query: str, *, limit: int | None
 ) -> list[HistorySearchResult]:
     rows = connection.execute(
         """
@@ -278,7 +283,7 @@ def _search_summaries_fts(
         order by rank
         limit ?
         """,
-        (fts_query, limit),
+        (fts_query, _sqlite_limit(limit)),
     ).fetchall()
     return [
         HistorySearchResult(
@@ -293,7 +298,7 @@ def _search_summaries_fts(
     ]
 
 
-def _search_like(connection: sqlite3.Connection, query: str, *, limit: int) -> list[HistorySearchResult]:
+def _search_like(connection: sqlite3.Connection, query: str, *, limit: int | None) -> list[HistorySearchResult]:
     terms = _plain_terms(query)
     if not terms:
         return []
@@ -301,11 +306,11 @@ def _search_like(connection: sqlite3.Connection, query: str, *, limit: int) -> l
     rows.extend(_search_session_titles_like(connection, terms, limit=limit))
     rows.extend(_search_messages_like(connection, terms, limit=limit))
     rows.extend(_search_summaries_like(connection, terms, limit=limit))
-    return rows[:limit]
+    return rows if limit is None else rows[:limit]
 
 
 def _search_session_titles_like(
-    connection: sqlite3.Connection, terms: list[str], *, limit: int
+    connection: sqlite3.Connection, terms: list[str], *, limit: int | None
 ) -> list[HistorySearchResult]:
     where, params = _like_where("s.title", terms)
     rows = connection.execute(
@@ -316,7 +321,7 @@ def _search_session_titles_like(
         order by s.updated_at desc
         limit ?
         """,
-        (*params, limit),
+        (*params, _sqlite_limit(limit)),
     ).fetchall()
     return [
         HistorySearchResult(
@@ -331,7 +336,7 @@ def _search_session_titles_like(
 
 
 def _search_messages_like(
-    connection: sqlite3.Connection, terms: list[str], *, limit: int
+    connection: sqlite3.Connection, terms: list[str], *, limit: int | None
 ) -> list[HistorySearchResult]:
     where, params = _like_where("m.content", terms)
     rows = connection.execute(
@@ -343,7 +348,7 @@ def _search_messages_like(
         order by m.created_at desc, m.rowid desc
         limit ?
         """,
-        (*params, limit),
+        (*params, _sqlite_limit(limit)),
     ).fetchall()
     return [
         HistorySearchResult(
@@ -359,7 +364,7 @@ def _search_messages_like(
 
 
 def _search_summaries_like(
-    connection: sqlite3.Connection, terms: list[str], *, limit: int
+    connection: sqlite3.Connection, terms: list[str], *, limit: int | None
 ) -> list[HistorySearchResult]:
     where, params = _like_where("c.summary", terms)
     rows = connection.execute(
@@ -371,7 +376,7 @@ def _search_summaries_like(
         order by c.created_at desc, c.rowid desc
         limit ?
         """,
-        (*params, limit),
+        (*params, _sqlite_limit(limit)),
     ).fetchall()
     return [
         HistorySearchResult(
@@ -390,7 +395,7 @@ def _filter_current_jsonl_sessions(
     workspace_root: Path,
     results: list[HistorySearchResult],
     *,
-    limit: int,
+    limit: int | None,
 ) -> list[HistorySearchResult]:
     filtered: list[HistorySearchResult] = []
     current_cache: dict[str, bool] = {}
@@ -403,7 +408,7 @@ def _filter_current_jsonl_sessions(
             )
         if current_cache[result.session_id]:
             filtered.append(result)
-        if len(filtered) >= limit:
+        if limit is not None and len(filtered) >= limit:
             break
     return filtered
 
@@ -437,6 +442,10 @@ def _like_where(column: str, terms: list[str]) -> tuple[str, list[str]]:
 
 def _escape_like(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sqlite_limit(limit: int | None) -> int:
+    return -1 if limit is None else max(1, int(limit))
 
 
 def _short(value: Any, limit: int = 220) -> str:

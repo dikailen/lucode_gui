@@ -1711,6 +1711,215 @@ def test_session_search_uses_an_independent_cursor_from_normal_history(tmp_path)
     assert all("matching" in item["title"] for item in search_first["sessions"] + search_second["sessions"])
 
 
+def test_session_search_cursor_does_not_repeat_results_after_newer_match_is_added(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(80):
+        store.append_event(
+            f"search-stable-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"matching stable session {index:03d}",
+                "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?q=matching&limit=10", headers=_auth_headers()).json()
+    first_ids = [item["session_id"] for item in first["sessions"]]
+    store.append_event(
+        "search-stable-session-new",
+        {
+            "type": "session_metadata",
+            "title": "matching stable session new",
+            "timestamp": (started_at + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    second = client.get(
+        f"/api/sessions?q=matching&limit=10&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    second_ids = [item["session_id"] for item in second["sessions"]]
+
+    assert not set(first_ids).intersection(second_ids)
+    assert second_ids[0] == "search-stable-session-069"
+    assert "search-stable-session-new" not in second_ids
+
+
+def test_session_search_cursor_does_not_skip_results_after_a_prior_page_match_is_deleted(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(80):
+        store.append_event(
+            f"search-delete-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"matching delete session {index:03d}",
+                "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?q=matching&limit=10", headers=_auth_headers()).json()
+    deleted = client.delete(f"/api/sessions/{first['sessions'][0]['session_id']}", headers=_auth_headers())
+    second = client.get(
+        f"/api/sessions?q=matching&limit=10&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+
+    assert deleted.status_code == 200
+    assert second["sessions"][0]["session_id"] == "search-delete-session-069"
+
+
+def test_session_search_cursor_uses_session_id_to_stabilize_tied_timestamps(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    for index in range(80):
+        store.append_event(
+            f"search-tied-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"matching tied session {index:03d}",
+                "timestamp": timestamp,
+            },
+        )
+
+    first = client.get("/api/sessions?q=matching&limit=10", headers=_auth_headers()).json()
+    first_ids = [item["session_id"] for item in first["sessions"]]
+    store.append_event(
+        "search-tied-session-zzz",
+        {"type": "session_metadata", "title": "matching tied session zzz", "timestamp": timestamp},
+    )
+    second = client.get(
+        f"/api/sessions?q=matching&limit=10&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    second_ids = [item["session_id"] for item in second["sessions"]]
+
+    assert not set(first_ids).intersection(second_ids)
+    assert second_ids[0] == "search-tied-session-069"
+    assert "search-tied-session-zzz" not in second_ids
+
+
+def test_fts_session_search_cursor_does_not_repeat_results_after_newer_match_is_added(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_CONTEXT_SQLITE", "dual_write")
+    monkeypatch.setenv("LUCODE_CONTEXT_FTS", "on")
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(40):
+        store.append_event(
+            f"search-fts-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"matching fts session {index:03d}",
+                "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?q=matching&limit=10", headers=_auth_headers()).json()
+    first_ids = [item["session_id"] for item in first["sessions"]]
+    store.append_event(
+        "search-fts-session-new",
+        {
+            "type": "session_metadata",
+            "title": "matching fts session new",
+            "timestamp": (started_at + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    second = client.get(
+        f"/api/sessions?q=matching&limit=10&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    second_ids = [item["session_id"] for item in second["sessions"]]
+
+    assert not set(first_ids).intersection(second_ids)
+    assert second_ids[0] == "search-fts-session-029"
+    assert "search-fts-session-new" not in second_ids
+
+
+def test_session_search_cursor_paginates_all_matching_sessions_beyond_one_hundred(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(125):
+        store.append_event(
+            f"search-many-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"matching many session {index:03d}",
+                "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?q=matching&limit=50", headers=_auth_headers()).json()
+    second = client.get(
+        f"/api/sessions?q=matching&limit=50&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    third = client.get(
+        f"/api/sessions?q=matching&limit=50&cursor={second['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    ids = [item["session_id"] for page in (first, second, third) for item in page["sessions"]]
+
+    assert len(ids) == 125
+    assert len(set(ids)) == 125
+    assert ids[0] == "search-many-session-124"
+    assert ids[-1] == "search-many-session-000"
+    assert third["has_more"] is False
+
+
+def test_session_search_rejects_a_cursor_created_for_another_query(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(20):
+        for marker in ("alpha", "beta"):
+            store.append_event(
+                f"search-query-{marker}-{index:03d}",
+                {
+                    "type": "session_metadata",
+                    "title": f"{marker} matching session {index:03d}",
+                    "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+                },
+            )
+
+    alpha = client.get("/api/sessions?q=alpha&limit=10", headers=_auth_headers()).json()
+    mismatched = client.get(
+        f"/api/sessions?q=beta&limit=10&cursor={alpha['next_cursor']}",
+        headers=_auth_headers(),
+    )
+
+    assert mismatched.status_code == 400
+    assert mismatched.json()["error"]["code"] == "bad_request"
+
+
+def test_session_search_cursor_accepts_equivalent_normalized_query(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(20):
+        store.append_event(
+            f"search-normalized-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"alpha matching session {index:03d}",
+                "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?q=Alpha%20%20matching&limit=10", headers=_auth_headers()).json()
+    second = client.get(
+        f"/api/sessions?q=alpha%20matching&limit=10&cursor={first['next_cursor']}",
+        headers=_auth_headers(),
+    )
+
+    assert second.status_code == 200
+    assert second.json()["sessions"][0]["session_id"] == "search-normalized-session-009"
+
+
 def test_sessions_search_query_matches_history_content_without_returning_unmatched_sessions(tmp_path):
     async def runner(request):
         if "invoice" in request.user_input:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -385,21 +386,22 @@ class HistoryFacade:
             deleted=deleted,
         )
 
-    def search(self, query: str, limit: int = 20) -> list[HistoryItem]:
+    def search(self, query: str, limit: int | None = 20) -> list[HistoryItem]:
         terms = [term.casefold() for term in sanitize_text(str(query or "")).split() if term.strip()]
         if not terms:
-            return self.list_items(limit=limit)
-        safe_limit = max(1, int(limit or 20))
+            return self._list_all_items() if limit is None else self.list_items(limit=limit)
+        safe_limit = max(1, int(limit or 20)) if limit is not None else None
         matches: list[HistoryItem] = self._fts_search_items(query, limit=safe_limit)
         seen = {item.session_id for item in matches}
-        for item in self.list_items(limit=max(200, safe_limit * 4)):
+        source_items = self._list_all_items() if safe_limit is None else self.list_items(limit=max(200, safe_limit * 4))
+        for item in source_items:
             if item.session_id in seen:
                 continue
             haystack = self._search_text(item.session_id)
             if all(term in haystack for term in terms):
                 matches.append(item)
                 seen.add(item.session_id)
-            if len(matches) >= safe_limit:
+            if safe_limit is not None and len(matches) >= safe_limit:
                 break
         return matches
 
@@ -410,13 +412,15 @@ class HistoryFacade:
         limit: int = 20,
         cursor: str | None = None,
     ) -> tuple[list[HistoryItem], str, bool]:
-        safe_limit = max(1, int(limit or 20))
-        offset = _decode_offset_page_cursor(cursor)
-        matches = self.search(query, limit=offset + safe_limit + 1)
-        page = matches[offset : offset + safe_limit]
-        has_more = len(matches) > offset + safe_limit
-        next_cursor = str(offset + len(page)) if has_more else ""
-        return page, next_cursor, has_more
+        # Search pages share the session list's ordering contract before pagination.
+        matches = self.search(query, limit=None)
+        matches.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
+        return _page_history_items(
+            matches,
+            limit=limit,
+            cursor=cursor,
+            scope=_search_cursor_scope(query),
+        )
 
     def export(self, selector: str, output_path: Path | None = None) -> Path:
         session_id = self.resolve(selector)
@@ -548,13 +552,17 @@ class HistoryFacade:
             return None
         return self._context_sqlite_read_store
 
-    def _fts_search_items(self, query: str, limit: int) -> list[HistoryItem]:
+    def _fts_search_items(self, query: str, limit: int | None) -> list[HistoryItem]:
         if not _context_fts_enabled():
             return []
         try:
             from runtime.storage.search import search_history
 
-            results = search_history(self.workspace_root, query, limit=max(limit * 2, limit))
+            results = search_history(
+                self.workspace_root,
+                query,
+                limit=max(limit * 2, limit) if limit is not None else None,
+            )
         except Exception:
             return []
         items: list[HistoryItem] = []
@@ -567,7 +575,7 @@ class HistoryFacade:
                 continue
             seen.add(result.session_id)
             items.append(_history_item_from_summary(summary, storage_kind="history_fts"))
-            if len(items) >= limit:
+            if limit is not None and len(items) >= limit:
                 break
         return items
 
@@ -715,9 +723,10 @@ def _page_history_items(
     *,
     limit: int,
     cursor: str | None,
+    scope: str = "",
 ) -> tuple[list[HistoryItem], str, bool]:
     safe_limit = max(1, int(limit or 20))
-    boundary = _decode_page_cursor(cursor)
+    boundary = _decode_page_cursor(cursor, expected_scope=scope)
     candidates = items
     if boundary is not None:
         candidates = [
@@ -727,20 +736,27 @@ def _page_history_items(
         ]
     page = candidates[:safe_limit]
     has_more = len(candidates) > safe_limit
-    next_cursor = _encode_page_cursor(page[-1]) if page and has_more else ""
+    next_cursor = _encode_page_cursor(page[-1], scope=scope) if page and has_more else ""
     return page, next_cursor, has_more
 
 
-def _encode_page_cursor(item: HistoryItem) -> str:
+def _encode_page_cursor(item: HistoryItem, *, scope: str = "") -> str:
+    payload_data = {
+        "version": 2,
+        "updated_at": item.updated_at,
+        "session_id": item.session_id,
+    }
+    if scope:
+        payload_data["scope"] = scope
     payload = json.dumps(
-        {"version": 2, "updated_at": item.updated_at, "session_id": item.session_id},
+        payload_data,
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_page_cursor(cursor: str | None) -> tuple[str, str] | None:
+def _decode_page_cursor(cursor: str | None, *, expected_scope: str = "") -> tuple[str, str] | None:
     text = str(cursor or "").strip()
     if not text:
         return None
@@ -751,11 +767,18 @@ def _decode_page_cursor(cursor: str | None) -> tuple[str, str] | None:
         raise ValueError("invalid session cursor") from exc
     if not isinstance(payload, dict) or payload.get("version") != 2:
         raise ValueError("invalid session cursor")
+    if str(payload.get("scope") or "") != str(expected_scope or ""):
+        raise ValueError("session cursor does not match this search query")
     updated_at = str(payload.get("updated_at") or "").strip()
     session_id = str(payload.get("session_id") or "").strip()
     if not updated_at or not session_id:
         raise ValueError("invalid session cursor")
     return updated_at, session_id
+
+
+def _search_cursor_scope(query: str) -> str:
+    normalized = " ".join(sanitize_text(str(query or "")).casefold().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _decode_offset_page_cursor(cursor: str | None) -> int:
