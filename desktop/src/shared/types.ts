@@ -238,6 +238,13 @@ export type ServerSession = {
   updated_at: string;
 };
 
+export type SessionPageResponse = {
+  schema_version: "session.v1";
+  sessions: ServerSession[];
+  next_cursor: string;
+  has_more: boolean;
+};
+
 export type ServerRun = {
   schema_version: "run.v1";
   run_id: string;

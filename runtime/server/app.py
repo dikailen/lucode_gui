@@ -13,7 +13,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from runtime.server.auth import RuntimeAuth, RuntimeAuthError
 from runtime.server.execution_bridge import RunExecutor
-from runtime.server.run_manager import ModelCatalogProvider, RuntimeRunManager
+from runtime.server.run_manager import ModelCatalogProvider, RunConflictError, RuntimeRunManager
 
 
 def create_app(
@@ -319,9 +319,17 @@ def create_app(
     async def list_sessions(request: Request) -> JSONResponse:
         try:
             auth.require_http(request)
+            return JSONResponse(
+                manager.list_sessions(
+                    query=str(request.query_params.get("q") or ""),
+                    limit=int(request.query_params.get("limit") or 50),
+                    cursor=str(request.query_params.get("cursor") or ""),
+                )
+            )
         except RuntimeAuthError:
             return _error("unauthorized", "invalid runtime token", status_code=401)
-        return JSONResponse(manager.list_sessions())
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
 
     async def create_session(request: Request) -> JSONResponse:
         try:
@@ -348,6 +356,8 @@ def create_app(
             return JSONResponse(manager.delete_session(str(request.path_params.get("session_id") or "")))
         except RuntimeAuthError:
             return _error("unauthorized", "invalid runtime token", status_code=401)
+        except RunConflictError as exc:
+            return _error("run_conflict", str(exc), status_code=409)
         except ValueError as exc:
             return _error("not_found", str(exc), status_code=404)
 
@@ -362,6 +372,8 @@ def create_app(
             return JSONResponse(result)
         except RuntimeAuthError:
             return _error("unauthorized", "invalid runtime token", status_code=401)
+        except RunConflictError as exc:
+            return _error("run_conflict", str(exc), status_code=409)
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
 

@@ -16,6 +16,7 @@ create table if not exists sessions (
   created_at text not null,
   updated_at text not null,
   source text not null default 'sqlite',
+  source_fingerprint text not null default '',
   schema_version text not null default 'context_store.v1',
   metadata_json text not null default '{}'
 );

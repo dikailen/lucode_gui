@@ -537,6 +537,72 @@ describe("RuntimeClient", () => {
     );
   });
 
+  it("passes session search queries to the runtime API", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      expect(init?.method).toBeUndefined();
+      expect(url).toBe("http://127.0.0.1:43217/api/sessions?q=refund+ledger");
+      return response({
+        schema_version: "session.v1",
+        sessions: [
+          {
+            schema_version: "session.v1",
+            session_id: "session_1",
+            title: "Accounting",
+            display_title: "Accounting",
+            created_at: "now",
+            updated_at: "now",
+          },
+        ],
+      });
+    });
+    const client = new RuntimeClient({
+      baseUrl: "http://127.0.0.1:43217",
+      token: "token_1",
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await expect(client.listSessions("refund ledger")).resolves.toEqual([
+      {
+        schema_version: "session.v1",
+        session_id: "session_1",
+        title: "Accounting",
+        display_title: "Accounting",
+        created_at: "now",
+        updated_at: "now",
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads cursor-based session pages with encoded search parameters", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(
+        "http://127.0.0.1:43217/api/sessions?q=refund+ledger&limit=25&cursor=page%2F2",
+      );
+      return response({
+        schema_version: "session.v1",
+        sessions: [],
+        next_cursor: "page/3",
+        has_more: true,
+      });
+    });
+    const client = new RuntimeClient({
+      baseUrl: "http://127.0.0.1:43217",
+      token: "token_1",
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await expect(
+      client.listSessionPage({ query: "refund ledger", limit: 25, cursor: "page/2" }),
+    ).resolves.toEqual({
+      schema_version: "session.v1",
+      sessions: [],
+      next_cursor: "page/3",
+      has_more: true,
+    });
+  });
+
   it("controls the terminal API through authenticated requests", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

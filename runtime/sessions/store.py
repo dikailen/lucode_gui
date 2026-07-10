@@ -26,6 +26,7 @@ class SessionSummary:
     last_user: str = ""
     last_assistant: str = ""
     title: str = ""
+    source_fingerprint: str = ""
 
 
 class SessionStore:
@@ -85,7 +86,7 @@ class SessionStore:
             summary = self._summarize(path)
             if summary is not None:
                 summaries.append(summary)
-        summaries.sort(key=lambda item: item.updated_at, reverse=True)
+        summaries.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
         return summaries[: max(1, int(limit or 10))]
 
     def resolve_session_id(self, selector: str | None = None) -> str | None:

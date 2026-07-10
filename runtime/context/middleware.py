@@ -45,6 +45,7 @@ class ContextCompressionMiddleware:
         tool_schema_tokens: int = 0,
         evidence_tokens: int = 0,
         tool_results: list[dict[str, Any]] | None = None,
+        current_input_persisted: bool = False,
     ) -> ContextMiddlewareResult:
         current_input = str(user_input or "")
         routing_input = current_input
@@ -60,6 +61,8 @@ class ContextCompressionMiddleware:
 
         try:
             messages = self._load_messages(session_id)
+            if current_input_persisted:
+                messages = _without_persisted_current_input(messages, current_input)
             summary = self._load_context_summary(session_id)
             ledger = build_context_ledger(
                 ContextLedgerInput(
@@ -184,6 +187,18 @@ def _message_list(value: Any) -> list[dict[str, str]]:
         if role and content:
             messages.append({"role": role, "content": content})
     return messages
+
+
+def _without_persisted_current_input(
+    messages: list[dict[str, str]],
+    current_input: str,
+) -> list[dict[str, str]]:
+    if not messages:
+        return messages
+    tail = messages[-1]
+    if tail.get("role") != "user" or tail.get("content") != str(current_input or "").strip():
+        return messages
+    return messages[:-1]
 
 
 def _normalize_mode(value: str | None, *, default: str) -> str:

@@ -17,22 +17,28 @@ function makeSession(index: number): ServerSession {
   };
 }
 
-function renderSidebar(sessionCount = 12) {
+function renderSidebar(sessionCount = 12, overrides: Partial<Parameters<typeof SessionSidebar>[0]> = {}) {
   return renderToStaticMarkup(
     createElement(SessionSidebar, {
       t: createTranslator("en"),
       sessions: Array.from({ length: sessionCount }, (_, index) => makeSession(index + 1)),
+      sessionSearchQuery: "",
       activeSessionId: "session_1",
       pendingDeleteSessionId: "",
       activeWorkspace: "chat",
       collapsed: false,
       runStatus: "idle",
+      hasMoreSessions: false,
+      loadingMoreSessions: false,
       createNewSession: () => undefined,
+      searchSessions: () => undefined,
+      loadMoreSessions: () => undefined,
       selectSession: () => undefined,
       requestDeleteSession: () => undefined,
       switchWorkspace: () => undefined,
       openSettings: () => undefined,
       toggleSidebar: () => undefined,
+      ...overrides,
     }),
   );
 }
@@ -48,5 +54,25 @@ describe("SessionSidebar", () => {
     expect(panelIndex).toBeGreaterThanOrEqual(0);
     expect(listIndex).toBeGreaterThan(panelIndex);
     expect(utilityIndex).toBeGreaterThan(listIndex);
+  });
+
+  it("does not hide backend search results with local title filtering", () => {
+    const html = renderSidebar(0, {
+      sessionSearchQuery: "refund ledger",
+      sessions: [
+        {
+          schema_version: "session.v1",
+          session_id: "session_ledger",
+          title: "Accounting",
+          display_title: "Accounting",
+          created_at: "2026-07-07T08:00:00Z",
+          updated_at: "2026-07-07T08:00:00Z",
+        },
+      ],
+    });
+
+    expect(html).toContain("Accounting");
+    expect(html).toContain('value="refund ledger"');
+    expect(html).not.toContain("No matching chats");
   });
 });

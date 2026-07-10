@@ -44,6 +44,7 @@ def initialize_sqlite_store(workspace_root: Path | str) -> SQLiteInitResult:
     schema = _schema_text()
     with connect(workspace_root) as connection:
         connection.executescript(schema)
+        _ensure_compatible_schema(connection)
         row = connection.execute("select value from schema_meta where key = 'schema_version'").fetchone()
     return SQLiteInitResult(
         db_path=db_path,
@@ -54,3 +55,11 @@ def initialize_sqlite_store(workspace_root: Path | str) -> SQLiteInitResult:
 
 def _schema_text() -> str:
     return (Path(__file__).with_name("schema.sql")).read_text(encoding="utf-8")
+
+
+def _ensure_compatible_schema(connection: sqlite3.Connection) -> None:
+    columns = {str(row[1]) for row in connection.execute("pragma table_info(sessions)").fetchall()}
+    if "source_fingerprint" not in columns:
+        connection.execute(
+            "alter table sessions add column source_fingerprint text not null default ''"
+        )

@@ -163,3 +163,41 @@ def test_run_context_store_exports_file_browser_and_terminal_source_labels(tmp_p
     assert label_pairs[("browser_summary", "")] == "local_only"
     assert label_pairs[("terminal_output", "")] == "local_only"
     assert label_pairs[("tool_output", "")] == "project_private"
+
+
+def test_runtime_context_recheck_blocks_local_only_context_from_cloud_worker(tmp_path):
+    from types import SimpleNamespace
+
+    from runtime.execution.run_context import RunContextStore
+    from runtime.execution.task_runner import _runtime_context_placement_error
+
+    store = RunContextStore(tmp_path)
+    store.record_tool_output(
+        tool="desktop_browser",
+        action="summary",
+        summary="visible dashboard text",
+        task_id="browser-task",
+    )
+    task = _Task(id="follow-up", model="cloud")
+    factory = SimpleNamespace(model_registry=_Registry())
+
+    blocked = _runtime_context_placement_error(
+        factory,
+        SimpleNamespace(run_context=store, compute_placement_mode="enforce"),
+        task,
+    )
+    observed = _runtime_context_placement_error(
+        factory,
+        SimpleNamespace(run_context=store, compute_placement_mode="observe"),
+        task,
+    )
+    local = _runtime_context_placement_error(
+        factory,
+        SimpleNamespace(run_context=store, compute_placement_mode="enforce"),
+        _Task(id="local-follow-up", model="local"),
+    )
+
+    assert "local-only" in blocked
+    assert "cloud" in blocked
+    assert observed == ""
+    assert local == ""

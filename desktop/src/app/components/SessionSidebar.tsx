@@ -1,19 +1,25 @@
-import { KeyboardEvent, MouseEvent, useMemo, useState } from "react";
+import { KeyboardEvent, MouseEvent } from "react";
 
 import { formatSessionTime, type RunStatus } from "../appState";
 import type { Translator } from "../i18n";
+import { shouldLoadNextSessionPage } from "../sessionPagination";
 import type { WorkspaceId } from "../useLucodeApp";
 import type { ServerSession } from "../../shared/types";
 
 export type SessionSidebarProps = {
   t: Translator;
   sessions: ServerSession[];
+  sessionSearchQuery: string;
   activeSessionId: string;
   pendingDeleteSessionId: string;
   activeWorkspace: WorkspaceId;
   collapsed: boolean;
   runStatus: RunStatus;
+  hasMoreSessions: boolean;
+  loadingMoreSessions: boolean;
   createNewSession: () => void;
+  searchSessions: (query: string) => void;
+  loadMoreSessions: () => void;
   selectSession: (sessionId: string) => void;
   requestDeleteSession: (sessionId: string) => void;
   switchWorkspace: (workspace: WorkspaceId) => void;
@@ -24,30 +30,23 @@ export type SessionSidebarProps = {
 export function SessionSidebar({
   t,
   sessions,
+  sessionSearchQuery,
   activeSessionId,
   pendingDeleteSessionId,
   activeWorkspace,
   collapsed,
   runStatus,
+  hasMoreSessions,
+  loadingMoreSessions,
   createNewSession,
+  searchSessions,
+  loadMoreSessions,
   selectSession,
   requestDeleteSession,
   switchWorkspace,
   openSettings,
   toggleSidebar,
 }: SessionSidebarProps) {
-  const [query, setQuery] = useState("");
-  const visibleSessions = useMemo(() => {
-    const term = query.trim().toLocaleLowerCase();
-    if (!term) {
-      return sessions;
-    }
-    return sessions.filter((session) => {
-      const title = `${session.display_title || ""} ${session.title || ""}`.toLocaleLowerCase();
-      return title.includes(term);
-    });
-  }, [query, sessions]);
-
   function handleDeleteClick(event: MouseEvent, sessionId: string) {
     event.stopPropagation();
     requestDeleteSession(sessionId);
@@ -120,8 +119,8 @@ export function SessionSidebar({
 
           <input
             className="session-search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            value={sessionSearchQuery}
+            onChange={(event) => searchSessions(event.target.value)}
             placeholder={t("sidebar.search")}
             aria-label={t("sidebar.search")}
           />
@@ -131,11 +130,28 @@ export function SessionSidebar({
             {runStatus === "running" ? <span className="sidebar-running-dot" title={t("sidebar.runningTitle")} /> : null}
           </div>
 
-          <div className="session-list">
-            {visibleSessions.length === 0 ? (
-              <div className="empty-state">{query.trim() ? t("sidebar.noMatches") : t("sidebar.noChats")}</div>
+          <div
+            className="session-list"
+            aria-busy={loadingMoreSessions}
+            onScroll={(event) => {
+              const target = event.currentTarget;
+              if (
+                shouldLoadNextSessionPage({
+                  scrollTop: target.scrollTop,
+                  clientHeight: target.clientHeight,
+                  scrollHeight: target.scrollHeight,
+                  hasMore: hasMoreSessions,
+                  loading: loadingMoreSessions,
+                })
+              ) {
+                loadMoreSessions();
+              }
+            }}
+          >
+            {sessions.length === 0 ? (
+              <div className="empty-state">{sessionSearchQuery.trim() ? t("sidebar.noMatches") : t("sidebar.noChats")}</div>
             ) : (
-              visibleSessions.map((session) => {
+              sessions.map((session) => {
                 const confirmingDelete = pendingDeleteSessionId === session.session_id;
                 return (
                   <button
@@ -164,6 +180,7 @@ export function SessionSidebar({
                 );
               })
             )}
+            {loadingMoreSessions ? <span className="session-list-loader" aria-hidden="true" /> : null}
           </div>
         </div>
       ) : (

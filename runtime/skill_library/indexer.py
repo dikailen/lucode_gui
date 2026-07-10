@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -18,9 +19,11 @@ from runtime.skill_library.usage import load_usage_summary
 
 
 SOURCE_PRIORITY = {"workspace": 0, "user": 1, "sample": 2, "core": 3}
+INDEX_MANIFEST_SCHEMA_VERSION = "skill_index_manifest.v1"
 
 
 def build_skill_index(workspace_context=None, *, write: bool = True) -> list[SkillIndexEntry]:
+    source_snapshot = _skill_source_snapshot(workspace_context)
     layers = discover_skill_layers(workspace_context)
     discovered: list[SkillIndexEntry] = []
     for source in ("core", "sample", "user", "workspace"):
@@ -29,17 +32,28 @@ def build_skill_index(workspace_context=None, *, write: bool = True) -> list[Ski
             discovered.append(entry)
 
     entries = _dedupe_entries(discovered)
-    entries = _merge_usage_summary(entries, workspace_context)
     entries.sort(key=lambda entry: (SOURCE_PRIORITY.get(entry.source, 9), entry.id))
     if write:
-        _write_index(entries, workspace_context)
-    return entries
+        try:
+            _write_index(entries, workspace_context, source_snapshot=source_snapshot)
+        except OSError:
+            # The disk index is an optional cache; in-memory resolution remains authoritative.
+            pass
+    return _merge_usage_summary(entries, workspace_context)
 
 
 def load_skill_index(workspace_context=None, *, rebuild_if_missing: bool = True) -> list[SkillIndexEntry]:
     path = _index_path(workspace_context)
-    if not path.exists():
+    source_snapshot = _skill_source_snapshot(workspace_context)
+    if not path.exists() or not _source_manifest_matches(workspace_context, source_snapshot):
         return build_skill_index(workspace_context, write=True) if rebuild_if_missing else []
+    entries = _read_index(path)
+    if entries is None or (source_snapshot and not entries):
+        return build_skill_index(workspace_context, write=True) if rebuild_if_missing else []
+    return _merge_usage_summary(entries, workspace_context)
+
+
+def _read_index(path: Path) -> list[SkillIndexEntry] | None:
     entries: list[SkillIndexEntry] = []
     for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         if not line.strip():
@@ -47,10 +61,14 @@ def load_skill_index(workspace_context=None, *, rebuild_if_missing: bool = True)
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
             entries.append(skill_entry_from_dict(data))
-    return _merge_usage_summary(entries, workspace_context)
+        except Exception:
+            return None
+    return entries
 
 
 def _entry_from_discovered_item(item: dict[str, Any]) -> SkillIndexEntry:
@@ -104,11 +122,24 @@ def _is_protected_core(entry: SkillIndexEntry) -> bool:
     return entry.source == "core" or entry.core or entry.id in PROTECTED_SYSTEM_SKILLS
 
 
-def _write_index(entries: list[SkillIndexEntry], workspace_context=None) -> None:
+def _write_index(
+    entries: list[SkillIndexEntry],
+    workspace_context=None,
+    *,
+    source_snapshot: list[dict[str, Any]] | None = None,
+) -> None:
     path = _index_path(workspace_context)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "\n".join(json.dumps(skill_entry_to_dict(entry), ensure_ascii=False, sort_keys=True) for entry in entries)
-    path.write_text((text + "\n") if text else "", encoding="utf-8")
+    _write_text_atomic(path, (text + "\n") if text else "")
+    manifest = {
+        "schema_version": INDEX_MANIFEST_SCHEMA_VERSION,
+        "sources": list(source_snapshot if source_snapshot is not None else _skill_source_snapshot(workspace_context)),
+    }
+    _write_text_atomic(
+        _manifest_path(workspace_context),
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+    )
 
 
 def _merge_usage_summary(entries: list[SkillIndexEntry], workspace_context=None) -> list[SkillIndexEntry]:
@@ -135,3 +166,60 @@ def _index_path(workspace_context=None) -> Path:
 
 def _usage_path(workspace_context=None) -> Path:
     return _index_path(workspace_context).parent / "usage.jsonl"
+
+
+def _manifest_path(workspace_context=None) -> Path:
+    return _index_path(workspace_context).parent / "index.manifest.json"
+
+
+def _skill_source_snapshot(workspace_context=None) -> list[dict[str, Any]]:
+    roots = extension_roots(workspace_context)
+    source_roots = (
+        ("core", roots.app_home / "core_skills"),
+        ("sample", roots.app_home / "skills"),
+        ("user", roots.user_home / "skills"),
+        ("workspace", roots.workspace_root / ".lucode" / "skills"),
+    )
+    snapshot: list[dict[str, Any]] = []
+    for source, root in source_roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*/SKILL.md")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot.append(
+                {
+                    "source": source,
+                    "path": path.resolve().as_posix(),
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                }
+            )
+    return snapshot
+
+
+def _source_manifest_matches(workspace_context, source_snapshot: list[dict[str, Any]]) -> bool:
+    path = _manifest_path(workspace_context)
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict) or data.get("schema_version") != INDEX_MANIFEST_SCHEMA_VERSION:
+        return False
+    return data.get("sources") == source_snapshot
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass

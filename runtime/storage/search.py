@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -8,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime.common.text_utils import sanitize_text
+from runtime.storage.freshness import sqlite_session_matches_jsonl
 from runtime.storage.sqlite_store import connect, database_path, initialize_sqlite_store
 
 
@@ -49,8 +49,10 @@ def search_history(workspace_root: Path | str, query: str, limit: int = 20) -> l
         initialize_sqlite_store(root)
         with connect(root) as connection:
             results: list[HistorySearchResult]
+            fts_exists = _fts_schema_exists(connection)
             if _ensure_fts_schema(connection):
-                _rebuild_fts_tables(connection)
+                if not fts_exists:
+                    _rebuild_fts_tables(connection)
                 results = _search_fts(connection, normalized_query, limit=safe_limit * 4)
             else:
                 results = []
@@ -151,6 +153,14 @@ def _ensure_fts_schema(connection: sqlite3.Connection) -> bool:
         return True
     except sqlite3.Error:
         return False
+
+
+def _fts_schema_exists(connection: sqlite3.Connection) -> bool:
+    rows = connection.execute(
+        "select name from sqlite_master where type = 'table' and name in (?, ?, ?)",
+        ("sessions_fts", "messages_fts", "summaries_fts"),
+    ).fetchall()
+    return {str(row[0]) for row in rows} == {"sessions_fts", "messages_fts", "summaries_fts"}
 
 
 def _rebuild_fts_tables(connection: sqlite3.Connection) -> None:
@@ -406,31 +416,7 @@ def _sqlite_session_matches_jsonl(
     path = workspace_root / ".lucode" / "history" / "sessions" / f"{session_id}.jsonl"
     if not path.is_file():
         return False
-    row = connection.execute(
-        "select count(*) from messages where session_id = ?",
-        (session_id,),
-    ).fetchone()
-    sqlite_count = int(row[0] or 0) if row else 0
-    return sqlite_count == _jsonl_message_count(path)
-
-
-def _jsonl_message_count(path: Path) -> int:
-    count = 0
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                text = line.strip()
-                if not text:
-                    continue
-                try:
-                    event: Any = json.loads(text)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(event, dict) and event.get("type") == "message":
-                    count += 1
-    except OSError:
-        return 0
-    return count
+    return sqlite_session_matches_jsonl(connection, path, session_id)
 
 
 def _fts_query(query: str) -> str:
@@ -462,4 +448,3 @@ def _short(value: Any, limit: int = 220) -> str:
 
 def _source_priority(source: str) -> int:
     return {"session_title": 0, "message": 1, "summary": 2}.get(str(source or ""), 9)
-

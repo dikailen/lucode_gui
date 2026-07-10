@@ -290,6 +290,23 @@ button:disabled {
   scrollbar-gutter: stable;
 }
 
+.session-list-loader {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-self: center;
+  border: 2px solid #d5dae4;
+  border-top-color: #3578c6;
+  border-radius: 50%;
+  animation: session-list-spin 0.8s linear infinite;
+}
+
+@keyframes session-list-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .session-row {
   display: grid;
   width: 100%;

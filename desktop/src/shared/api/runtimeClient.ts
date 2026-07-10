@@ -17,6 +17,7 @@ import type {
   RuntimeModel,
   ServerRun,
   ServerSession,
+  SessionPageResponse,
   SessionMessagesResponse,
   TerminalStateResponse,
 } from "../types";
@@ -230,11 +231,37 @@ export class RuntimeClient {
     });
   }
 
-  async listSessions(): Promise<ServerSession[]> {
+  async listSessions(query = ""): Promise<ServerSession[]> {
+    const cleanQuery = query.trim();
+    const path = cleanQuery ? `/api/sessions?${new URLSearchParams({ q: cleanQuery }).toString()}` : "/api/sessions";
     const payload = await this.request<{ schema_version: "session.v1"; sessions: ServerSession[] }>(
-      "/api/sessions",
+      path,
     );
     return payload.sessions;
+  }
+
+  async listSessionPage(
+    options: { query?: string; limit?: number; cursor?: string } = {},
+  ): Promise<SessionPageResponse> {
+    const params = new URLSearchParams();
+    const cleanQuery = String(options.query || "").trim();
+    if (cleanQuery) {
+      params.set("q", cleanQuery);
+    }
+    params.set("limit", String(Math.max(1, Math.min(100, Math.trunc(options.limit ?? 50)))));
+    const cursor = String(options.cursor || "").trim();
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+    const payload = await this.request<Partial<SessionPageResponse> & { sessions: ServerSession[] }>(
+      `/api/sessions?${params.toString()}`,
+    );
+    return {
+      schema_version: "session.v1",
+      sessions: payload.sessions,
+      next_cursor: String(payload.next_cursor || ""),
+      has_more: Boolean(payload.has_more),
+    };
   }
 
   async createSession(title: string): Promise<ServerSession> {

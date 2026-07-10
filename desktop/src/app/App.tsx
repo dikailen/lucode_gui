@@ -31,13 +31,18 @@ export function App() {
     >
       <SessionSidebar
         t={t}
-        sessions={state.sessions}
+        sessions={controller.visibleSessions}
+        sessionSearchQuery={controller.sessionSearchQuery}
         activeSessionId={state.activeSessionId}
         pendingDeleteSessionId={state.pendingDeleteSessionId}
         activeWorkspace={controller.activeWorkspace}
         collapsed={controller.sidebarCollapsed}
         runStatus={state.runStatus}
+        hasMoreSessions={controller.visibleSessionHasMore}
+        loadingMoreSessions={controller.visibleSessionLoadingMore}
         createNewSession={controller.createNewSession}
+        searchSessions={controller.searchSessions}
+        loadMoreSessions={controller.loadMoreSessions}
         selectSession={controller.selectSession}
         requestDeleteSession={controller.requestDeleteSession}
         switchWorkspace={controller.switchWorkspace}

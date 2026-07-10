@@ -147,3 +147,125 @@ do_not_use_when: [Modify Python runtime]
 
     assert loaded[0].usage["used_count"] == 3
     assert loaded[0].usage["rejected_by_planner_count"] == 1
+
+
+def test_skill_index_writes_source_manifest_but_usage_updates_do_not_invalidate_it(tmp_path, monkeypatch):
+    import runtime.config.extensions as extensions
+    import runtime.skill_library.indexer as indexer
+
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "usage-skill",
+        """
+id: usage-skill
+name: Usage Skill
+description: Track usage without rescanning source.
+category: [programming]
+tags: [usage]
+use_when: [Track usage]
+do_not_use_when: [Casual chat]
+""".strip(),
+    )
+    build_skill_index(ctx, write=True)
+    manifest_path = ctx.workspace_root / ".lucode" / "skills" / "index.manifest.json"
+    assert manifest_path.exists()
+
+    def fail_read(_path):
+        raise AssertionError("usage-only changes must not reread SKILL.md")
+
+    monkeypatch.setattr(extensions, "read_skill_frontmatter", fail_read)
+    monkeypatch.setattr(indexer, "read_skill_frontmatter", fail_read)
+    SkillUsageTracker(ctx.workspace_root).record(
+        skill_id="usage_skill",
+        query="Track usage",
+        task_id="task-usage",
+        result="success",
+    )
+
+    loaded = load_skill_index(ctx)
+
+    assert loaded[0].usage["used_count"] == 1
+
+
+def test_skill_index_does_not_freeze_usage_data_inside_source_cache(tmp_path):
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "dynamic-usage",
+        """
+id: dynamic-usage
+name: Dynamic Usage
+description: Keep usage separate from source metadata.
+category: [programming]
+tags: [usage]
+use_when: [Track dynamic usage]
+do_not_use_when: [Casual chat]
+""".strip(),
+    )
+    tracker = SkillUsageTracker(ctx.workspace_root)
+    tracker.record(
+        skill_id="dynamic_usage",
+        query="Track dynamic usage",
+        task_id="task-dynamic",
+        result="success",
+    )
+    built = build_skill_index(ctx, write=True)
+    assert built[0].usage["used_count"] == 1
+
+    tracker.usage_path.unlink()
+    loaded = load_skill_index(ctx)
+
+    assert loaded[0].usage == {}
+
+
+def test_load_skill_index_rebuilds_a_corrupt_cached_index(tmp_path):
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "repair-cache",
+        """
+id: repair-cache
+name: Repair Cache
+description: Rebuild a corrupt metadata cache.
+category: [programming]
+tags: [cache]
+use_when: [Repair cache]
+do_not_use_when: [Casual chat]
+""".strip(),
+    )
+    build_skill_index(ctx, write=True)
+    index_path = ctx.workspace_root / ".lucode" / "skills" / "index.jsonl"
+    index_path.write_text("{not-json\n", encoding="utf-8")
+
+    loaded = load_skill_index(ctx)
+
+    assert [entry.id for entry in loaded] == ["repair_cache"]
+
+
+def test_load_skill_index_keeps_working_when_cache_write_fails(tmp_path, monkeypatch):
+    import runtime.skill_library.indexer as indexer
+
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "readonly-cache",
+        """
+id: readonly-cache
+name: Readonly Cache
+description: Resolve even when cache files cannot be written.
+category: [programming]
+tags: [cache]
+use_when: [Resolve readonly cache]
+do_not_use_when: [Casual chat]
+""".strip(),
+    )
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("workspace is read-only")
+
+    monkeypatch.setattr(indexer, "_write_index", fail_write)
+
+    loaded = load_skill_index(ctx)
+
+    assert [entry.id for entry in loaded] == ["readonly_cache"]

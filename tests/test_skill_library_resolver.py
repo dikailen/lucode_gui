@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from runtime.skill_library.resolver import SkillResolver
 from runtime.skill_library.renderer import render_candidates_for_planner
 from runtime.skill_library.schema import SkillCandidate, normalize_skill_metadata
@@ -9,6 +11,40 @@ def _entry(raw):
 
 def _candidate(raw, score=0.7, reasons=("use_when match",), penalties=()):
     return SkillCandidate(entry=_entry(raw), score=score, reasons=tuple(reasons), penalties=tuple(penalties))
+
+
+def _context(tmp_path):
+    app = tmp_path / "app"
+    user = tmp_path / "user"
+    workspace = tmp_path / "workspace"
+    for root in (app / "core_skills", app / "skills", user / "skills", workspace / ".lucode" / "skills"):
+        root.mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(app_home=app, user_home=user, workspace_root=workspace)
+
+
+def _write_skill(root, folder, *, name, description, use_when):
+    skill_dir = root / folder
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    path = skill_dir / "SKILL.md"
+    path.write_text(
+        "\n".join(
+            [
+                "---",
+                f"id: {folder}",
+                f"name: {name}",
+                f"description: {description}",
+                "category: [programming]",
+                f"tags: [{folder}]",
+                f"use_when: [{use_when}]",
+                "do_not_use_when: [Casual chat]",
+                "---",
+                "",
+                "Skill body.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_resolver_returns_top_metadata_candidates_without_task_bindings():
@@ -151,3 +187,74 @@ def test_renderer_is_candidate_only_and_does_not_emit_skill_interface_contract()
     assert "skill_interface" not in rendered
     assert "task_bindings" not in rendered
     assert "adopted_skill_ids" not in rendered
+
+
+def test_resolver_reuses_current_disk_index_without_rereading_skill_frontmatter(tmp_path, monkeypatch):
+    import runtime.config.extensions as extensions
+    import runtime.skill_library.indexer as indexer
+
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "electron-ui",
+        name="Electron UI",
+        description="Fix Electron React layouts.",
+        use_when="Fix Electron UI",
+    )
+    reads = {"count": 0}
+    original_extension_reader = extensions.read_skill_frontmatter
+    original_index_reader = indexer.read_skill_frontmatter
+
+    def count_extension_read(path):
+        reads["count"] += 1
+        return original_extension_reader(path)
+
+    def count_index_read(path):
+        reads["count"] += 1
+        return original_index_reader(path)
+
+    monkeypatch.setattr(extensions, "read_skill_frontmatter", count_extension_read)
+    monkeypatch.setattr(indexer, "read_skill_frontmatter", count_index_read)
+    resolver = SkillResolver(workspace_context=ctx)
+
+    first = resolver.resolve_for_planner("Fix Electron UI")
+    first_read_count = reads["count"]
+    second = resolver.resolve_for_planner("Fix Electron UI")
+
+    assert first.candidate_skill_ids == ("electron_ui",)
+    assert second.candidate_skill_ids == ("electron_ui",)
+    assert first_read_count > 0
+    assert reads["count"] == first_read_count
+
+
+def test_resolver_invalidates_index_when_skill_sources_change(tmp_path):
+    ctx = _context(tmp_path)
+    root = ctx.workspace_root / ".lucode" / "skills"
+    first_path = _write_skill(
+        root,
+        "first-skill",
+        name="First Skill",
+        description="Handle first workflow.",
+        use_when="Run first workflow",
+    )
+    resolver = SkillResolver(workspace_context=ctx)
+
+    assert resolver.resolve_for_planner("Run first workflow").candidate_skill_ids == ("first_skill",)
+
+    first_path.write_text(
+        first_path.read_text(encoding="utf-8").replace("Run first workflow", "Run renamed workflow now"),
+        encoding="utf-8",
+    )
+    assert resolver.resolve_for_planner("Run renamed workflow now").candidate_skill_ids == ("first_skill",)
+
+    _write_skill(
+        root,
+        "second-skill",
+        name="Second Skill",
+        description="Handle second workflow.",
+        use_when="Run second workflow",
+    )
+    assert resolver.resolve_for_planner("Run second workflow").candidate_skill_ids[0] == "second_skill"
+
+    first_path.unlink()
+    assert "first_skill" not in resolver.resolve_for_planner("Run first workflow").candidate_skill_ids

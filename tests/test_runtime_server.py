@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1574,6 +1575,167 @@ def test_sessions_are_persisted_and_listed_with_stable_short_titles(tmp_path):
     assert reloaded[0]["title"] == long_title
 
 
+def test_sessions_support_cursor_pagination_beyond_one_hundred_items(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(125):
+        store.append_event(
+            f"session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"Session {index:03d}",
+                "timestamp": started_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    first = client.get("/api/sessions?limit=50", headers=_auth_headers())
+    second = client.get(
+        f"/api/sessions?limit=50&cursor={first.json()['next_cursor']}",
+        headers=_auth_headers(),
+    )
+    third = client.get(
+        f"/api/sessions?limit=50&cursor={second.json()['next_cursor']}",
+        headers=_auth_headers(),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+    assert len(first.json()["sessions"]) == 50
+    assert len(second.json()["sessions"]) == 50
+    assert len(third.json()["sessions"]) == 25
+    assert first.json()["sessions"][0]["session_id"] == "session-124"
+    assert third.json()["sessions"][-1]["session_id"] == "session-000"
+    assert first.json()["has_more"] is True
+    assert second.json()["has_more"] is True
+    assert third.json()["has_more"] is False
+    assert third.json()["next_cursor"] == ""
+
+    oldest = client.get("/api/sessions/session-000/messages", headers=_auth_headers())
+    assert oldest.status_code == 200
+    assert oldest.json()["session_id"] == "session-000"
+
+
+def test_session_search_uses_an_independent_cursor_from_normal_history(tmp_path):
+    client = _client(tmp_path)
+    store = client.app.state.lucode_run_manager._history_facade.history_store
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(80):
+        marker = "matching" if index % 2 == 0 else "other"
+        store.append_event(
+            f"search-session-{index:03d}",
+            {
+                "type": "session_metadata",
+                "title": f"{marker} session {index:03d}",
+                "timestamp": (started_at + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    normal_first = client.get("/api/sessions?limit=10", headers=_auth_headers()).json()
+    search_first = client.get("/api/sessions?q=matching&limit=10", headers=_auth_headers()).json()
+    normal_second = client.get(
+        f"/api/sessions?limit=10&cursor={normal_first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+    search_second = client.get(
+        f"/api/sessions?q=matching&limit=10&cursor={search_first['next_cursor']}",
+        headers=_auth_headers(),
+    ).json()
+
+    assert normal_first["sessions"][0]["session_id"] == "search-session-079"
+    assert normal_second["sessions"][0]["session_id"] == "search-session-069"
+    assert search_first["sessions"][0]["session_id"] == "search-session-078"
+    assert search_second["sessions"][0]["session_id"] == "search-session-058"
+    assert all("matching" in item["title"] for item in search_first["sessions"] + search_second["sessions"])
+
+
+def test_sessions_search_query_matches_history_content_without_returning_unmatched_sessions(tmp_path):
+    async def runner(request):
+        if "invoice" in request.user_input:
+            return RunExecutionResult(final_output="Use the refund ledger reconciliation checklist.")
+        return RunExecutionResult(final_output="Unrelated planning note.")
+
+    client = _client(tmp_path, run_executor=runner)
+    matching_session = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "Accounting question"},
+    ).json()["session_id"]
+    other_session = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "Browser question"},
+    ).json()["session_id"]
+
+    matching_run = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": matching_session, "input": "invoice workflow"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{matching_run}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+    other_run = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": other_session, "input": "browser workflow"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{other_run}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+    response = client.get("/api/sessions?q=refund%20ledger", headers=_auth_headers())
+
+    assert response.status_code == 200
+    session_ids = [item["session_id"] for item in response.json()["sessions"]]
+    assert session_ids == [matching_session]
+
+
+def test_sessions_search_query_uses_sqlite_fts_when_available(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_CONTEXT_SQLITE", "dual_write")
+    monkeypatch.setenv("LUCODE_CONTEXT_FTS", "on")
+
+    async def runner(request):
+        if "check sqlite" in request.user_input:
+            return RunExecutionResult(final_output="Vectorless FTS probe marker.")
+        return RunExecutionResult(final_output="Unrelated sqlite answer.")
+
+    client = _client(tmp_path, run_executor=runner)
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "FTS search case"},
+    ).json()["session_id"]
+    unmatched_session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "Other search case"},
+    ).json()["session_id"]
+    run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "check sqlite search"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+    unmatched_run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": unmatched_session_id, "input": "other sqlite search"},
+    ).json()["run_id"]
+    with client.websocket_connect(f"/api/runs/{unmatched_run_id}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+        websocket.receive_json()
+
+    response = client.get("/api/sessions?q=Vectorless%20probe", headers=_auth_headers())
+
+    assert response.status_code == 200
+    assert [item["session_id"] for item in response.json()["sessions"]] == [session_id]
+
+
 def test_first_run_renames_placeholder_session_and_survives_reload(tmp_path):
     async def runner(request):
         request.event_bus.emit("PlanningStarted", "planning started", payload={"route_type": "direct_answer"})
@@ -1986,6 +2148,59 @@ def test_stop_run_cancels_running_executor_and_emits_cancel_event(tmp_path):
     assert cancelled_flag["value"] is True
 
 
+def test_runtime_rejects_second_active_run_for_same_session(tmp_path):
+    async def runner(request):
+        await asyncio.Event().wait()
+
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=runner)
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            headers=_auth_headers(),
+            json={"title": "single active run"},
+        ).json()["session_id"]
+        first = client.post(
+            "/api/runs",
+            headers=_auth_headers(),
+            json={"session_id": session_id, "input": "first request"},
+        )
+
+        second = client.post(
+            "/api/runs",
+            headers=_auth_headers(),
+            json={"session_id": session_id, "input": "second request"},
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 409
+        assert second.json()["error"]["code"] == "run_conflict"
+        client.post(f"/api/runs/{first.json()['run_id']}/stop", headers=_auth_headers())
+
+
+def test_runtime_rejects_deleting_session_with_active_run(tmp_path):
+    async def runner(request):
+        await asyncio.Event().wait()
+
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=runner)
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            headers=_auth_headers(),
+            json={"title": "protected active session"},
+        ).json()["session_id"]
+        run = client.post(
+            "/api/runs",
+            headers=_auth_headers(),
+            json={"session_id": session_id, "input": "keep running"},
+        )
+
+        deleted = client.delete(f"/api/sessions/{session_id}", headers=_auth_headers())
+
+        assert deleted.status_code == 409
+        assert deleted.json()["error"]["code"] == "run_conflict"
+        client.post(f"/api/runs/{run.json()['run_id']}/stop", headers=_auth_headers())
+
+
 def test_run_executor_failure_is_reported_as_failed_event(tmp_path):
     async def runner(request):
         request.event_bus.emit("PlanningStarted", "planning started", status="running")
@@ -2265,6 +2480,8 @@ def test_runtime_second_turn_enforce_uses_history_prompt_but_keeps_raw_routing_i
     assert first_events[-1]["type"] == "run.completed"
     assert second_events[-1]["type"] == "run.completed"
     assert len(calls) == 2
+    assert str(calls[0]["prompt"]).count(str(calls[0]["routing_input"])) == 1
+    assert str(calls[1]["prompt"]).count(str(calls[1]["routing_input"])) == 1
     assert calls[0]["routing_input"] == "你好"
     assert calls[1]["routing_input"] == "继续解释"
     assert calls[1]["prompt"] != "继续解释"

@@ -14,6 +14,8 @@ from runtime.context.compaction import redact_sensitive_text
 from runtime.history.model import HistoryDeleteResult, HistoryItem, HistoryPreview
 from runtime.sessions.store import SessionStore, SessionSummary
 from runtime.storage.context_store import ContextSQLiteStore
+from runtime.storage.freshness import jsonl_source_fingerprint, source_snapshot_matches_jsonl
+from runtime.storage.sqlite_store import database_path
 
 
 HISTORY_SCHEMA_VERSION = 1
@@ -98,6 +100,7 @@ class HistoryStore(SessionStore):
             payload = dict(event or {})
             event_type = str(payload.get("type") or "").strip()
             timestamp = str(payload.get("timestamp") or "").strip() or _now_iso()
+            source_fingerprint = jsonl_source_fingerprint(self._path_for(session_id))
             if event_type == "session_metadata":
                 store.save_session(
                     {
@@ -106,30 +109,30 @@ class HistoryStore(SessionStore):
                         "created_at": timestamp,
                         "updated_at": timestamp,
                         "source": "jsonl",
+                        "source_fingerprint": source_fingerprint,
                     }
                 )
-                return
-            if event_type != "message":
-                return
-            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-            run_id = str(metadata.get("run_id") or "")
-            store.save_message(
-                {
-                    "session_id": session_id,
-                    "role": str(payload.get("role") or ""),
-                    "content": str(payload.get("content") or ""),
-                    "created_at": timestamp,
-                    "metadata": metadata,
-                    "source": "jsonl",
-                }
-            )
-            self._append_sqlite_context_metadata(
-                store,
-                session_id=session_id,
-                run_id=run_id,
-                metadata=metadata,
-                created_at=timestamp,
-            )
+            elif event_type == "message":
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                run_id = str(metadata.get("run_id") or "")
+                store.save_message(
+                    {
+                        "session_id": session_id,
+                        "role": str(payload.get("role") or ""),
+                        "content": str(payload.get("content") or ""),
+                        "created_at": timestamp,
+                        "metadata": metadata,
+                        "source": "jsonl",
+                    }
+                )
+                self._append_sqlite_context_metadata(
+                    store,
+                    session_id=session_id,
+                    run_id=run_id,
+                    metadata=metadata,
+                    created_at=timestamp,
+                )
+            store.update_session_source_fingerprint(session_id, source_fingerprint)
         except Exception:
             # SQLite is an auxiliary cache/index in Phase 3; JSONL stays authoritative.
             return
@@ -241,7 +244,23 @@ class HistoryFacade:
         self._context_sqlite_read_store: ContextSQLiteStore | None = None
 
     def list_items(self, limit: int = 20) -> list[HistoryItem]:
-        limit = max(1, int(limit or 20))
+        return self._list_items_up_to(max(1, int(limit or 20)))
+
+    def list_items_page(
+        self,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> tuple[list[HistoryItem], str, bool]:
+        safe_limit = max(1, int(limit or 20))
+        offset = _decode_page_cursor(cursor)
+        items = self._list_items_up_to(offset + safe_limit + 1)
+        page = items[offset : offset + safe_limit]
+        has_more = len(items) > offset + safe_limit
+        next_cursor = str(offset + len(page)) if has_more else ""
+        return page, next_cursor, has_more
+
+    def _list_items_up_to(self, limit: int) -> list[HistoryItem]:
         items: list[HistoryItem] = []
         seen: set[str] = set()
         for summary in self._sqlite_list_sessions(limit=limit):
@@ -257,7 +276,7 @@ class HistoryFacade:
                     continue
                 seen.add(summary.session_id)
                 items.append(_history_item_from_summary(summary, storage_kind=storage_kind))
-        items.sort(key=lambda item: item.updated_at, reverse=True)
+        items.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
         return items[:limit]
 
     def preview(self, history_id: str) -> HistoryPreview:
@@ -305,6 +324,8 @@ class HistoryFacade:
 
     def resolve(self, selector: str | None) -> str | None:
         query = str(selector or "last").strip()
+        if query.casefold() not in {"", "last", "latest"} and self.contains(query):
+            return query
         items = self.list_items(limit=200)
         if not items:
             return None
@@ -320,6 +341,15 @@ class HistoryFacade:
             raise ValueError(f"会话前缀不唯一：{query}")
         return matches[0].session_id
 
+    def contains(self, session_id: str) -> bool:
+        target = str(session_id or "").strip()
+        if not target:
+            return False
+        return any(
+            (store.sessions_dir / f"{target}.jsonl").is_file()
+            for store in (self.history_store, self.session_store)
+        )
+
     def delete(self, selector: str) -> HistoryDeleteResult:
         session_id = self.resolve(selector)
         if not session_id:
@@ -328,6 +358,8 @@ class HistoryFacade:
         store = self._store_for(session_id)
         path = (store.sessions_dir if store is not None else self.session_store.sessions_dir) / f"{session_id}.jsonl"
         title = item.title if item is not None else session_id
+        if database_path(self.workspace_root).is_file():
+            ContextSQLiteStore(self.workspace_root).delete_session(session_id)
         deleted = False
         if path.is_file():
             path.unlink()
@@ -350,14 +382,34 @@ class HistoryFacade:
         terms = [term.casefold() for term in sanitize_text(str(query or "")).split() if term.strip()]
         if not terms:
             return self.list_items(limit=limit)
-        matches: list[HistoryItem] = []
-        for item in self.list_items(limit=200):
+        safe_limit = max(1, int(limit or 20))
+        matches: list[HistoryItem] = self._fts_search_items(query, limit=safe_limit)
+        seen = {item.session_id for item in matches}
+        for item in self.list_items(limit=max(200, safe_limit * 4)):
+            if item.session_id in seen:
+                continue
             haystack = self._search_text(item.session_id)
             if all(term in haystack for term in terms):
                 matches.append(item)
-            if len(matches) >= max(1, int(limit or 20)):
+                seen.add(item.session_id)
+            if len(matches) >= safe_limit:
                 break
         return matches
+
+    def search_page(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> tuple[list[HistoryItem], str, bool]:
+        safe_limit = max(1, int(limit or 20))
+        offset = _decode_page_cursor(cursor)
+        matches = self.search(query, limit=offset + safe_limit + 1)
+        page = matches[offset : offset + safe_limit]
+        has_more = len(matches) > offset + safe_limit
+        next_cursor = str(offset + len(page)) if has_more else ""
+        return page, next_cursor, has_more
 
     def export(self, selector: str, output_path: Path | None = None) -> Path:
         session_id = self.resolve(selector)
@@ -459,7 +511,7 @@ class HistoryFacade:
         if store is None:
             return []
         try:
-            summary = _summary_for_session(store.list_sessions(limit=200), session_id)
+            summary = store.get_session(session_id)
             if summary is None or not self._sqlite_summary_is_current(summary):
                 return []
             return store.load_messages(session_id, limit=limit)
@@ -471,7 +523,7 @@ class HistoryFacade:
         if store is None:
             return ""
         try:
-            summary = _summary_for_session(store.list_sessions(limit=200), session_id)
+            summary = store.get_session(session_id)
             if summary is None or not self._sqlite_summary_is_current(summary):
                 return ""
             return store.load_context_summary(session_id, max_chars=max_chars)
@@ -489,6 +541,29 @@ class HistoryFacade:
             return None
         return self._context_sqlite_read_store
 
+    def _fts_search_items(self, query: str, limit: int) -> list[HistoryItem]:
+        if not _context_fts_enabled():
+            return []
+        try:
+            from runtime.storage.search import search_history
+
+            results = search_history(self.workspace_root, query, limit=max(limit * 2, limit))
+        except Exception:
+            return []
+        items: list[HistoryItem] = []
+        seen: set[str] = set()
+        for result in results:
+            if result.session_id in seen:
+                continue
+            summary = self._history_summary_for(result.session_id)
+            if summary is None:
+                continue
+            seen.add(result.session_id)
+            items.append(_history_item_from_summary(summary, storage_kind="history_fts"))
+            if len(items) >= limit:
+                break
+        return items
+
     def _history_jsonl_exists(self, session_id: str) -> bool:
         safe_id = str(session_id or "").strip()
         if not safe_id:
@@ -496,10 +571,12 @@ class HistoryFacade:
         return (self.history_store.sessions_dir / f"{safe_id}.jsonl").is_file()
 
     def _sqlite_summary_is_current(self, sqlite_summary: SessionSummary) -> bool:
-        history_summary = self._history_summary_for(sqlite_summary.session_id)
-        if history_summary is None:
-            return False
-        return int(sqlite_summary.message_count or 0) == int(history_summary.message_count or 0)
+        path = self.history_store.sessions_dir / f"{sqlite_summary.session_id}.jsonl"
+        return source_snapshot_matches_jsonl(
+            path,
+            message_count=sqlite_summary.message_count,
+            source_fingerprint=sqlite_summary.source_fingerprint,
+        )
 
     def _history_summary_for(self, session_id: str) -> SessionSummary | None:
         safe_id = str(session_id or "").strip()
@@ -523,6 +600,9 @@ class HistoryFacade:
 
     def _search_text(self, session_id: str) -> str:
         parts = [session_id]
+        history_summary = self._history_summary_for(session_id)
+        if history_summary is not None:
+            parts.append(history_summary.title)
         preview = self.preview(session_id)
         parts.extend(
             [
@@ -623,6 +703,19 @@ def _summary_for_session(summaries: list[SessionSummary], session_id: str) -> Se
     return next((summary for summary in summaries if summary.session_id == target), None)
 
 
+def _decode_page_cursor(cursor: str | None) -> int:
+    text = str(cursor or "").strip()
+    if not text:
+        return 0
+    try:
+        offset = int(text)
+    except ValueError as exc:
+        raise ValueError("invalid session cursor") from exc
+    if offset < 0:
+        raise ValueError("invalid session cursor")
+    return offset
+
+
 def _short(text: Any, limit: int = 88) -> str:
     normalized = _clean_truncation_marker(sanitize_text(str(text or "")).replace("\n", " ").strip())
     if len(normalized) <= limit:
@@ -661,3 +754,8 @@ def _sqlite_dual_write_enabled() -> bool:
 def _sqlite_read_through_enabled() -> bool:
     mode = str(os.environ.get("LUCODE_CONTEXT_SQLITE") or "off").strip().lower()
     return mode in {"read_through", "primary"}
+
+
+def _context_fts_enabled() -> bool:
+    raw = str(os.environ.get("LUCODE_CONTEXT_FTS") or "off").strip().lower()
+    return raw in {"1", "true", "yes", "on", "enabled"}

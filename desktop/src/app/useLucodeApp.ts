@@ -16,6 +16,8 @@ import {
   setSessions,
   type AppState,
 } from "./appState";
+import { createSessionSearchDebouncer, type SessionSearchDebouncer } from "./sessionSearch";
+import { mergeSessionPages } from "./sessionPagination";
 import {
   closeBottomShell as closeBottomShellState,
   closeRightDock,
@@ -68,6 +70,10 @@ export type BrowserNavigationRequest = {
 
 export type LucodeAppController = {
   state: AppState;
+  visibleSessions: ServerSession[];
+  sessionSearchQuery: string;
+  visibleSessionHasMore: boolean;
+  visibleSessionLoadingMore: boolean;
   input: string;
   runtimeError: string;
   runtimeConfig: RuntimeConfig;
@@ -138,6 +144,8 @@ export type LucodeAppController = {
   stopRun: () => void;
   resolveRunApproval: (runId: string, approvalId: string, decision: RunApprovalDecision) => void;
   createNewSession: () => void;
+  searchSessions: (query: string) => void;
+  loadMoreSessions: () => void;
   selectSession: (sessionId: string) => void;
   requestDeleteSession: (sessionId: string) => void;
 };
@@ -146,6 +154,14 @@ export function useLucodeApp(): LucodeAppController {
   const runtimeConfig = useMemo(() => resolveRuntimeConfig(), []);
   const client = useMemo(() => new RuntimeClient(runtimeConfig), [runtimeConfig]);
   const [state, setState] = useState<AppState>(() => createInitialAppState());
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
+  const [sessionSearchResults, setSessionSearchResults] = useState<ServerSession[] | null>(null);
+  const [sessionNextCursor, setSessionNextCursor] = useState("");
+  const [sessionHasMore, setSessionHasMore] = useState(false);
+  const [sessionPageLoading, setSessionPageLoading] = useState(false);
+  const [sessionSearchNextCursor, setSessionSearchNextCursor] = useState("");
+  const [sessionSearchHasMore, setSessionSearchHasMore] = useState(false);
+  const [sessionSearchPageLoading, setSessionSearchPageLoading] = useState(false);
   const [input, setInput] = useState("");
   const [runtimeError, setRuntimeError] = useState("");
   const [modelSettings, setModelSettings] = useState<ModelSettingsResponse | null>(null);
@@ -173,6 +189,19 @@ export function useLucodeApp(): LucodeAppController {
   const [terminalCommand, setTerminalCommand] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const browserNavigationSeqRef = useRef(0);
+  const sessionSearchSeqRef = useRef(0);
+  const sessionPageLoadingRef = useRef(false);
+  const sessionSearchPageLoadingRef = useRef(false);
+  const sessionSearchDebouncerRef = useRef<SessionSearchDebouncer | null>(null);
+  if (sessionSearchDebouncerRef.current === null) {
+    sessionSearchDebouncerRef.current = createSessionSearchDebouncer();
+  }
+  const searchActive = Boolean(sessionSearchQuery.trim());
+  const visibleSessions = searchActive && sessionSearchResults ? sessionSearchResults : state.sessions;
+  const visibleSessionHasMore = searchActive ? sessionSearchHasMore : sessionHasMore;
+  const visibleSessionLoadingMore = searchActive ? sessionSearchPageLoading : sessionPageLoading;
+
+  useEffect(() => () => sessionSearchDebouncerRef.current?.cancel(), []);
 
   function saveRightDockWidth(width: number) {
     const clamped = clampRightDockWidth(width, effectiveSidebarCollapsed, viewportWidth);
@@ -232,11 +261,14 @@ export function useLucodeApp(): LucodeAppController {
     let cancelled = false;
     async function loadInitialState() {
       try {
-        const [models, sessions] = await Promise.all([client.listModels(), client.listSessions()]);
+        const [models, sessionPage] = await Promise.all([client.listModels(), client.listSessionPage()]);
         if (cancelled) {
           return;
         }
+        const sessions = sessionPage.sessions;
         setRuntimeError("");
+        setSessionNextCursor(sessionPage.next_cursor);
+        setSessionHasMore(sessionPage.has_more);
         setState((current) => setSessions(setModelLabel(current, selectPrimaryModelLabel(models)), sessions));
         void client
           .loadModelSettings()
@@ -843,22 +875,141 @@ export function useLucodeApp(): LucodeAppController {
   }
 
   async function refreshSessions() {
+    const activeSearchQuery = sessionSearchQuery.trim();
+    const searchSeq = ++sessionSearchSeqRef.current;
     try {
-      const sessions = await client.listSessions();
-      setState((current) => setSessions(current, sessions));
+      const sessionPage = await client.listSessionPage();
+      setState((current) => setSessions(current, sessionPage.sessions));
+      setSessionNextCursor(sessionPage.next_cursor);
+      setSessionHasMore(sessionPage.has_more);
+      if (activeSearchQuery) {
+        const searchPage = await client.listSessionPage({ query: activeSearchQuery });
+        if (sessionSearchSeqRef.current === searchSeq) {
+          setSessionSearchResults(searchPage.sessions);
+          setSessionSearchNextCursor(searchPage.next_cursor);
+          setSessionSearchHasMore(searchPage.has_more);
+        }
+      }
     } catch {
       // Session refresh is auxiliary; the run result remains visible.
+    }
+  }
+
+  function searchSessions(query: string) {
+    setSessionSearchQuery(query);
+    const cleanQuery = query.trim();
+    const searchSeq = ++sessionSearchSeqRef.current;
+    sessionSearchDebouncerRef.current?.cancel();
+    setSessionSearchNextCursor("");
+    setSessionSearchHasMore(false);
+    setSessionSearchPageLoading(false);
+    if (!cleanQuery) {
+      setSessionSearchResults(null);
+      void client
+        .listSessionPage()
+        .then((page) => {
+          if (sessionSearchSeqRef.current === searchSeq) {
+            setState((current) => setSessions(current, page.sessions));
+            setSessionNextCursor(page.next_cursor);
+            setSessionHasMore(page.has_more);
+          }
+        })
+        .catch(() => {
+          // Session search is auxiliary; keep the current list if refresh fails.
+        });
+      return;
+    }
+    sessionSearchDebouncerRef.current?.schedule(() => {
+      void client
+        .listSessionPage({ query: cleanQuery })
+        .then((page) => {
+          if (sessionSearchSeqRef.current === searchSeq) {
+            setSessionSearchResults(page.sessions);
+            setSessionSearchNextCursor(page.next_cursor);
+            setSessionSearchHasMore(page.has_more);
+          }
+        })
+        .catch(() => {
+          if (sessionSearchSeqRef.current === searchSeq) {
+            setSessionSearchResults([]);
+          }
+        });
+    });
+  }
+
+  async function loadMoreSessions() {
+    const activeSearchQuery = sessionSearchQuery.trim();
+    if (activeSearchQuery) {
+      if (!sessionSearchHasMore || !sessionSearchNextCursor || sessionSearchPageLoadingRef.current) {
+        return;
+      }
+      const searchSeq = sessionSearchSeqRef.current;
+      sessionSearchPageLoadingRef.current = true;
+      setSessionSearchPageLoading(true);
+      try {
+        const page = await client.listSessionPage({
+          query: activeSearchQuery,
+          cursor: sessionSearchNextCursor,
+        });
+        if (sessionSearchSeqRef.current === searchSeq) {
+          setSessionSearchResults((current) => mergeSessionPages(current ?? [], page.sessions));
+          setSessionSearchNextCursor(page.next_cursor);
+          setSessionSearchHasMore(page.has_more);
+        }
+      } catch {
+        // Pagination is auxiliary; keep the pages already visible.
+      } finally {
+        sessionSearchPageLoadingRef.current = false;
+        setSessionSearchPageLoading(false);
+      }
+      return;
+    }
+    if (!sessionHasMore || !sessionNextCursor || sessionPageLoadingRef.current) {
+      return;
+    }
+    sessionPageLoadingRef.current = true;
+    setSessionPageLoading(true);
+    try {
+      const page = await client.listSessionPage({ cursor: sessionNextCursor });
+      setState((current) => setSessions(current, mergeSessionPages(current.sessions, page.sessions)));
+      setSessionNextCursor(page.next_cursor);
+      setSessionHasMore(page.has_more);
+    } catch {
+      // Pagination is auxiliary; keep the pages already visible.
+    } finally {
+      sessionPageLoadingRef.current = false;
+      setSessionPageLoading(false);
     }
   }
 
   async function createNewSession() {
     try {
       const session = await client.createSession("新会话");
+      sessionSearchSeqRef.current += 1;
+      sessionSearchDebouncerRef.current?.cancel();
+      setSessionSearchQuery("");
+      setSessionSearchResults(null);
+      let sessionPage: Awaited<ReturnType<RuntimeClient["listSessionPage"]>> | null = null;
+      try {
+        sessionPage = await client.listSessionPage();
+      } catch {
+        sessionPage = null;
+      }
+      if (sessionPage) {
+        setSessionNextCursor(sessionPage.next_cursor);
+        setSessionHasMore(sessionPage.has_more);
+      }
       setRuntimeError("");
       setActiveWorkspace("chat");
       setState((current) =>
         setSessionMessages(
-          setActiveSession(setSessions(current, [session, ...current.sessions]), session.session_id),
+          setActiveSession(
+            setSessions(
+              current,
+              sessionPage?.sessions ?? [session, ...current.sessions.filter((item) => item.session_id !== session.session_id)],
+            ),
+            session.session_id,
+          ),
           session.session_id,
           [],
         ),
@@ -894,6 +1045,7 @@ export function useLucodeApp(): LucodeAppController {
     try {
       await client.deleteSession(sessionId);
       setState((current) => removeSession(current, sessionId));
+      setSessionSearchResults((current) => current?.filter((session) => session.session_id !== sessionId) ?? null);
     } catch (error) {
       setRuntimeError(error instanceof Error ? error.message : String(error));
     }
@@ -901,6 +1053,10 @@ export function useLucodeApp(): LucodeAppController {
 
   return {
     state,
+    visibleSessions,
+    sessionSearchQuery,
+    visibleSessionHasMore,
+    visibleSessionLoadingMore,
     input,
     runtimeError,
     runtimeConfig,
@@ -983,6 +1139,8 @@ export function useLucodeApp(): LucodeAppController {
     stopRun: () => void stopRun(),
     resolveRunApproval: (runId, approvalId, decision) => void resolveRunApproval(runId, approvalId, decision),
     createNewSession: () => void createNewSession(),
+    searchSessions: (query) => void searchSessions(query),
+    loadMoreSessions: () => void loadMoreSessions(),
     selectSession: (sessionId) => void selectSession(sessionId),
     requestDeleteSession: (sessionId) => void requestDeleteSession(sessionId),
   };

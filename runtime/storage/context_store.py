@@ -28,17 +28,18 @@ class ContextSQLiteStore:
                   s.title,
                   s.created_at,
                   s.updated_at,
+                  s.source_fingerprint,
                   count(m.message_id) as message_count
                 from sessions s
                 left join messages m on m.session_id = s.session_id
                 group by s.session_id
-                order by s.updated_at desc
+                order by s.updated_at desc, s.session_id desc
                 limit ?
                 """,
                 (safe_limit,),
             ).fetchall()
         summaries: list[SessionSummary] = []
-        for session_id, title, created_at, updated_at, message_count in rows:
+        for session_id, title, created_at, updated_at, source_fingerprint, message_count in rows:
             messages = self.load_messages(str(session_id))
             last_user = ""
             last_assistant = ""
@@ -59,9 +60,56 @@ class ContextSQLiteStore:
                     last_user=_short(last_user, 160),
                     last_assistant=_short(last_assistant, 160),
                     title=str(title or ""),
+                    source_fingerprint=str(source_fingerprint or ""),
                 )
             )
         return summaries
+
+    def get_session(self, session_id: str) -> SessionSummary | None:
+        target = str(session_id or "").strip()
+        if not target:
+            return None
+        with connect(self.workspace_root) as connection:
+            row = connection.execute(
+                """
+                select
+                  s.session_id,
+                  s.title,
+                  s.created_at,
+                  s.updated_at,
+                  s.source_fingerprint,
+                  count(m.message_id) as message_count
+                from sessions s
+                left join messages m on m.session_id = s.session_id
+                where s.session_id = ?
+                group by s.session_id
+                """,
+                (target,),
+            ).fetchone()
+        if row is None:
+            return None
+        stored_id, title, created_at, updated_at, source_fingerprint, message_count = row
+        messages = self.load_messages(str(stored_id))
+        last_user = ""
+        last_assistant = ""
+        for message in messages:
+            role = str(message.get("role") or "").lower()
+            content = str(message.get("content") or "")
+            if role == "user":
+                last_user = content
+            elif role == "assistant":
+                last_assistant = content
+        return SessionSummary(
+            session_id=str(stored_id),
+            path=self.workspace_root / ".lucode" / "history" / "sessions" / f"{stored_id}.jsonl",
+            created_at=str(created_at or ""),
+            updated_at=str(updated_at or created_at or ""),
+            message_count=int(message_count or 0),
+            last_user=_short(last_user, 160),
+            last_assistant=_short(last_assistant, 160),
+            title=str(title or ""),
+            source_fingerprint=str(source_fingerprint or ""),
+        )
 
     def load_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         safe_limit = max(1, int(limit)) if limit is not None else None
@@ -111,6 +159,17 @@ class ContextSQLiteStore:
             return text
         return text[:limit].rstrip() + "..."
 
+    def delete_session(self, session_id: str) -> bool:
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            raise ValueError("session_id is required")
+        with connect(self.workspace_root) as connection:
+            cursor = connection.execute(
+                "delete from sessions where session_id = ?",
+                (safe_session_id,),
+            )
+        return bool(cursor.rowcount)
+
     def save_session(self, session: dict[str, Any]) -> str:
         session_id = _required_text(session, "session_id")
         created_at = _timestamp(session.get("created_at"))
@@ -119,12 +178,15 @@ class ContextSQLiteStore:
         with connect(self.workspace_root) as connection:
             connection.execute(
                 """
-                insert into sessions(session_id, title, created_at, updated_at, source, schema_version, metadata_json)
-                values (?, ?, ?, ?, ?, ?, ?)
+                insert into sessions(
+                  session_id, title, created_at, updated_at, source, source_fingerprint, schema_version, metadata_json
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(session_id) do update set
                   title = excluded.title,
                   updated_at = excluded.updated_at,
                   source = excluded.source,
+                  source_fingerprint = excluded.source_fingerprint,
                   schema_version = excluded.schema_version,
                   metadata_json = excluded.metadata_json
                 """,
@@ -134,11 +196,23 @@ class ContextSQLiteStore:
                     created_at,
                     updated_at,
                     str(session.get("source") or "sqlite"),
+                    str(session.get("source_fingerprint") or ""),
                     SCHEMA_VERSION,
                     metadata,
                 ),
             )
         return session_id
+
+    def update_session_source_fingerprint(self, session_id: str, source_fingerprint: str) -> bool:
+        target = str(session_id or "").strip()
+        if not target:
+            raise ValueError("session_id is required")
+        with connect(self.workspace_root) as connection:
+            cursor = connection.execute(
+                "update sessions set source_fingerprint = ? where session_id = ?",
+                (str(source_fingerprint or ""), target),
+            )
+        return bool(cursor.rowcount)
 
     def save_message(self, message: dict[str, Any]) -> str:
         session_id = _required_text(message, "session_id")

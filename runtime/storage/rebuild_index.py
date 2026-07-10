@@ -8,6 +8,7 @@ from runtime.common.text_utils import sanitize_text
 from runtime.context.compaction import redact_sensitive_text
 from runtime.history.store import HistoryStore
 from runtime.storage.context_store import ContextSQLiteStore
+from runtime.storage.freshness import jsonl_source_fingerprint
 
 
 @dataclass
@@ -66,6 +67,7 @@ def _rebuild_session(
             "created_at": created_at,
             "updated_at": updated_at or created_at,
             "source": "jsonl_rebuild",
+            "source_fingerprint": "",
             "metadata": {"jsonl_path": str(path)},
         }
     )
@@ -107,3 +109,4 @@ def _rebuild_session(
             )
             result.summaries += 1
 
+    sqlite_store.update_session_source_fingerprint(session_id, jsonl_source_fingerprint(path))

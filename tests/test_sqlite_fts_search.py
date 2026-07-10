@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import runtime.storage.search as search_module
 from runtime.history.store import HistoryFacade, HistoryStore
 from runtime.storage.search import rebuild_fts_index, search_history
 
@@ -95,3 +96,23 @@ def test_search_history_filters_stale_sqlite_sessions(tmp_path, monkeypatch):
     store.append_message(session_id, "assistant", "jsonl only message that makes sqlite stale")
 
     assert search_history(tmp_path, "old sqlite searchable", limit=5) == []
+
+
+def test_search_history_uses_fts_triggers_without_rebuilding_on_each_query(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_CONTEXT_SQLITE", "dual_write")
+    store = HistoryStore(tmp_path)
+    session_id = "fts-incremental-session"
+    store.append_event(session_id, {"type": "session_metadata", "title": "Incremental FTS"})
+    store.append_message(session_id, "user", "initial searchable marker")
+
+    assert search_history(tmp_path, "initial marker", limit=5)
+
+    def fail_rebuild(_connection):
+        raise AssertionError("search must not rebuild populated FTS tables")
+
+    monkeypatch.setattr(search_module, "_rebuild_fts_tables", fail_rebuild)
+    store.append_message(session_id, "assistant", "new trigger indexed marker")
+
+    results = search_history(tmp_path, "trigger indexed", limit=5)
+
+    assert [item.session_id for item in results] == [session_id]

@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from planning.planner_schema import PlannedTask, PlannerResult
+from runtime.compute.context_sources import strongest_context_sensitivity
+from runtime.compute.placement_policy import model_info_is_local
+from runtime.consistency.timeline import reliability_flags_from_env
 from runtime.execution.fast_paths import (
     _can_fast_path_config_summary,
     _can_fast_path_directory_summary,
@@ -152,6 +155,25 @@ async def _run_planned_task(
         if ledger:
             ledger.record_task_status(task.id, "completed", output)
         return task.title, output
+    placement_error = _runtime_context_placement_error(factory, run_state, task)
+    if placement_error:
+        if run_state:
+            run_state.emit_event(
+                "ComputePlacementBlocked",
+                placement_error,
+                agent=str(getattr(task, "id", "") or "worker"),
+                task_id=str(getattr(task, "id", "") or ""),
+                status="blocked",
+                payload={
+                    "model_id": str(getattr(task, "model", "") or ""),
+                    "reason": placement_error,
+                    "stage": "runtime_context_recheck",
+                },
+            )
+            run_state.record_task_error(task, placement_error)
+        if ledger:
+            ledger.record_task_status(task.id, "failed", placement_error)
+        return task.title, _task_failure_output(task, placement_error)
     agent = await _create_task_agent(factory, task, execution_mode=execution_mode)
     dependency_context = _dependency_context_for_task(task, _task_output_map(run_state))
     workspace_context = _latest_workspace_context(project_root, task)
@@ -265,9 +287,15 @@ def _task_status_label(task) -> str:
 
 def _task_scoped_hooks(hooks, run_state: PipelineRunState | None, task):
     event_bus = getattr(run_state, "event_bus", None)
-    if hooks is None or event_bus is None:
+    run_context = getattr(run_state, "run_context", None)
+    if hooks is None or (event_bus is None and run_context is None):
         return hooks
-    return TaskScopedHooks(hooks, task_id=str(getattr(task, "id", "") or ""), event_bus=event_bus)
+    return TaskScopedHooks(
+        hooks,
+        task_id=str(getattr(task, "id", "") or ""),
+        event_bus=event_bus,
+        run_context=run_context,
+    )
 
 
 def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
@@ -278,6 +306,40 @@ def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
         return run_context.render_for_task(str(getattr(task, "id", "") or ""))
     except Exception:
         return ""
+
+
+def _runtime_context_placement_error(factory, run_state: PipelineRunState | None, task) -> str:
+    if run_state is None:
+        return ""
+    mode = str(getattr(run_state, "compute_placement_mode", "") or "").strip().lower()
+    if mode in {"", "off"}:
+        mode = str(reliability_flags_from_env().compute_placement or "off").strip().lower()
+    if mode != "enforce":
+        return ""
+    run_context = getattr(run_state, "run_context", None)
+    labeler = getattr(run_context, "source_labels", None)
+    if not callable(labeler):
+        return ""
+    try:
+        sensitivity, _ = strongest_context_sensitivity(labeler())
+    except Exception:
+        return ""
+    if sensitivity != "local_only":
+        return ""
+    model_id = str(getattr(task, "model", "") or "").strip()
+    registry = getattr(factory, "model_registry", None)
+    getter = getattr(registry, "get_model_info", None)
+    try:
+        model_info = dict(getter(model_id) or {}) if callable(getter) else {}
+    except Exception:
+        model_info = {}
+    if model_info_is_local(model_info):
+        return ""
+    task_id = str(getattr(task, "id", "") or "worker")
+    return (
+        f"task {task_id} cannot send local-only runtime context to cloud model "
+        f"{model_id or 'unknown'}"
+    )
 
 
 def _record_declared_read_set_context(run_context, project_root: Path, task, refined_request: str = "") -> None:

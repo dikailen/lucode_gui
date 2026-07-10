@@ -4,7 +4,9 @@ import sqlite3
 
 import pytest
 
+from runtime.history.store import HistoryFacade, HistoryStore
 from runtime.storage.context_store import ContextSQLiteStore
+from runtime.storage.search import rebuild_fts_index
 from runtime.storage.sqlite_store import connect, initialize_sqlite_store
 
 
@@ -139,3 +141,65 @@ def test_context_sqlite_store_persists_minimal_context_records(tmp_path):
     assert ledger == ("normal", 0, 8192)
     assert tool == ("browser_get_page_summary", "browser:summary:1")
     assert evidence == ("browser:summary:1", "artifact:browser:1")
+
+
+def test_history_delete_removes_sqlite_session_bundle_and_fts_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_CONTEXT_SQLITE", "dual_write")
+    session_id = "session-delete-bundle"
+    history = HistoryStore(tmp_path)
+    history.append_event(session_id, {"type": "session_metadata", "title": "Delete bundle"})
+    history.append_message(session_id, "user", "private question", metadata={"run_id": "run-delete"})
+    history.append_message(
+        session_id,
+        "assistant",
+        "private answer",
+        metadata={"run_id": "run-delete", "run_context_summary": "private summary"},
+    )
+    sqlite_store = ContextSQLiteStore(tmp_path)
+    sqlite_store.save_context_ledger_result(
+        {
+            "session_id": session_id,
+            "run_id": "run-delete",
+            "mode": "normal",
+            "created_at": "2026-07-10T01:00:00Z",
+        }
+    )
+    sqlite_store.save_tool_dehydrated_result(
+        {
+            "session_id": session_id,
+            "run_id": "run-delete",
+            "tool": "terminal",
+            "summary": "private tool result",
+            "created_at": "2026-07-10T01:00:01Z",
+        }
+    )
+    sqlite_store.save_evidence_ref(
+        {
+            "session_id": session_id,
+            "run_id": "run-delete",
+            "evidence_ref": "evidence:delete",
+            "created_at": "2026-07-10T01:00:02Z",
+        }
+    )
+    assert rebuild_fts_index(tmp_path) is True
+
+    result = HistoryFacade(tmp_path).delete(session_id)
+
+    assert result.deleted is True
+    with sqlite3.connect(tmp_path / ".lucode" / "lucode.db") as connection:
+        for table in (
+            "sessions",
+            "messages",
+            "context_summaries",
+            "context_ledger_results",
+            "tool_dehydrated_results",
+            "evidence_refs",
+            "sessions_fts",
+            "messages_fts",
+            "summaries_fts",
+        ):
+            count = connection.execute(
+                f"select count(*) from {table} where session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            assert count == 0, table

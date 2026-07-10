@@ -74,6 +74,10 @@ MAX_RUN_SNAPSHOT_EVENTS = 180
 MAX_RUN_SNAPSHOT_TEXT_CHARS = 700
 
 
+class RunConflictError(ValueError):
+    """Raised when a session lifecycle action conflicts with an active run."""
+
+
 class RuntimeRunManager:
     """Server facade for sessions, model metadata, and Agent Loop run events."""
 
@@ -96,6 +100,7 @@ class RuntimeRunManager:
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._run_cancel_events: dict[str, asyncio.Event] = {}
         self._approval_sessions: dict[str, RuntimeApprovalSession] = {}
+        self._active_run_ids_by_session: dict[str, str] = {}
         self._terminal_session = TerminalSession(workspace_root=self.workspace_root)
 
     def health(self) -> dict[str, Any]:
@@ -459,13 +464,22 @@ class RuntimeRunManager:
         self._sessions[session.session_id] = session
         return session.to_dict()
 
-    def list_sessions(self) -> dict[str, Any]:
-        sessions = list(self._sessions.values())
-        known = {item.session_id for item in sessions}
-        for item in self._history_items():
-            if item.session_id in known:
-                continue
-            known.add(item.session_id)
+    def list_sessions(self, query: str = "", *, limit: int = 50, cursor: str = "") -> dict[str, Any]:
+        clean_query = str(query or "").strip()
+        safe_limit = min(100, max(1, int(limit or 50)))
+        if clean_query:
+            history_items, next_cursor, has_more = self._history_facade.search_page(
+                clean_query,
+                limit=safe_limit,
+                cursor=cursor,
+            )
+        else:
+            history_items, next_cursor, has_more = self._history_facade.list_items_page(
+                limit=safe_limit,
+                cursor=cursor,
+            )
+        sessions: list[ServerSession] = []
+        for item in history_items:
             title = self._stored_session_title(item.session_id) or item.title or item.session_id
             sessions.append(
                 ServerSession(
@@ -475,10 +489,12 @@ class RuntimeRunManager:
                     updated_at=item.updated_at,
                 )
             )
-        sessions.sort(key=lambda item: item.updated_at, reverse=True)
+        sessions.sort(key=lambda item: (item.updated_at, item.session_id), reverse=True)
         return {
             "schema_version": SESSION_SCHEMA_VERSION,
             "sessions": [item.to_dict() for item in sessions],
+            "next_cursor": next_cursor,
+            "has_more": has_more,
         }
 
     def load_session_messages(self, session_id: str) -> dict[str, Any]:
@@ -495,6 +511,11 @@ class RuntimeRunManager:
         session_id = str(session_id or "").strip()
         if not session_id:
             raise ValueError("session_id is required")
+        active_run_id = self._active_run_ids_by_session.get(session_id)
+        if active_run_id:
+            raise RunConflictError(
+                f"session already has an active run: {active_run_id}; stop it before deleting the session"
+            )
         if session_id not in self._sessions and not self._history_contains(session_id):
             raise ValueError(f"unknown session_id: {session_id}")
         result = self._history_facade.delete(session_id)
@@ -510,6 +531,9 @@ class RuntimeRunManager:
         session_id = str(session_id or "").strip()
         if not session_id:
             raise ValueError("session_id is required")
+        active_run_id = self._active_run_ids_by_session.get(session_id)
+        if active_run_id:
+            raise RunConflictError(f"session already has an active run: {active_run_id}")
         if session_id not in self._sessions and not self._history_contains(session_id):
             raise ValueError(f"unknown session_id: {session_id}")
         text = str(user_input or "").strip()
@@ -542,6 +566,7 @@ class RuntimeRunManager:
             payload={"input": text},
         )
         self._run_tasks[run.run_id] = asyncio.create_task(self._execute_run(run, cancel_requested))
+        self._active_run_ids_by_session[session_id] = run.run_id
         return run.to_dict()
 
     def start_mock_run(self, *, session_id: str, user_input: str) -> dict[str, Any]:
@@ -584,6 +609,18 @@ class RuntimeRunManager:
         except Exception:
             return []
 
+    def _history_search_items(self, query: str):
+        try:
+            search = getattr(self._history_facade, "search")
+        except Exception:
+            search = None
+        if search is None:
+            return []
+        try:
+            return search(query, limit=100)
+        except Exception:
+            return []
+
     def _catalog_models(self) -> list[dict[str, Any]]:
         try:
             catalog = self._model_catalog_provider() or {}
@@ -613,7 +650,10 @@ class RuntimeRunManager:
         return _sanitize_context_model_info(selected)
 
     def _history_contains(self, session_id: str) -> bool:
-        return any(item.session_id == session_id for item in self._history_items())
+        try:
+            return self._history_facade.contains(session_id)
+        except Exception:
+            return False
 
     def _stored_session_title(self, session_id: str) -> str:
         try:
@@ -678,6 +718,7 @@ class RuntimeRunManager:
             history_facade=self._history_facade,
             model_info=self._context_model_info(),
             routing_input=run.user_input,
+            current_input_persisted=True,
         )
         try:
             result = await call_run_executor(self._run_executor, request)
@@ -695,6 +736,8 @@ class RuntimeRunManager:
             self._run_tasks.pop(run.run_id, None)
             self._run_cancel_events.pop(run.run_id, None)
             self._approval_sessions.pop(run.run_id, None)
+            if self._active_run_ids_by_session.get(run.session_id) == run.run_id:
+                self._active_run_ids_by_session.pop(run.session_id, None)
 
     def _mark_completed(self, run: ServerRun, *, final_output: str, metadata: dict[str, Any]) -> None:
         now = utc_now_iso()
@@ -1012,6 +1055,19 @@ def _terminal_timeout(value: Any) -> int:
     except (TypeError, ValueError):
         timeout = 60
     return max(1, min(timeout, 300))
+
+
+def _session_matches_query(session: ServerSession, query: str) -> bool:
+    terms = [term.casefold() for term in str(query or "").split() if term.strip()]
+    if not terms:
+        return True
+    haystack = " ".join(
+        [
+            str(session.session_id or ""),
+            str(session.title or ""),
+        ]
+    ).casefold()
+    return all(term in haystack for term in terms)
 
 
 def _history_run_event_payload(event: Any) -> dict[str, Any]:

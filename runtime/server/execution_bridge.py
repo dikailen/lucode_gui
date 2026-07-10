@@ -27,6 +27,7 @@ class RunExecutionRequest:
     history_facade: Any | None = None
     model_info: dict[str, Any] = field(default_factory=dict)
     routing_input: str = ""
+    current_input_persisted: bool = False
 
 
 class RunExecutor(Protocol):
@@ -54,6 +55,7 @@ class KernelAgentLoopExecutor:
                 session_id=request.session_id,
                 user_input=request.user_input,
                 model_info=request.model_info or {},
+                current_input_persisted=request.current_input_persisted,
             )
             kernel_input = context_result.run_input
             routing_input = request.routing_input or context_result.routing_input or request.user_input

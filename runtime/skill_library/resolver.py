@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from runtime.skill_library.indexer import build_skill_index
+from runtime.skill_library.indexer import load_skill_index
 from runtime.skill_library.renderer import (
     DEFAULT_PLANNER_CANDIDATE_LIMIT,
     DEFAULT_PLANNER_RENDER_BUDGET,
@@ -60,10 +60,7 @@ class SkillResolver:
     ) -> SkillResolutionPack:
         clean_query = str(query or "")
         clean_paths = tuple(str(path).strip() for path in list(paths or []) if str(path).strip())
-        entries = list(self._entries) if self._entries is not None else build_skill_index(
-            self.workspace_context,
-            write=False,
-        )
+        entries = list(self._entries) if self._entries is not None else load_skill_index(self.workspace_context)
         retrieved = retrieve_skill_candidates(
             clean_query,
             entries,
