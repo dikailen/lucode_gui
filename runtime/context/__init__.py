@@ -1,4 +1,6 @@
 from runtime.context.compaction import CompactedContext, ContextCompactor
+from runtime.context.envelope import ContextEnvelope
+from runtime.context.retrieval_policy import RetrievalPolicy, decide_retrieval_policy
 from runtime.context.budget import ContextBudgetDecision, decide_context_budget
 from runtime.context.ledger import ContextLedgerInput, ContextLedgerResult, build_context_ledger
 from runtime.context.middleware import ContextCompressionMiddleware, ContextMiddlewareResult
@@ -11,6 +13,7 @@ __all__ = [
     "ContextBudgetDecision",
     "ContextCompressionMiddleware",
     "ContextCompactor",
+    "ContextEnvelope",
     "ContextLedgerInput",
     "ContextLedgerResult",
     "ContextMiddlewareResult",
@@ -21,5 +24,7 @@ __all__ = [
     "context_window_for_model",
     "decide_context_budget",
     "dehydrate_tool_result",
+    "decide_retrieval_policy",
     "estimate_tokens",
+    "RetrievalPolicy",
 ]

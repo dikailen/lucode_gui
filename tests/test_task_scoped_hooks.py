@@ -42,6 +42,8 @@ def test_sdk_browser_tool_result_is_dehydrated_before_shared_context(tmp_path):
                 "text": "Build status is green.",
                 "dom": dom,
                 "api_key": secret,
+                "evidence_ref": "evidence:browser:hook",
+                "raw_artifact_ref": "artifact:browser:hook",
                 "elements": [{"selector": "#refresh", "tag": "button", "text": "Refresh"}],
             },
         )
@@ -58,6 +60,9 @@ def test_sdk_browser_tool_result_is_dehydrated_before_shared_context(tmp_path):
     labels = run_context.source_labels()
     assert labels[0].source_type == "browser_summary"
     assert labels[0].sensitivity == "local_only"
+    envelope = run_context.context_envelopes()[0]
+    assert envelope.evidence_refs == ("evidence:browser:hook",)
+    assert envelope.raw_artifact_ref == "artifact:browser:hook"
 
 
 def test_sdk_terminal_tool_result_keeps_only_redacted_bounded_tail(tmp_path):

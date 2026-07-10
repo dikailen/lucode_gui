@@ -89,6 +89,8 @@ class TaskScopedHooks(run_hooks_class()):
                 action=action,
                 summary=dehydrated.summary,
                 task_id=object.__getattribute__(self, "_task_id"),
+                evidence_ref=dehydrated.evidence_ref,
+                raw_artifact_ref=dehydrated.raw_artifact_ref,
             )
         except Exception:
             return

@@ -28,6 +28,8 @@ class ToolOutputArtifact:
     action: str
     summary: str
     task_ids: tuple[str, ...] = field(default_factory=tuple)
+    evidence_ref: str = ""
+    raw_artifact_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -239,6 +241,8 @@ class RunContextStore:
         action: str,
         summary: str,
         task_id: str = "",
+        evidence_ref: str = "",
+        raw_artifact_ref: str = "",
     ) -> ToolOutputArtifact:
         clean_tool = _safe_token(tool or "tool")
         clean_action = _safe_token(action or "output")
@@ -249,6 +253,8 @@ class RunContextStore:
             action=clean_action,
             summary=_compact_line(summary, 280),
             task_ids=_append_task_id((), task_id),
+            evidence_ref=str(evidence_ref or "").strip(),
+            raw_artifact_ref=str(raw_artifact_ref or "").strip(),
         )
         self.tool_outputs.append(artifact)
         if len(self.tool_outputs) > self.max_items:
@@ -270,6 +276,18 @@ class RunContextStore:
             },
         )
         return artifact
+
+    def context_envelopes(self):
+        from runtime.context.envelope import ContextEnvelope
+
+        return tuple(
+            ContextEnvelope.from_tool_result(
+                tool=artifact.tool,
+                action=artifact.action,
+                result=artifact,
+            )
+            for artifact in self.tool_outputs[-self.max_items :]
+        )
 
     def record_context_pack(self, pack, *, task_id: str = "") -> ContextPackArtifact:
         pack_id = _safe_token(getattr(pack, "pack_id", "") or "context_pack")
