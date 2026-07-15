@@ -56,9 +56,11 @@ describe("page responsive styles", () => {
     expect(ruleFor(".plugin-column", media)).toContain("min-height: 0");
     expect(ruleFor(".plugin-column", media)).toContain("grid-template-rows: auto auto auto");
     expect(ruleFor(".mcp-plugin-column", styles)).toContain("grid-template-rows: auto auto auto auto");
+    expect(ruleFor(".mcp-plugin-column", styles)).toContain("grid-column: 1 / -1");
     expect(ruleFor(".mcp-plugin-column", media)).toContain("grid-template-rows: auto auto auto auto");
+    expect(ruleFor(".mcp-plugin-column", media)).toContain("grid-column: auto");
     expect(ruleFor(".runtime-capability-column", styles)).toContain("grid-column: 1 / -1");
-    expect(ruleFor(".runtime-capability-list", styles)).toContain("grid-template-columns: repeat(auto-fit, minmax(280px, 1fr))");
+    expect(ruleFor(".runtime-capability-list", styles)).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(ruleFor(".runtime-capability-list", media)).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(ruleFor(".runtime-capability-row", media)).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(ruleFor(".comfyui-mcp-compact-form", styles)).toContain("min-width: 0");
@@ -78,6 +80,31 @@ describe("page responsive styles", () => {
     expect(ruleFor(".plugin-delete-pill", styles)).toContain("min-width: 44px");
     expect(ruleFor(".plugin-row-title", media)).toContain("white-space: normal");
     expect(ruleFor(".plugin-row-footer", media)).toContain("flex-wrap: wrap");
+  });
+
+  it("reserves scrollbar space for Skill detail status and keeps the library as the Skill entry point", () => {
+    const styles = readStyles();
+
+    expect(styles).toMatch(/\.skill-library-detail\s*\{[\s\S]*?scrollbar-gutter:\s*stable/);
+    expect(ruleFor(".skill-library-import", styles)).toContain("min-width: 0");
+  });
+
+  it("keeps the B layout as a two-pane workspace and collapses it in a narrow container", () => {
+    const styles = readStyles();
+    const container = pluginContainer(styles);
+
+    expect(ruleFor(".plugins-content", styles)).toContain("grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr))");
+    expect(ruleFor(".mcp-plugin-column", styles)).toContain("grid-column: 1 / -1");
+    expect(ruleFor(".skill-library-layout", styles)).toContain("grid-template-columns: minmax(220px, 0.78fr) minmax(0, 1.55fr)");
+    expect(ruleFor(".skill-library-categories", styles)).toContain("flex-direction: row");
+    expect(ruleFor(".skill-library-layout", container)).toContain("grid-template-columns: minmax(0, 1fr)");
+  });
+
+  it("keeps long session histories inside the scrollable sidebar panel", () => {
+    const styles = readStyles();
+
+    expect(ruleFor(".sidebar-chat-panel", styles)).toContain("flex: 1 1 0");
+    expect(ruleFor(".session-list", styles)).toContain("overflow: auto");
   });
 
   it("keeps plugin action rows stable inside a narrow right dock container", () => {

@@ -26,10 +26,20 @@ class RuntimeApprovalSession:
     resolve it.
     """
 
-    def __init__(self, *, run_id: str, session_id: str, run_events) -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        run_events,
+        event_observer=None,
+        attempt_id: str = "",
+    ) -> None:
         self.run_id = str(run_id or "")
         self.session_id = str(session_id or "")
+        self.attempt_id = str(attempt_id or f"attempt:{self.run_id}")
         self._run_events = run_events
+        self._event_observer = event_observer
         self._pending: dict[str, PendingApproval] = {}
         self._lock = threading.Lock()
 
@@ -44,6 +54,7 @@ class RuntimeApprovalSession:
         arguments: str | None = None,
         tool_rule: str = "",
         preview: str = "",
+        invocation_id: str = "",
     ) -> str:
         approval_id = f"approval_{uuid.uuid4().hex}"
         loop = asyncio.get_running_loop()
@@ -55,6 +66,7 @@ class RuntimeApprovalSession:
             arguments=arguments,
             tool_rule=tool_rule,
             preview=preview,
+            invocation_id=invocation_id,
         )
         pending = PendingApproval(
             approval_id=approval_id,
@@ -119,6 +131,7 @@ class RuntimeApprovalSession:
         arguments: str | None,
         tool_rule: str,
         preview: str,
+        invocation_id: str,
     ) -> dict[str, Any]:
         event = build_tool_event(
             "pre_tool_use",
@@ -129,6 +142,8 @@ class RuntimeApprovalSession:
         )
         return {
             "approval_id": approval_id,
+            "invocation_id": str(invocation_id or ""),
+            "attempt_id": self.attempt_id,
             "prompt": str(prompt or ""),
             "status": "pending",
             "decision": "",
@@ -144,12 +159,14 @@ class RuntimeApprovalSession:
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self._run_events is None:
             return
-        self._run_events.emit(
+        event = self._run_events.emit(
             run_id=self.run_id,
             session_id=self.session_id,
             event_type=event_type,
             payload=payload,
         )
+        if self._event_observer is not None:
+            self._event_observer(event)
 
 
 def _normalize_decision(value: str) -> str:

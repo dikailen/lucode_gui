@@ -72,6 +72,69 @@ description: Missing routing metadata.
     assert entries[0].assignable is False
 
 
+def test_load_skill_index_applies_workspace_disabled_override_and_resolver_excludes_it(tmp_path):
+    from lucode.gui.plugin_state import PluginStateStore
+    from runtime.skill_library.retriever import retrieve_skill_candidates
+
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "release-review",
+        """
+id: release_review
+name: Release Review
+description: Review a release before publishing it.
+category: [programming, testing]
+tags: [release, regression]
+use_when: [Review a release]
+do_not_use_when: [Write product copy]
+""".strip(),
+    )
+    build_skill_index(ctx, write=True)
+    PluginStateStore(ctx.workspace_root).set_skill_enabled("release_review", False)
+
+    entries = load_skill_index(ctx)
+
+    assert entries[0].enabled is False
+    assert entries[0].assignable is False
+    assert retrieve_skill_candidates("Review this release", entries) == []
+
+
+def test_load_skill_index_reads_workspace_disabled_override_without_gui_dependency(tmp_path, monkeypatch):
+    import builtins
+    import json
+
+    ctx = _context(tmp_path)
+    _write_skill(
+        ctx.workspace_root / ".lucode" / "skills",
+        "isolated-skill",
+        """
+id: isolated_skill
+name: Isolated Skill
+description: Keep runtime indexing independent from GUI modules.
+category: [programming]
+tags: [runtime]
+use_when: [Index Skills]
+do_not_use_when: [Write product copy]
+""".strip(),
+    )
+    build_skill_index(ctx, write=True)
+    state_path = ctx.workspace_root / ".lucode" / "gui_plugin_state.json"
+    state_path.write_text(json.dumps({"disabled_skill_ids": ["isolated_skill"]}), encoding="utf-8")
+    original_import = builtins.__import__
+
+    def reject_gui_import(name, *args, **kwargs):
+        if name == "lucode.gui.plugin_state":
+            raise AssertionError("skill indexer must not import GUI state")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_gui_import)
+
+    entries = load_skill_index(ctx)
+
+    assert entries[0].enabled is False
+
+
 def test_build_skill_index_keeps_core_skill_protected_from_workspace_override(tmp_path):
     ctx = _context(tmp_path)
     _write_skill(

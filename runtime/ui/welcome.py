@@ -132,37 +132,19 @@ def _welcome_rows(
 
 def _status_lines(workspace: WorkspaceContext, settings: RuntimeSettings, catalog: dict) -> list[str]:
     model_text = _model_summary(settings, catalog)
-    mode = str(settings.execution_mode or "solo").strip().lower()
-    model_label = "主脑" if mode in {"serial", "full"} else "模型"
     return [
         f"项目  {workspace.workspace_root}",
         "",
-        f"模式  {_mode_label(mode)}",
+        "模式  自动执行",
         "",
-        f"{model_label}  {model_text}",
+        f"主脑  {model_text}",
         "",
-        f"工具  {_tool_summary(mode)}",
+        "工具  按需加载 · 审批保护",
     ]
 
 
 def _center_offset(outer_count: int, inner_count: int) -> int:
     return max((outer_count - inner_count) // 2, 0)
-
-
-def _mode_label(mode: str) -> str:
-    return {
-        "solo": "solo 单代理",
-        "serial": "serial 串行多代理",
-        "full": "full 审核并行",
-    }.get(mode, f"{mode or 'solo'} 单代理")
-
-
-def _tool_summary(mode: str) -> str:
-    if mode == "full":
-        return "按需加载 · 审批保护"
-    if mode == "serial":
-        return "按需加载 · 计划校验"
-    return "按需加载"
 
 
 def _model_summary(settings: RuntimeSettings, catalog: dict) -> str:

@@ -23,12 +23,12 @@ STATUS_SYMBOLS = {
 
 def render_task_status_board(
     run_state,
-    mode: str = "serial",
+    mode: str = "auto",
     attempt: int = 1,
     title: str = "任务状态",
     include_events: bool = False,
 ) -> str:
-    """Render a compact C5 task progress board for serial/full execution."""
+    """Render a compact task progress board for unified automatic execution."""
 
     route = getattr(run_state, "route_type", "unknown")
     lines = [f"{title} · {mode} · 第 {attempt} 轮 · {route}"]

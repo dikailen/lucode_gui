@@ -1012,7 +1012,7 @@ class MainWindow(QMainWindow):
             if _should_show_work_area(payload):
                 self.ensure_work_area(payload)
 
-        if event_type == "AgentMessageDelta":
+        if event_type in {"AgentMessageDelta", "FinalAnswerDelta"}:
             if not self.turn_guard.is_running or self.turn_guard.is_stopping or not self.work_task_id:
                 return
             route = classify_gui_stream_event(event, mode=self.mode)

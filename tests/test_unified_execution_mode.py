@@ -8,10 +8,8 @@ from runtime.config.execution_mode import (
     DEFAULT_EXECUTION_MODE,
     execution_mode_label_zh,
     execution_mode_policy,
-    effective_runtime_mode,
     normalize_execution_mode,
     runtime_route_for_input,
-    should_use_solo_mode,
 )
 from runtime.config.settings import RuntimeSettings
 from runtime.config.model_config import load_lucode_config, set_execution_mode
@@ -42,65 +40,50 @@ def test_execution_mode_defaults_to_unified_auto():
     assert execution_mode_label_zh("auto") == "\u81ea\u52a8\u6267\u884c"
 
 
-def test_legacy_modes_map_to_unified_policy_not_user_modes():
+def test_all_mode_inputs_map_to_the_single_auto_policy():
     solo = execution_mode_policy("solo")
     serial = execution_mode_policy("serial")
     full = execution_mode_policy("full")
 
-    assert solo.canonical_mode == "auto"
-    assert solo.legacy_mode == "solo"
-    assert solo.fast_single_agent is True
-    assert solo.parallel_enabled is False
-
-    assert serial.canonical_mode == "auto"
-    assert serial.legacy_mode == "serial"
-    assert serial.fast_single_agent is False
-    assert serial.parallel_enabled is False
-
-    assert full.canonical_mode == "auto"
-    assert full.legacy_mode == "full"
-    assert full.fast_single_agent is False
-    assert full.parallel_enabled is True
+    for policy in (solo, serial, full):
+        assert policy.canonical_mode == "auto"
+        assert policy.legacy_mode == ""
+        assert policy.fast_single_agent is False
+        assert policy.parallel_enabled is True
+        assert policy.supervisor_enabled is True
 
 
-
-
-def test_auto_uses_full_runtime_strategy_while_legacy_modes_keep_compatibility():
-    assert effective_runtime_mode("auto") == "full"
-    assert effective_runtime_mode("bogus") == "full"
-    assert effective_runtime_mode("full") == "full"
-    assert effective_runtime_mode("serial") == "serial"
-    assert effective_runtime_mode("solo") == "solo"
 def test_all_modes_route_through_unified_dynamic_loop():
     for mode in ("auto", "solo", "serial", "full"):
         assert runtime_route_for_input("fix code", mode) == "dynamic"
-        assert should_use_solo_mode("fix code", mode) is False
         strategy = create_execution_strategy(routing_input="fix code", execution_mode=mode)
         assert strategy.mode_name == "auto"
 
 
-def test_scheduler_policy_replaces_user_visible_serial_full_modes():
+def test_scheduler_uses_task_conflicts_not_legacy_mode_values():
     tasks = [_task("a"), _task("b")]
 
-    assert len(_execution_batches_for_mode(tasks, "auto")) == 1
-    assert len(_execution_batches_for_mode(tasks, "full")) == 1
-    assert _execution_batches_for_mode(tasks, "serial") == [[tasks[0]], [tasks[1]]]
-    assert _execution_batches_for_mode(tasks, "solo") == [[tasks[0]], [tasks[1]]]
+    for mode in ("auto", "full", "serial", "solo"):
+        assert _execution_batches_for_mode(tasks, mode) == [tasks]
 
-def test_legacy_mode_labels_are_compatibility_aliases():
-    assert execution_mode_label_zh("solo") == "\u81ea\u52a8\u6267\u884c\uff08solo \u517c\u5bb9\uff09"
-    assert execution_mode_label_zh("serial") == "\u81ea\u52a8\u6267\u884c\uff08serial \u517c\u5bb9\uff09"
-    assert execution_mode_label_zh("full") == "\u81ea\u52a8\u6267\u884c\uff08full \u517c\u5bb9\uff09"
+def test_mode_labels_always_show_unified_auto_execution():
+    assert execution_mode_label_zh("solo") == "\u81ea\u52a8\u6267\u884c"
+    assert execution_mode_label_zh("serial") == "\u81ea\u52a8\u6267\u884c"
+    assert execution_mode_label_zh("full") == "\u81ea\u52a8\u6267\u884c"
 
 
-def test_mode_command_accepts_auto_and_legacy_compatibility(tmp_path):
-    assert parse_writable_config_command("/mode auto") == ("mode", "auto")
-    assert parse_writable_config_command("/mode full") == ("mode", "full")
+def test_mode_configuration_rejects_legacy_switches(tmp_path):
+    assert parse_writable_config_command("/mode auto") is None
+    assert parse_writable_config_command("/mode full") is None
 
     set_execution_mode("auto", workspace_root=tmp_path)
     assert load_lucode_config(workspace_root=tmp_path)["mode"] == "auto"
-    set_execution_mode("FULL", workspace_root=tmp_path)
-    assert load_lucode_config(workspace_root=tmp_path)["mode"] == "full"
+    try:
+        set_execution_mode("FULL", workspace_root=tmp_path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("legacy mode must not be writable")
 
 
 def test_mode_completion_shows_auto_as_primary_user_choice():
@@ -111,7 +94,7 @@ def test_mode_completion_shows_auto_as_primary_user_choice():
     assert "/mode serial" not in texts
     assert "/mode full" not in texts
 
-def test_auto_strategy_executes_dynamic_loop_with_effective_runtime_mode(monkeypatch, tmp_path):
+def test_auto_strategy_executes_dynamic_loop_with_normalized_runtime_mode(monkeypatch, tmp_path):
     import runtime.execution as execution_package
 
     captured = []
@@ -140,4 +123,4 @@ def test_auto_strategy_executes_dynamic_loop_with_effective_runtime_mode(monkeyp
         )
         assert asyncio.run(strategy.execute(context)) == "ok"
 
-    assert captured == ["full", "serial"]
+    assert captured == ["auto", "auto"]

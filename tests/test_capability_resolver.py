@@ -212,7 +212,18 @@ def test_multi_agent_scheduler_and_factory_share_capability_resolver(monkeypatch
     monkeypatch.setattr(
         runner,
         "build_worker_report",
-        lambda task, output, run_state=None: WorkerReport(task_id=task.id, status="completed", summary=output),
+        lambda task, output, run_state=None: WorkerReport(
+            task_id=task.id,
+            status="completed",
+            summary=output,
+            tool_calls=[
+                {
+                    "tool": "project_filesystem_readonly",
+                    "action": "read_file",
+                    "status": "completed",
+                }
+            ],
+        ),
     )
     monkeypatch.setattr(
         runner,

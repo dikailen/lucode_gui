@@ -9,7 +9,8 @@ from typing import Any
 from catalog_system.model_catalog import ModelRegistry, load_model_catalog
 from lucode.shell.turn_display import format_turn_error
 from runtime.common.conversation import append_recent_turn, compose_recent_context
-from runtime.config.execution_mode import explicit_execution_mode_for_input, normalize_execution_mode
+from runtime.context.middleware import ContextCompressionMiddleware
+from runtime.config.execution_mode import normalize_execution_mode
 from runtime.config.model_config import normalize_model_role
 from runtime.config.settings import RuntimeSettings
 from runtime.safety.privacy import normalize_privacy_mode
@@ -179,11 +180,17 @@ class GuiChatSession:
 
         hooks = create_token_logger_hooks()
         turn_settings = _settings_for_turn(self.settings, clean_input)
-        run_input = compose_recent_context(
+        legacy_run_input = compose_recent_context(
             self.recent_turns,
             clean_input,
             session_summary=self.resumed_session_summary,
         )
+        context_result = ContextCompressionMiddleware(history=self.history_browser).prepare_run_input(
+            session_id=self.current_session_id or "",
+            user_input=clean_input,
+            current_input_persisted=False,
+        )
+        run_input = context_result.run_input if context_result.applied else legacy_run_input
         bus = ExecutionEventBus()
         unsubscribe = None
         if self.event_bridge is not None and hasattr(self.event_bridge, "on_bus_event"):
@@ -274,12 +281,8 @@ class GuiChatSession:
 
 
 def _settings_for_turn(runtime_settings, user_input: str):
-    explicit_mode = explicit_execution_mode_for_input(user_input)
-    if not explicit_mode or explicit_mode == getattr(runtime_settings, "execution_mode", ""):
-        return runtime_settings
-    turn_settings = copy(runtime_settings)
-    turn_settings.execution_mode = explicit_mode
-    return turn_settings
+    del user_input
+    return runtime_settings
 
 
 def _record_session_turn(

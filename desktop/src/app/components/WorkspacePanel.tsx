@@ -2,6 +2,8 @@ import { ChatPane } from "./ChatPane";
 import { PluginsPanel } from "./PluginsPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import type { RightDockWindowTool, WorkspaceId } from "../useLucodeApp";
+import type { AttachmentDraft } from "../attachmentDrafts";
+import type { SettingsTab } from "../settingsTabs";
 import type { AppState } from "../appState";
 import type { Translator } from "../i18n";
 import type {
@@ -18,8 +20,11 @@ import type {
 export type WorkspacePanelProps = {
   t: Translator;
   activeWorkspace: WorkspaceId;
+  settingsTab: SettingsTab;
   state: AppState;
   input: string;
+  attachmentDrafts: AttachmentDraft[];
+  runStarting: boolean;
   runtimeError: string;
   pluginState: PluginStateResponse | null;
   pluginError: string;
@@ -34,6 +39,9 @@ export type WorkspacePanelProps = {
   bottomShellOpen: boolean;
   rightDockOpen: boolean;
   setInput: (value: string) => void;
+  chooseAttachments: () => void;
+  addDroppedAttachments: (files: FileList | File[]) => void;
+  removeAttachment: (attachmentId: string) => void;
   submit: React.FormEventHandler;
   stopRun: () => void;
   showRightDockHome: () => void;
@@ -42,9 +50,12 @@ export type WorkspacePanelProps = {
   toggleBottomShell: () => void;
   openSettings: () => void;
   closeSettings: () => void;
+  selectSettingsTab: (tab: SettingsTab) => void;
   refreshModelSettings: () => void;
   refreshProviderCatalog: () => void;
   updateRoleModel: (role: string, modelId: string) => void;
+  updateModelReasoningEffort: (modelId: string, effort: string) => void;
+  probeModelReasoningEffort: (modelId: string) => void;
   updateQueryRefiner: (enabled: boolean) => void;
   updatePrivacyMode: (mode: string) => void;
   updateWorkerPool: (modelIds: string[]) => void;
@@ -55,6 +66,9 @@ export type WorkspacePanelProps = {
   refreshPluginState: () => void;
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
+  applySkillMetadata: (skillId: string, payload: { negative_queries: string[]; distinguish_from: Record<string, string> }) => Promise<boolean>;
+  setSkillEnabled: (skillId: string, enabled: boolean) => Promise<boolean>;
+  reindexSkillLibrary: () => Promise<boolean>;
   installMcp: (path: string) => void;
   installPluginPackage: (path: string) => void;
   deletePluginPackage: (pluginId: string) => void;
@@ -69,8 +83,11 @@ export type WorkspacePanelProps = {
 export function WorkspacePanel({
   t,
   activeWorkspace,
+  settingsTab,
   state,
   input,
+  attachmentDrafts,
+  runStarting,
   runtimeError,
   pluginState,
   pluginError,
@@ -85,6 +102,9 @@ export function WorkspacePanel({
   bottomShellOpen,
   rightDockOpen,
   setInput,
+  chooseAttachments,
+  addDroppedAttachments,
+  removeAttachment,
   submit,
   stopRun,
   showRightDockHome,
@@ -93,9 +113,12 @@ export function WorkspacePanel({
   toggleBottomShell,
   openSettings,
   closeSettings,
+  selectSettingsTab,
   refreshModelSettings,
   refreshProviderCatalog,
   updateRoleModel,
+  updateModelReasoningEffort,
+  probeModelReasoningEffort,
   updateQueryRefiner,
   updatePrivacyMode,
   updateWorkerPool,
@@ -106,6 +129,9 @@ export function WorkspacePanel({
   refreshPluginState,
   deleteSkill,
   installSkill,
+  applySkillMetadata,
+  setSkillEnabled,
+  reindexSkillLibrary,
   installMcp,
   installPluginPackage,
   deletePluginPackage,
@@ -124,10 +150,14 @@ export function WorkspacePanel({
         providerCatalog={providerCatalog}
         settingsError={settingsError}
         settingsSavingRole={settingsSavingRole}
+        activeTab={settingsTab}
+        onTabChange={selectSettingsTab}
         closeSettings={closeSettings}
         refreshModelSettings={refreshModelSettings}
         refreshProviderCatalog={refreshProviderCatalog}
         updateRoleModel={updateRoleModel}
+        updateModelReasoningEffort={updateModelReasoningEffort}
+        probeModelReasoningEffort={probeModelReasoningEffort}
         updateQueryRefiner={updateQueryRefiner}
         updatePrivacyMode={updatePrivacyMode}
         updateWorkerPool={updateWorkerPool}
@@ -151,6 +181,9 @@ export function WorkspacePanel({
         refreshPluginState={refreshPluginState}
         deleteSkill={deleteSkill}
         installSkill={installSkill}
+        applySkillMetadata={applySkillMetadata}
+        setSkillEnabled={setSkillEnabled}
+        reindexSkillLibrary={reindexSkillLibrary}
         installMcp={installMcp}
         installPluginPackage={installPluginPackage}
         deletePluginPackage={deletePluginPackage}
@@ -168,9 +201,14 @@ export function WorkspacePanel({
       t={t}
       state={state}
       input={input}
+      attachmentDrafts={attachmentDrafts}
+      runStarting={runStarting}
       runtimeError={runtimeError}
       modelSettings={modelSettings}
       setInput={setInput}
+      chooseAttachments={chooseAttachments}
+      addDroppedAttachments={addDroppedAttachments}
+      removeAttachment={removeAttachment}
       submit={submit}
       stopRun={stopRun}
       bottomShellOpen={bottomShellOpen}
@@ -181,6 +219,7 @@ export function WorkspacePanel({
       toggleBottomShell={toggleBottomShell}
       openSettings={openSettings}
       updateRoleModel={updateRoleModel}
+      updateModelReasoningEffort={updateModelReasoningEffort}
     />
   );
 }

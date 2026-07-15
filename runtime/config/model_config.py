@@ -285,7 +285,7 @@ def connect_provider(
     resolved_supports_tools = supports_tools if supports_tools is not None else preset.get("supports_tools")
     if resolved_supports_tools is not None:
         provider_config["supports_tools"] = resolved_supports_tools
-    for optional_key in ["reasoning_level", "cost_level", "strengths", "best_for_skills"]:
+    for optional_key in ["reasoning_level", "cost_level", "strengths", "best_for_skills", "supports_reasoning_effort", "reasoning_effort_levels"]:
         if preset.get(optional_key) is not None:
             provider_config[optional_key] = preset[optional_key]
 
@@ -622,6 +622,8 @@ def configured_provider_model_definitions(
                 "best_for_skills": _as_string_list(provider_config.get("best_for_skills") or []),
                 "cost_level": str(provider_config.get("cost_level") or ("local" if local else "medium")),
                 "reasoning_level": str(provider_config.get("reasoning_level") or "medium"),
+                "supports_reasoning_effort": bool(provider_config.get("supports_reasoning_effort")),
+                "reasoning_effort_levels": _as_string_list(provider_config.get("reasoning_effort_levels") or []),
                 "backend_type": "ollama" if compatible_type == "ollama" else compatible_type,
                 "source": "lucode_config",
                 "provider_ref": f"{provider_id}/{model_name}",
@@ -750,7 +752,7 @@ def _dump_lucode_toml(config: dict[str, Any]) -> str:
     if root_items:
         lines.append("")
 
-    for section in ["model", "roles", "ui"]:
+    for section in ["model", "roles", "ui", "reasoning_effort"]:
         mapping = config.get(section)
         if isinstance(mapping, dict) and mapping:
             lines.append(f"[{section}]")

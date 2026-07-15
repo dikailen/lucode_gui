@@ -36,7 +36,7 @@ def _context() -> ApprovalRequestContext:
 
 def test_approval_dialog_uses_workbench_object_names_and_labels(app):
     future = _future()
-    dialog = ApprovalDialog(_context(), future)
+    dialog = ApprovalDialog(_context(), future, language="en")
 
     assert dialog.objectName() == "ApprovalDialog"
     assert dialog.findChild(QLabel, "ApprovalTitle").text() == "Approval required"
@@ -48,7 +48,7 @@ def test_approval_dialog_uses_workbench_object_names_and_labels(app):
     }
 
     assert buttons["ApprovalAllowOnce"] == "Allow once"
-    assert buttons["ApprovalAllowSession"] == "Allow session"
+    assert buttons["ApprovalAllowSession"] == "Allow for session"
     assert buttons["ApprovalReject"] == "Reject"
     assert buttons["ApprovalEditInstruction"] == "Edit instruction"
 

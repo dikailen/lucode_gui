@@ -71,6 +71,15 @@ def openai_chat_completions_model_class():
     return OpenAIChatCompletionsModel
 
 
+def model_settings_with_reasoning(effort: str):
+    ensure_tracing_disabled()
+    try:
+        from agents.model_settings import ModelSettings, Reasoning
+    except ModuleNotFoundError:
+        return SimpleNamespace(reasoning=SimpleNamespace(effort=effort))
+    return ModelSettings(reasoning=Reasoning(effort=effort))
+
+
 def mcp_stdio_class():
     ensure_tracing_disabled()
     try:
@@ -110,6 +119,7 @@ class _FallbackAgent:
         self.model = model
         self.mcp_servers = list(mcp_servers or [])
         self.kwargs = dict(kwargs)
+        self.model_settings = kwargs.get("model_settings")
 
 
 class _FallbackRunHooks:

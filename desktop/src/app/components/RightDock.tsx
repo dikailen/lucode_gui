@@ -52,13 +52,6 @@ const DOCK_TOOLS: Array<{
     shortcutKey: "rightDock.shortcutFiles",
     icon: "files",
   },
-  {
-    id: "sidechat",
-    labelKey: "rightDock.sidechat",
-    placeholderKey: "rightDock.sidechatPlaceholder",
-    shortcutKey: "rightDock.shortcutSidechat",
-    icon: "sidechat",
-  },
 ];
 
 export function RightDock({

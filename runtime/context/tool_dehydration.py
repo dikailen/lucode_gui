@@ -296,6 +296,10 @@ def _redact(value: str) -> str:
 def _contains_redacted_secret(value: Any) -> bool:
     if _contains_secret_key(value):
         return True
+    if isinstance(value, dict):
+        return any(_contains_redacted_secret(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_redacted_secret(item) for item in value)
     text = _clean_text(value)
     return _redact(text) != sanitize_text(text)
 

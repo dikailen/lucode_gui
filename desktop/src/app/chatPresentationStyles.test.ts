@@ -39,4 +39,23 @@ describe("chat presentation styles", () => {
     expect(css).not.toContain(".runtime-toast-row.level-1");
     expect(css).not.toContain(".runtime-toast-row.level-2");
   });
+
+  it("keeps the B workbench controls compact and exposes settings navigation in the sidebar", () => {
+    const css = readStyles();
+
+    expect(css).toContain(".settings-sidebar-tabs {");
+    expect(css).toContain(".composer-shell:focus-within {");
+    expect(css).toContain("min-height: 112px;");
+    expect(css).toContain(".session-row:hover .session-delete");
+  });
+
+  it("keeps attachment drafts compact, scrollable, and separate from message text", () => {
+    const css = readStyles();
+
+    expect(css).toContain(".composer-attachment-tray {");
+    expect(css).toContain("overflow-x: auto;");
+    expect(css).toContain(".composer-attachment-chip {");
+    expect(css).toContain(".message-attachment-list {");
+    expect(css).toContain("text-overflow: ellipsis;");
+  });
 });

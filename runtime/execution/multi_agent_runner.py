@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 
-from mcp_servers import apply_full_supervisor_readonly_budget_profile, create_readonly_filesystem_server
+from mcp_servers import apply_supervisor_readonly_budget_profile, create_readonly_filesystem_server
 from planning.planner_schema import PlannerResult
 from runtime.config.execution_mode import normalize_execution_mode
 from runtime.execution.execution_contract import summary_helper_enabled, supervisor_route
@@ -43,6 +43,17 @@ WORKER_OUTPUT_EXPAND_MIN_CHARS = 4000
 MAX_LEAD_REWORK_ATTEMPTS = 2
 
 
+def _supervisor_route_for_plan(plan: PlannerResult) -> str:
+    route = supervisor_route(plan)
+    if route:
+        return route
+    return "team" if str(getattr(plan, "route_type", "") or "") == "multi_agent" else "single"
+
+
+def _is_team_route(plan: PlannerResult) -> bool:
+    return _supervisor_route_for_plan(plan) == "team"
+
+
 async def _run_multi_agent(
     refined_request,
     plan: PlannerResult,
@@ -52,7 +63,7 @@ async def _run_multi_agent(
     hooks,
     run_agent,
     run_state: PipelineRunState | None = None,
-    execution_mode: str = "serial",
+    execution_mode: str = "auto",
     show_progress: bool = True,
     attempt: int = 1,
     approval_policy_factory=None,
@@ -61,8 +72,8 @@ async def _run_multi_agent(
     run_dir = workspace.create()
     ledger = PatchProposalLedger(project_root)
     mode = normalize_execution_mode(execution_mode)
-    _apply_full_supervisor_budget_profile(factory, plan.tasks, mode)
     route = supervisor_route(plan)
+    _apply_supervisor_budget_profile(factory, plan.tasks, route)
     use_summary_helper = summary_helper_enabled(plan)
     supervisor_view = emit_supervisor_observation(
         plan,
@@ -94,12 +105,15 @@ async def _run_multi_agent(
         model_id=model_id,
         mode=mode,
     )
-    worker_outputs: list[tuple[str, str, str]] = []
+    worker_outputs: list[tuple[str, str, str]] = _recovered_worker_outputs(plan, run_state)
     worker_reports = []
     lead_rework_limits = []
 
     try:
         for group_id, tasks in _tasks_by_parallel_group(plan).items():
+            tasks = [task for task in tasks if not _task_was_reused(run_state, task)]
+            if not tasks:
+                continue
             batch_decisions = execution_batch_decisions_for_mode(
                 tasks,
                 mode,
@@ -253,9 +267,9 @@ async def _run_multi_agent(
             "Lead Review",
             mode=mode,
             stage="review",
-            enabled=show_progress and mode == "full",
+            enabled=show_progress and route == "team",
         ):
-            lead_review_findings = _review_full_worker_reports(plan, worker_reports, run_state, mode=mode)
+            lead_review_findings = _review_worker_reports(plan, worker_reports, run_state, mode=mode)
         worker_outputs, worker_reports, lead_review_findings, lead_rework_limits = await _run_lead_rework_until_stable(
             refined_request=refined_request,
             plan=plan,
@@ -277,7 +291,7 @@ async def _run_multi_agent(
             attempt=attempt,
         )
 
-        if mode == "full" and route == "team" and not use_summary_helper:
+        if route == "team" and not use_summary_helper:
             placement_error = _final_role_context_placement_error(
                 factory,
                 run_state,
@@ -403,6 +417,27 @@ def _tasks_by_parallel_group(plan: PlannerResult) -> dict[int, list]:
     return dict(sorted(groups.items(), key=lambda item: item[0]))
 
 
+def _task_was_reused(run_state: PipelineRunState | None, task) -> bool:
+    if run_state is None or not hasattr(run_state, "task_is_reused"):
+        return False
+    return bool(run_state.task_is_reused(str(getattr(task, "id", "") or "")))
+
+
+def _recovered_worker_outputs(
+    plan: PlannerResult,
+    run_state: PipelineRunState | None,
+) -> list[tuple[str, str, str]]:
+    if run_state is None:
+        return []
+    outputs: list[tuple[str, str, str]] = []
+    for task in list(getattr(plan, "tasks", []) or []):
+        task_id = str(getattr(task, "id", "") or "")
+        output = run_state.reused_task_output(task_id) if hasattr(run_state, "reused_task_output") else ""
+        if output:
+            outputs.append((task_id, str(getattr(task, "title", "") or task_id), output))
+    return outputs
+
+
 def _emit_parallel_batch_notice(
     run_state: PipelineRunState | None,
     *,
@@ -500,7 +535,7 @@ def _record_worker_output_detail(
     route: str,
     run_state: PipelineRunState | None = None,
 ) -> str:
-    if str(mode or "").strip().lower() != "full" or str(route or "").strip().lower() != "team":
+    if str(route or "").strip().lower() != "team":
         return ""
     text = str(output or "")
     if not _should_store_worker_output(text):
@@ -591,7 +626,7 @@ async def _run_lead_rework_until_stable(
     attempt: int,
     max_attempts: int = MAX_LEAD_REWORK_ATTEMPTS,
 ) -> tuple[list[tuple[str, str, str]], list, list, list]:
-    if mode != "full" or not worker_reports:
+    if not _is_team_route(plan) or not worker_reports:
         return worker_outputs, worker_reports, lead_review_findings, []
 
     attempts_by_task: dict[str, int] = {}
@@ -678,7 +713,7 @@ async def _run_lead_rework_until_stable(
                 title=title,
                 output=output,
                 mode=mode,
-                route=supervisor_route(plan),
+                route=_supervisor_route_for_plan(plan),
                 run_state=run_state,
             )
             report = build_worker_report(rework_task, output, run_state=run_state)
@@ -688,7 +723,7 @@ async def _run_lead_rework_until_stable(
             _record_worker_report_to_blackboard(run_state, report)
             _emit_lead_rework_completed(run_state, action, report, mode=mode)
 
-        lead_review_findings = _review_full_worker_reports(plan, worker_reports, run_state, mode=mode)
+        lead_review_findings = _review_worker_reports(plan, worker_reports, run_state, mode=mode)
 
 
 def _task_with_rework_instruction(task, rework_instruction: str):
@@ -788,7 +823,7 @@ def _should_store_worker_output(text: str) -> bool:
 
 
 def _seed_supervisor_context_pack(run_state: PipelineRunState, supervisor_view, *, mode: str, route: str) -> bool:
-    if mode != "full" or route != "team":
+    if route != "team":
         return False
     run_context = getattr(run_state, "run_context", None)
     if run_context is None:
@@ -820,8 +855,8 @@ def _seed_supervisor_context_pack(run_state: PipelineRunState, supervisor_view, 
         return False
 
 
-def _apply_full_supervisor_budget_profile(factory, tasks: list, mode: str) -> bool:
-    if normalize_execution_mode(mode) != "full":
+def _apply_supervisor_budget_profile(factory, tasks: list, route: str) -> bool:
+    if route != "team":
         return False
     mcp_ids = sorted(
         {
@@ -832,11 +867,11 @@ def _apply_full_supervisor_budget_profile(factory, tasks: list, mode: str) -> bo
         }
     )
     manager = getattr(factory, "mcp_manager", None)
-    return apply_full_supervisor_readonly_budget_profile(manager, mcp_ids)
+    return apply_supervisor_readonly_budget_profile(manager, mcp_ids)
 
 
-def _review_full_worker_reports(plan: PlannerResult, worker_reports: list, run_state: PipelineRunState | None, *, mode: str) -> list:
-    if mode != "full" or not worker_reports:
+def _review_worker_reports(plan: PlannerResult, worker_reports: list, run_state: PipelineRunState | None, *, mode: str) -> list:
+    if not _is_team_route(plan) or not worker_reports:
         return []
     findings = review_worker_reports(
         plan.tasks,
@@ -967,7 +1002,7 @@ def _build_supervisor_rework_decider(
     model_id: str,
     mode: str,
 ):
-    if str(mode or "").strip().lower() != "full":
+    if not _is_team_route(plan):
         return None
     if run_agent is None or not hasattr(factory, "create_supervisor_agent"):
         return None
@@ -1222,7 +1257,7 @@ def _build_supervisor_approval_decider(
     model_id: str,
     mode: str,
 ):
-    if str(mode or "").strip().lower() != "full":
+    if not _is_team_route(plan):
         return None
     if run_agent is None or not hasattr(factory, "create_supervisor_agent"):
         return None
@@ -1418,7 +1453,7 @@ async def _finalize_with_supervisor_agent(
                     run_agent,
                     max_turns=8,
                     stream_output=True,
-                    on_delta=_final_answer_delta_emitter(run_state, agent="full_supervisor_agent"),
+                    on_delta=_final_answer_delta_emitter(run_state, agent="execution_supervisor_agent"),
                 ),
             )
     except Exception:
@@ -1436,7 +1471,7 @@ def _final_answer_delta_emitter(run_state: PipelineRunState | None, *, agent: st
             return
         try:
             event_bus.emit(
-                "AgentMessageDelta",
+                "FinalAnswerDelta",
                 str(text),
                 agent=str(agent or ""),
                 status="streaming",

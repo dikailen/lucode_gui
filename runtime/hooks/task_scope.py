@@ -12,11 +12,28 @@ from runtime.hooks.tool_events import build_tool_event
 class TaskScopedHooks(run_hooks_class()):
     """Bind tool hook events to a planned task while preserving the wrapped hooks object."""
 
-    def __init__(self, base_hooks, *, task_id: str, event_bus=None, run_context=None):
+    def __init__(
+        self,
+        base_hooks,
+        *,
+        task_id: str,
+        event_bus=None,
+        run_context=None,
+        tool_lifecycle_sink=None,
+    ):
         object.__setattr__(self, "_base_hooks", base_hooks)
         object.__setattr__(self, "_task_id", str(task_id or ""))
         object.__setattr__(self, "_event_bus", event_bus)
         object.__setattr__(self, "_run_context", run_context)
+        object.__setattr__(self, "_tool_lifecycle_sink", tool_lifecycle_sink)
+
+    @property
+    def task_id(self) -> str:
+        return str(object.__getattribute__(self, "_task_id"))
+
+    @property
+    def tool_lifecycle_sink(self):
+        return object.__getattribute__(self, "_tool_lifecycle_sink")
 
     async def on_llm_start(self, *args, **kwargs):
         await self._call_base_hook("on_llm_start", *args, **kwargs)
@@ -50,10 +67,12 @@ class TaskScopedHooks(run_hooks_class()):
 
     async def on_tool_start(self, context, agent, tool):
         await self._call_base_hook("on_tool_start", context, agent, tool)
+        self._record_tool_lifecycle_start(context, tool)
 
     async def on_tool_end(self, context, agent, tool, result):
         await self._call_base_hook("on_tool_end", context, agent, tool, result)
         self._record_dehydrated_tool_result(context, tool, result)
+        self._record_tool_lifecycle_completion(context, tool, result)
         event = build_tool_event(
             "sdk_tool_end",
             _tool_name_from_context_or_tool(context, tool),
@@ -67,6 +86,42 @@ class TaskScopedHooks(run_hooks_class()):
             event,
             task_id=object.__getattribute__(self, "_task_id"),
         )
+
+    def _record_tool_lifecycle_completion(self, context, tool, result) -> None:
+        sink = object.__getattribute__(self, "_tool_lifecycle_sink")
+        if sink is None:
+            return
+        tool_name = _tool_name_from_context_or_tool(context, tool)
+        arguments = _tool_arguments_from_context_or_tool(context, tool)
+        payload = _tool_result_payload(result)
+        try:
+            sink.complete_for_tool(
+                task_id=object.__getattribute__(self, "_task_id"),
+                tool_name=tool_name,
+                arguments=arguments,
+                evidence_ref=_result_ref(payload, "evidence_ref"),
+                failed=_tool_result_failed(payload),
+            )
+        except Exception:
+            return
+
+    def _record_tool_lifecycle_start(self, context, tool) -> None:
+        sink = object.__getattribute__(self, "_tool_lifecycle_sink")
+        recorder = getattr(sink, "ensure_dispatched_for_tool_start", None)
+        if not callable(recorder):
+            return
+        tool_name = _tool_name_from_context_or_tool(context, tool)
+        arguments = _tool_arguments_from_context_or_tool(context, tool)
+        try:
+            recorded = recorder(
+                task_id=object.__getattribute__(self, "_task_id"),
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+        except Exception as exc:
+            raise RuntimeError("unable to persist tool lifecycle before execution") from exc
+        if recorded is not True:
+            raise RuntimeError("unable to persist tool lifecycle before execution")
 
     def _record_dehydrated_tool_result(self, context, tool, result) -> None:
         run_context = object.__getattribute__(self, "_run_context")
@@ -91,6 +146,9 @@ class TaskScopedHooks(run_hooks_class()):
                 task_id=object.__getattribute__(self, "_task_id"),
                 evidence_ref=dehydrated.evidence_ref,
                 raw_artifact_ref=dehydrated.raw_artifact_ref,
+                key_fields=dehydrated.key_fields,
+                omitted_fields=dehydrated.omitted_fields,
+                redacted=dehydrated.redacted,
             )
         except Exception:
             return
@@ -108,7 +166,7 @@ class TaskScopedHooks(run_hooks_class()):
         return getattr(object.__getattribute__(self, "_base_hooks"), name)
 
     def __setattr__(self, name: str, value) -> None:
-        if name in {"_base_hooks", "_task_id", "_event_bus", "_run_context"}:
+        if name in {"_base_hooks", "_task_id", "_event_bus", "_run_context", "_tool_lifecycle_sink"}:
             object.__setattr__(self, name, value)
             return
         setattr(object.__getattribute__(self, "_base_hooks"), name, value)
@@ -200,3 +258,12 @@ def _result_ref(payload, *keys: str) -> str:
         if value:
             return value
     return ""
+
+
+def _tool_result_failed(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    status = str(payload.get("status") or payload.get("state") or "").strip().lower()
+    if status in {"failed", "error", "rejected", "denied"}:
+        return True
+    return bool(payload.get("error") or payload.get("exception"))

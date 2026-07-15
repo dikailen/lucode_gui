@@ -3,6 +3,115 @@ import { describe, expect, it, vi } from "vitest";
 import { RuntimeClient } from "./runtimeClient";
 
 describe("RuntimeClient", () => {
+  it("loads recovery candidates and only sends an explicit abandon command", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/recovery")) {
+        expect(init?.method).toBeUndefined();
+        return response({
+          schema_version: "run_recovery.v1",
+          runs: [{
+            run_id: "run_1",
+            session_id: "session_1",
+            action: "replan",
+            reason_code: "interrupted_runtime",
+            requires_user_action: true,
+          }],
+        });
+      }
+      if (url.endsWith("/api/runs/run_1/abandon")) {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(JSON.stringify({}));
+        return response({ abandoned: true, run_id: "run_1" });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new RuntimeClient({ baseUrl: "http://127.0.0.1:43217", token: "token_1", fetchImpl: fetchMock as typeof fetch });
+
+    await expect(client.listRecoveryRuns()).resolves.toMatchObject([{ run_id: "run_1", action: "replan" }]);
+    await expect(client.abandonRecoveryRun("run_1")).resolves.toEqual({ abandoned: true, run_id: "run_1" });
+  });
+
+  it("loads active runs for renderer reconnect without starting a new task", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://127.0.0.1:43217/api/runs/active");
+      expect(init?.method).toBeUndefined();
+      return response({ schema_version: "runs.v1", runs: [] });
+    });
+    const client = new RuntimeClient({
+      baseUrl: "http://127.0.0.1:43217",
+      token: "token_1",
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await expect(client.listActiveRuns()).resolves.toEqual([]);
+  });
+
+  it("includes the last received sequence when reopening a run event stream", () => {
+    const client = new RuntimeClient({ baseUrl: "http://127.0.0.1:43217", token: "token_1" });
+
+    expect(client.runEventsUrl("run_1", 12)).toBe(
+      "ws://127.0.0.1:43217/api/runs/run_1/events?token=token_1&after_seq=12",
+    );
+  });
+
+  it("sends optional local attachment paths with the run request", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        session_id: "session_1",
+        input: "summarize these files",
+        client_request_id: "request_1",
+        attachments: [
+          { path: "D:\\docs\\notes.md" },
+          { path: "D:\\images\\screen.png" },
+        ],
+      });
+      return response({
+        schema_version: "run.v1",
+        run_id: "run_1",
+        session_id: "session_1",
+        status: "running",
+        created_at: "now",
+        updated_at: "now",
+        attachments: [],
+      });
+    });
+    const client = new RuntimeClient({
+      baseUrl: "http://127.0.0.1:43217",
+      token: "token_1",
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await client.startRun("session_1", "summarize these files", [
+      { path: "D:\\docs\\notes.md" },
+      { path: "D:\\images\\screen.png" },
+    ], "request_1");
+  });
+
+  it("sends workspace Skill enablement and reindex commands", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer token_1");
+      if (url.endsWith("/api/plugins/skills/release_review/enabled")) {
+        expect(init?.method).toBe("PUT");
+        expect(init?.body).toBe(JSON.stringify({ enabled: false }));
+        return response({ schema_version: "plugin_state.v1", skills: [], mcp: [], installed_plugins: [], runtime_capabilities: [] });
+      }
+      if (url.endsWith("/api/plugins/skills/reindex")) {
+        expect(init?.method).toBe("POST");
+        return response({ schema_version: "plugin_state.v1", skills: [], mcp: [], installed_plugins: [], runtime_capabilities: [], reindexed_skill_library: true });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new RuntimeClient({ baseUrl: "http://127.0.0.1:43217", token: "token_1", fetchImpl: fetchMock as typeof fetch });
+
+    await client.setSkillEnabled("release_review", false);
+    await client.reindexSkillLibrary();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("sends bearer token and parses runtime responses", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -71,6 +180,11 @@ describe("RuntimeClient", () => {
               privacy_level: "cloud",
               supports_tools: true,
               reasoning_level: "high",
+              supports_reasoning_effort: false,
+              reasoning_effort_levels: [],
+              selected_reasoning_effort: "auto",
+              reasoning_effort_probe_status: "unknown",
+              reasoning_effort_verification: "",
               cost_level: "medium",
               model_tier: "large",
             },
@@ -127,6 +241,11 @@ describe("RuntimeClient", () => {
               privacy_level: "cloud",
               supports_tools: true,
               reasoning_level: "high",
+              supports_reasoning_effort: false,
+              reasoning_effort_levels: [],
+              selected_reasoning_effort: "auto",
+              reasoning_effort_probe_status: "unknown",
+              reasoning_effort_verification: "",
               cost_level: "medium",
               model_tier: "large",
             },
@@ -846,6 +965,11 @@ function modelSettingsResponse() {
         privacy_level: "cloud",
         supports_tools: true,
         reasoning_level: "high",
+        supports_reasoning_effort: false,
+        reasoning_effort_levels: [],
+        selected_reasoning_effort: "auto",
+        reasoning_effort_probe_status: "unknown",
+        reasoning_effort_verification: "",
         cost_level: "medium",
         model_tier: "large",
       },

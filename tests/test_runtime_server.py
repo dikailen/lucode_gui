@@ -16,7 +16,9 @@ from runtime.events import ExecutionEventBus
 from runtime.config.model_config import provider_api_key_value
 from runtime.server.app import create_app
 from runtime.server.execution_bridge import KernelAgentLoopExecutor, RunExecutionRequest, RunExecutionResult
+from runtime.server.event_stream import RunEventStream
 from runtime.server.run_manager import RuntimeRunManager
+from runtime.server.schemas import ServerRun
 
 
 TOKEN = "test-runtime-token"
@@ -90,6 +92,178 @@ def test_run_execution_request_context_fields_are_optional(tmp_path):
     assert request.history_facade is None
     assert request.model_info == {}
     assert request.routing_input == ""
+    assert request.attachments == ()
+    assert request.inline_files == ()
+    assert request.recovery_envelope == {}
+    assert request.checkpoint_sink is None
+
+
+def test_runtime_run_stages_attachments_for_executor_and_public_history_metadata(tmp_path):
+    captured = {}
+
+    async def runner(request):
+        captured["request"] = request
+        return RunExecutionResult(final_output="attachment received")
+
+    source = tmp_path / "external" / "browser-notes.txt"
+    source.parent.mkdir()
+    source.write_text("desktop_browser is historical text, not the current route", encoding="utf-8")
+    client = _client(tmp_path, run_executor=runner)
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "attachment contract"},
+    ).json()["session_id"]
+
+    response = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={
+            "session_id": session_id,
+            "input": "你好",
+            "attachments": [{"path": str(source)}],
+        },
+    )
+
+    assert response.status_code == 200
+    run_payload = response.json()
+    assert run_payload["attachments"][0]["name"] == "browser-notes.txt"
+    assert str(source.parent) not in json.dumps(run_payload, ensure_ascii=False)
+    with client.websocket_connect(f"/api/runs/{run_payload['run_id']}/events?token={TOKEN}") as websocket:
+        while True:
+            event = websocket.receive_json()
+            if event["type"] in {"run.completed", "run.failed", "run.cancelled"}:
+                break
+
+    request = captured["request"]
+    assert request.user_input == "你好"
+    assert request.routing_input == "你好"
+    assert request.attachments[0]["name"] == "browser-notes.txt"
+    assert request.inline_files[0]["content"].startswith("desktop_browser")
+    assert str(source) not in json.dumps(request.attachments, ensure_ascii=False)
+
+    messages = client.get(
+        f"/api/sessions/{session_id}/messages",
+        headers=_auth_headers(),
+    ).json()["messages"]
+    user_message = next(item for item in messages if item["role"] == "user")
+    assert user_message["metadata"]["attachments"][0]["name"] == "browser-notes.txt"
+    metadata_text = json.dumps(user_message["metadata"], ensure_ascii=False)
+    assert str(source.parent) not in metadata_text
+    assert "desktop_browser is historical text" not in metadata_text
+
+
+def test_runtime_run_rejects_invalid_attachment_without_persisting_user_message(tmp_path):
+    client = _client(tmp_path)
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "invalid attachment"},
+    ).json()["session_id"]
+
+    response = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={
+            "session_id": session_id,
+            "input": "read it",
+            "attachments": [{"path": str(tmp_path / "missing.txt")}],
+        },
+    )
+
+    assert response.status_code == 400
+    messages = client.get(
+        f"/api/sessions/{session_id}/messages",
+        headers=_auth_headers(),
+    ).json()["messages"]
+    assert messages == []
+
+
+def test_kernel_executor_keeps_attachment_text_out_of_routing_input(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        final_output = "ok"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            self.context = context
+
+        async def run_once(self, prompt, **kwargs):
+            seen["prompt"] = prompt
+            seen["routing_input"] = kwargs.get("routing_input")
+            seen["inline_files"] = kwargs.get("inline_files")
+            return FakeResponse()
+
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    request = RunExecutionRequest(
+        run_id="run_attachment_route",
+        session_id="session_attachment_route",
+        user_input="你好",
+        workspace_root=tmp_path.resolve(),
+        event_bus=ExecutionEventBus(),
+        cancel_requested=asyncio.Event(),
+        routing_input="你好",
+        inline_files=(
+            {
+                "path": ".lucode/attachments/session_attachment_route/run_attachment_route/notes.txt",
+                "content": "desktop_browser navigate and submit a form",
+            },
+        ),
+    )
+
+    result = asyncio.run(KernelAgentLoopExecutor()(request))
+
+    assert "desktop_browser navigate and submit a form" in str(seen["prompt"])
+    assert seen["routing_input"] == "你好"
+    assert seen["inline_files"] == list(request.inline_files)
+    assert result.final_output == "ok"
+
+
+def test_kernel_executor_passes_recovery_context_without_replacing_routing_input(tmp_path, monkeypatch):
+    seen = {}
+    checkpoint_calls = []
+
+    class FakeResponse:
+        final_output = "ok"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+        recovery_outcome = "superseded"
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            self.context = context
+
+        async def run_once(self, prompt, **kwargs):
+            seen.update(kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    sink = lambda kind, state, compatibility: checkpoint_calls.append((kind, state, compatibility))
+    request = RunExecutionRequest(
+        run_id="run_recovery_bridge",
+        session_id="session_recovery_bridge",
+        user_input="继续",
+        workspace_root=tmp_path.resolve(),
+        event_bus=ExecutionEventBus(),
+        cancel_requested=asyncio.Event(),
+        routing_input="继续",
+        recovery_envelope={"schema_version": "recovery_envelope.v1", "source_run_id": "run_old"},
+        checkpoint_sink=sink,
+    )
+
+    result = asyncio.run(KernelAgentLoopExecutor()(request))
+
+    assert seen["routing_input"] == "继续"
+    assert seen["recovery_envelope"]["source_run_id"] == "run_old"
+    assert seen["checkpoint_sink"] is sink
+    assert result.metadata["recovery_outcome"] == "superseded"
 
 
 def test_runtime_run_manager_passes_context_observe_inputs_to_executor(tmp_path):
@@ -498,6 +672,11 @@ def test_model_settings_endpoint_returns_sanitized_roles_and_provider_summary(tm
         "privacy_level": "cloud",
         "supports_tools": True,
         "reasoning_level": "high",
+        "supports_reasoning_effort": False,
+        "reasoning_effort_levels": [],
+        "selected_reasoning_effort": "auto",
+        "reasoning_effort_probe_status": "unknown",
+        "reasoning_effort_verification": "",
         "cost_level": "medium",
         "model_tier": "large",
     }
@@ -605,6 +784,99 @@ def test_model_role_update_saves_project_config_and_refreshes_settings(tmp_path)
     assert "[roles]" in config_text
     assert 'orchestrator = ["deepseek/deepseek-chat"]' in config_text
     assert "should-not-leak" not in str(payload)
+
+
+def test_reasoning_effort_endpoint_persists_only_for_explicitly_supported_models(tmp_path):
+    (tmp_path / ".lucode").mkdir()
+    (tmp_path / ".lucode" / "config.toml").write_text(
+        '[reasoning_effort]\ndeepseek_chat_model = "high"\n',
+        encoding="utf-8",
+    )
+    client = _client(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "openai_gpt_5_2_model",
+                    "display_name": "GPT-5.2",
+                    "provider": "openai",
+                    "configured": True,
+                    "backend_type": "openai",
+                    "model_name": "gpt-5.2",
+                    "supports_reasoning_effort": True,
+                    "reasoning_effort_levels": ["low", "medium", "high", "xhigh"],
+                },
+                {
+                    "id": "deepseek_chat_model",
+                    "display_name": "DeepSeek Chat",
+                    "provider": "deepseek",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "model_name": "deepseek-chat",
+                },
+            ]
+        },
+    )
+
+    response = client.put(
+        "/api/settings/models/openai_gpt_5_2_model/reasoning-effort",
+        headers=_auth_headers(),
+        json={"effort": "high"},
+    )
+
+    assert response.status_code == 200
+    supported = next(item for item in response.json()["models"] if item["id"] == "openai_gpt_5_2_model")
+    unsupported = next(item for item in response.json()["models"] if item["id"] == "deepseek_chat_model")
+    assert supported["selected_reasoning_effort"] == "high"
+    assert supported["reasoning_effort_levels"] == ["auto", "low", "medium", "high", "xhigh"]
+    assert unsupported["selected_reasoning_effort"] == "auto"
+    assert unsupported["reasoning_effort_levels"] == []
+    assert 'openai_gpt_5_2_model = "high"' in (tmp_path / ".lucode" / "config.toml").read_text(encoding="utf-8")
+
+    rejected = client.put(
+        "/api/settings/models/deepseek_chat_model/reasoning-effort",
+        headers=_auth_headers(),
+        json={"effort": "high"},
+    )
+    assert rejected.status_code == 400
+
+
+def test_reasoning_effort_probe_endpoint_refreshes_model_capability_from_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "runtime.server.run_manager.probe_reasoning_effort_capabilities",
+        lambda _root, model: {
+            "supports_reasoning_effort": True,
+            "reasoning_effort_levels": ["low", "high"],
+            "reasoning_effort": {"status": "accepted", "verification": "transport_accepted"},
+        },
+    )
+    client = _client(
+        tmp_path,
+        model_catalog_provider=lambda: {
+            "models": [
+                {
+                    "id": "custom_gpt_5_4_model",
+                    "display_name": "GPT-5.4",
+                    "provider": "custom",
+                    "configured": True,
+                    "backend_type": "openai_compatible",
+                    "model_name": "gpt-5.4",
+                    "base_url": "https://proxy.example/v1",
+                }
+            ]
+        },
+    )
+
+    response = client.post(
+        "/api/settings/models/custom_gpt_5_4_model/probe-reasoning-effort",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    model = response.json()["models"][0]
+    assert model["supports_reasoning_effort"] is True
+    assert model["reasoning_effort_levels"] == ["auto", "low", "high"]
+    assert model["reasoning_effort_probe_status"] == "accepted"
 
 
 def test_query_refiner_update_persists_project_config_and_refreshes_settings(tmp_path):
@@ -962,6 +1234,156 @@ def test_plugin_skill_install_endpoint_copies_folder_and_refreshes_state(tmp_pat
     assert (tmp_path / ".lucode" / "skills" / "drag_skill" / "SKILL.md").exists()
 
 
+def test_plugin_skill_install_normalizes_uppercase_folder_name_to_safe_workspace_id(tmp_path):
+    source = tmp_path / "Humanizer-zh-main"
+    source.mkdir()
+    (source / "SKILL.md").write_text("---\nname: Humanizer\n---\n\n# Humanizer\n", encoding="utf-8")
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/plugins/skills/install",
+        headers=_auth_headers(),
+        json={"path": str(source)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["installed_skill_id"] == "humanizer-zh-main"
+    assert (tmp_path / ".lucode" / "skills" / "humanizer-zh-main" / "SKILL.md").exists()
+
+
+def test_plugin_skill_metadata_endpoint_can_activate_imported_third_party_skill(tmp_path):
+    source = tmp_path / "Humanizer-zh-main"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\n"
+        "name: Humanizer\n"
+        "description: Rewrite text to remove generic AI writing patterns.\n"
+        "allowed-tools: [Read, Edit]\n"
+        "metadata:\n"
+        "  trigger: Edit or review text to remove AI writing traces.\n"
+        "---\n\n"
+        "# Humanizer\n",
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+
+    installed = client.post(
+        "/api/plugins/skills/install",
+        headers=_auth_headers(),
+        json={"path": str(source)},
+    )
+    assert installed.status_code == 200
+    initial = next(item for item in installed.json()["skill_library"] if item["id"] == "humanizer_zh_main")
+    assert initial["assignable"] is False
+    assert initial["suggestion"]["tags"] == ["humanizer", "rewrite", "text", "writing", "patterns"]
+    assert initial["suggestion"]["use_when"] == ["Edit or review text to remove AI writing traces."]
+    assert initial["suggestion"]["do_not_use_when"] == []
+
+    response = client.put(
+        "/api/plugins/skills/humanizer-zh-main/metadata",
+        headers=_auth_headers(),
+        json={
+            "categories": ["documentation"],
+            "tags": ["editing", "writing", "humanizer"],
+            "use_when": ["Edit or review text to remove AI writing traces."],
+            "do_not_use_when": ["Pure backend, database, or infrastructure work."],
+            "negative_queries": [],
+            "distinguish_from": {},
+        },
+    )
+
+    assert response.status_code == 200
+    updated = next(item for item in response.json()["skill_library"] if item["id"] == "humanizer_zh_main")
+    assert updated["metadata_status"] == "ready"
+    assert updated["assignable"] is True
+    assert updated["tags"] == ["editing", "writing", "humanizer"]
+
+
+def test_plugin_skill_enabled_endpoint_updates_workspace_index_without_editing_skill_file(tmp_path):
+    source = tmp_path / "release-review"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\n"
+        "id: release_review\n"
+        "name: Release Review\n"
+        "description: Review a release before publishing it.\n"
+        "category: [programming, testing]\n"
+        "tags: [release, regression]\n"
+        "use_when: [Review a release]\n"
+        "do_not_use_when: [Write product copy]\n"
+        "---\n\n# Release review\n",
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+    installed = client.post("/api/plugins/skills/install", headers=_auth_headers(), json={"path": str(source)})
+    assert installed.status_code == 200
+    installed_file = tmp_path / ".lucode" / "skills" / "release-review" / "SKILL.md"
+    original_text = installed_file.read_text(encoding="utf-8")
+
+    disabled = client.put(
+        "/api/plugins/skills/release_review/enabled",
+        headers=_auth_headers(),
+        json={"enabled": False},
+    )
+
+    assert disabled.status_code == 200
+    disabled_entry = next(item for item in disabled.json()["skill_library"] if item["id"] == "release_review")
+    assert disabled_entry["enabled"] is False
+    assert disabled_entry["assignable"] is False
+    assert installed_file.read_text(encoding="utf-8") == original_text
+
+    restored = client.put(
+        "/api/plugins/skills/release_review/enabled",
+        headers=_auth_headers(),
+        json={"enabled": True},
+    )
+    restored_entry = next(item for item in restored.json()["skill_library"] if item["id"] == "release_review")
+    assert restored_entry["enabled"] is True
+    assert restored_entry["assignable"] is True
+
+
+def test_plugin_skill_enabled_endpoint_rejects_core_skill(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.put(
+        "/api/plugins/skills/code_engineer/enabled",
+        headers=_auth_headers(),
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 400
+    assert "workspace" in response.json()["error"]["message"]
+
+
+def test_plugin_skill_reindex_endpoint_refreshes_workspace_skill_metadata(tmp_path):
+    source = tmp_path / "refreshable-skill"
+    source.mkdir()
+    source_file = source / "SKILL.md"
+    source_file.write_text(
+        "---\n"
+        "id: refreshable_skill\n"
+        "name: Refreshable Skill\n"
+        "description: Original description.\n"
+        "category: [programming]\n"
+        "tags: [refresh]\n"
+        "use_when: [Refresh skill metadata]\n"
+        "do_not_use_when: [Write product copy]\n"
+        "---\n\n# Refreshable\n",
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+    installed = client.post("/api/plugins/skills/install", headers=_auth_headers(), json={"path": str(source)})
+    assert installed.status_code == 200
+    installed_file = tmp_path / ".lucode" / "skills" / "refreshable-skill" / "SKILL.md"
+    installed_file.write_text(installed_file.read_text(encoding="utf-8").replace("Original description.", "Updated description."), encoding="utf-8")
+
+    response = client.post("/api/plugins/skills/reindex", headers=_auth_headers())
+
+    assert response.status_code == 200
+    entry = next(item for item in response.json()["skill_library"] if item["id"] == "refreshable_skill")
+    assert entry["summary"] == "Updated description."
+
+
 def test_plugin_skill_install_endpoint_rejects_invalid_sources(tmp_path):
     client = _client(tmp_path)
 
@@ -1127,9 +1549,11 @@ def test_plugin_state_returns_installed_plugins_and_package_delete_uninstalls_as
         json={"path": str(package)},
     )
     listed_response = client.get("/api/plugins", headers=_auth_headers())
-    delete_response = client.delete("/api/plugins/packages/demo_plugin", headers=_auth_headers())
 
     assert install_response.status_code == 200
+    from runtime.skill_library.metadata_proposals import load_skill_metadata_proposals
+
+    assert len(load_skill_metadata_proposals(tmp_path, skill_id="demo_operator")) == 1
     listed = listed_response.json()
     assert listed["installed_plugins"] == [
         {
@@ -1142,12 +1566,15 @@ def test_plugin_state_returns_installed_plugins_and_package_delete_uninstalls_as
             "deletable": True,
         }
     ]
+
+    delete_response = client.delete("/api/plugins/packages/demo_plugin", headers=_auth_headers())
     assert delete_response.status_code == 200
     deleted = delete_response.json()
     assert deleted["deleted_plugin_id"] == "demo_plugin"
     assert deleted["installed_plugins"] == []
     assert "demo_operator" not in [item["id"] for item in deleted["skills"]]
     assert "demo_graph" not in [item["id"] for item in deleted["mcp"]]
+    assert load_skill_metadata_proposals(tmp_path, skill_id="demo_operator") == []
 
 
 def test_plugin_package_install_endpoint_rejects_invalid_packages(tmp_path):
@@ -2215,6 +2642,149 @@ def test_memory_only_session_messages_endpoint_returns_empty_list(tmp_path):
     }
 
 
+def test_plugin_state_exposes_a_sanitized_read_only_skill_library(tmp_path):
+    skill_dir = tmp_path / ".lucode" / "skills" / "release_review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+id: release_review
+name: Release Review
+description: Validate a release before publishing it.
+category: [programming, testing]
+tags: [release, regression]
+use_when: [Review release changes]
+do_not_use_when: [Writing product copy]
+negative_queries: [Write a marketing announcement]
+distinguish_from:
+  documentation: Use documentation planning for prose-only tasks.
+---
+
+# Release Review
+""",
+        encoding="utf-8",
+    )
+    usage_path = tmp_path / ".lucode" / "skills" / "usage.jsonl"
+    usage_path.write_text(
+        json.dumps(
+            {
+                "skill_id": "release_review",
+                "query": "Write a marketing announcement",
+                "result": "rejected_by_planner",
+                "reason": "UI task, not release validation.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = RuntimeRunManager(tmp_path).plugin_state()
+
+    entry = next(item for item in payload["skill_library"] if item["id"] == "release_review")
+    assert entry == {
+        "id": "release_review",
+        "name": "Release Review",
+          "summary": "Validate a release before publishing it.",
+          "source": "workspace",
+          "editable_metadata": True,
+          "category": ["programming", "testing"],
+        "tags": ["release", "regression"],
+        "use_when": ["Review release changes"],
+        "do_not_use_when": ["Writing product copy"],
+        "negative_queries": ["Write a marketing announcement"],
+        "distinguish_from": {"documentation": "Use documentation planning for prose-only tasks."},
+        "risk_level": "unknown",
+        "enabled": True,
+        "core": False,
+        "assignable": True,
+        "metadata_status": "ready",
+        "missing_fields": [],
+        "usage": {
+            "used_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "misfire_count": 0,
+            "rejected_by_planner_count": 1,
+            "last_used_at": "",
+            "last_rejected_at": "",
+        },
+        "metadata_proposal": None,
+        "suggestion": {
+            "categories": [],
+            "tags": ["release", "regression"],
+            "use_when": ["Review release changes"],
+            "do_not_use_when": [],
+            "negative_queries": [],
+            "distinguish_from": {"ui": "UI task, not release validation."},
+            "source_count": 1,
+        },
+    }
+    assert "body_path" not in entry
+    assert payload["skills"]
+
+
+def test_plugin_state_suggests_categories_for_an_incomplete_workspace_skill(tmp_path):
+    skill_dir = tmp_path / ".lucode" / "skills" / "page_operator"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "id: page_operator\n"
+        "name: Page Operator\n"
+        "description: Read browser pages and fill forms.\n"
+        "tags: [browser, dom]\n"
+        "use_when: [Navigate browser tabs]\n"
+        "do_not_use_when: [Edit Python runtime]\n"
+        "---\n\n# Page Operator\n",
+        encoding="utf-8",
+    )
+
+    payload = RuntimeRunManager(tmp_path).plugin_state()
+    entry = next(item for item in payload["skill_library"] if item["id"] == "page_operator")
+
+    assert entry["category"] == []
+    assert entry["metadata_status"] == "incomplete"
+    assert entry["suggestion"]["categories"] == ["tools/browser"]
+
+
+def test_plugin_skill_metadata_endpoint_updates_workspace_frontmatter_and_refreshes_library(tmp_path):
+    skill_file = tmp_path / ".lucode" / "skills" / "release_review" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\nid: release_review\nname: Release Review\n---\n\n# Preserved body\n",
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+
+    response = client.put(
+        "/api/plugins/skills/release_review/metadata",
+        headers=_auth_headers(),
+        json={
+            "categories": ["tools", "browser"],
+            "negative_queries": ["Write product marketing copy"],
+            "distinguish_from": {"documentation": "Use prose planning for documentation-only work."},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["updated_skill_id"] == "release_review"
+    entry = next(item for item in payload["skill_library"] if item["id"] == "release_review")
+    assert entry["editable_metadata"] is True
+    assert entry["category"] == ["tools", "browser"]
+    assert entry["negative_queries"] == ["Write product marketing copy"]
+    assert entry["distinguish_from"] == {
+        "documentation": "Use prose planning for documentation-only work."
+    }
+    saved = skill_file.read_text(encoding="utf-8")
+    assert "# Preserved body" in saved
+
+    rejected = client.put(
+        "/api/plugins/skills/code_engineer/metadata",
+        headers=_auth_headers(),
+        json={"negative_queries": ["x"], "distinguish_from": {}},
+    )
+    assert rejected.status_code == 400
+
+
 def test_delete_session_removes_history_and_blocks_message_load(tmp_path):
     client = _client(tmp_path)
     session_id = client.post(
@@ -2567,7 +3137,115 @@ def test_kernel_agent_loop_executor_invokes_kernel_facade_and_reuses_event_bus(t
     assert event_bus.snapshot()[0].event_type == "PlanningStarted"
 
 
-def test_kernel_agent_loop_executor_observes_context_ledger_without_replacing_prompt(tmp_path, monkeypatch):
+def test_kernel_agent_loop_executor_exports_runtime_tool_dehydration_over_empty_pre_run_metadata(
+    tmp_path, monkeypatch
+):
+    class FakeResponse:
+        final_output = "kernel final"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+        tool_dehydration_items = [
+            {
+                "tool": "browser_get_page_summary",
+                "action": "browser_get_page_summary",
+                "summary": "browser summary\nurl: https://example.test",
+                "key_fields": {"url": "https://example.test", "title": "Example"},
+                "evidence_ref": "evidence:browser:1",
+                "raw_artifact_ref": "artifact:browser:1",
+                "omitted_fields": ["browser_dom_omitted"],
+                "redacted": False,
+            }
+        ]
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            pass
+
+        async def run_once(self, prompt, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    request = RunExecutionRequest(
+        run_id="run_tool_metadata",
+        session_id="session_tool_metadata",
+        user_input="inspect page",
+        workspace_root=tmp_path.resolve(),
+        event_bus=ExecutionEventBus(),
+        cancel_requested=asyncio.Event(),
+    )
+
+    result = asyncio.run(KernelAgentLoopExecutor()(request))
+
+    dehydration = result.metadata["tool_dehydration"]
+    assert dehydration["count"] == 1
+    assert dehydration["source"] == "tool_end_events"
+    assert dehydration["items"] == FakeResponse.tool_dehydration_items
+
+
+def test_runtime_tool_end_dehydration_reaches_sqlite_without_raw_browser_payload(tmp_path, monkeypatch):
+    import sqlite3
+
+    raw_dom = "<html>private browser DOM must not persist</html>"
+
+    class FakeResponse:
+        final_output = "page inspected"
+        turn_status = "completed"
+        stopped = False
+        mcp_ids_used = []
+        output_already_printed = False
+        tool_dehydration_items = [
+            {
+                "tool": "browser_get_page_summary",
+                "action": "browser_get_page_summary",
+                "summary": "browser summary\nurl: https://example.test/private",
+                "key_fields": {"url": "https://example.test/private", "title": "Private"},
+                "evidence_ref": "evidence:browser:runtime",
+                "raw_artifact_ref": "artifact:browser:runtime",
+                "omitted_fields": ["browser_dom_omitted"],
+                "redacted": False,
+            }
+        ]
+
+    class FakeKernelFacade:
+        def __init__(self, context):
+            pass
+
+        async def run_once(self, prompt, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setenv("LUCODE_CONTEXT_SQLITE", "dual_write")
+    monkeypatch.setattr("runtime.kernel.KernelFacade", FakeKernelFacade)
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=KernelAgentLoopExecutor())
+    client = TestClient(app)
+    session_id = client.post("/api/sessions", headers=_auth_headers(), json={"title": "tool persistence"}).json()["session_id"]
+    run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "inspect page"},
+    ).json()["run_id"]
+
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+        events = [websocket.receive_json() for _ in range(2)]
+
+    assert events[-1]["type"] == "run.completed"
+    with sqlite3.connect(tmp_path / ".lucode" / "lucode.db") as connection:
+        row = connection.execute(
+            "select summary, evidence_ref, raw_artifact_ref, metadata_json from tool_dehydrated_results where session_id = ?",
+            (session_id,),
+        ).fetchone()
+
+    assert row[:3] == (
+        "browser summary\nurl: https://example.test/private",
+        "evidence:browser:runtime",
+        "artifact:browser:runtime",
+    )
+    assert raw_dom not in row[3]
+    assert "browser_dom_omitted" in row[3]
+
+
+def test_kernel_agent_loop_executor_passes_recent_context_without_changing_routing_input(tmp_path, monkeypatch):
     seen: dict[str, object] = {}
 
     class BrowserHistory:
@@ -2612,10 +3290,14 @@ def test_kernel_agent_loop_executor_observes_context_ledger_without_replacing_pr
 
     result = asyncio.run(KernelAgentLoopExecutor()(request))
 
-    assert seen["prompt"] == "你好"
+    assert seen["prompt"] != "你好"
+    assert "[history_background]" in str(seen["prompt"])
+    assert "desktop_browser navigation completed" in str(seen["prompt"])
+    assert str(seen["prompt"]).rstrip().endswith("你好")
     assert seen["routing_input"] == "你好"
     assert result.final_output == "direct answer"
     assert result.metadata["context_ledger"]["applied"] is False
+    assert result.metadata["history_context"] == {"applied": True, "recent_turn_count": 2}
     assert result.metadata["context_ledger"]["mode"] in {"normal", "soft_limit", "hard_limit"}
     assert result.metadata["context_ledger"]["summary_chars"] > 0
     assert result.metadata["tool_dehydration"]["count"] == 0
@@ -2632,12 +3314,15 @@ def test_kernel_agent_loop_executor_enforce_mode_uses_ledger_prompt_with_raw_rou
     class BrowserHistory:
         def load_messages(self, session_id, limit=80):
             return [
-                {"role": "user", "content": "Use the embedded browser to open https://example.com"},
-                {"role": "assistant", "content": "desktop_browser navigation completed"},
+                {
+                    "role": "user",
+                    "content": "Use the embedded browser to open https://example.com " + ("browser history " * 350),
+                },
+                {"role": "assistant", "content": "desktop_browser navigation completed " + ("result " * 350)},
             ]
 
         def load_context_summary(self, session_id, max_chars=2400):
-            return "Old summary says: use desktop_browser and click a form."
+            return "Old summary says: use desktop_browser and click a form. " + ("summary " * 250)
 
     class FakeResponse:
         final_output = "ledger answer"
@@ -2665,7 +3350,7 @@ def test_kernel_agent_loop_executor_enforce_mode_uses_ledger_prompt_with_raw_rou
         event_bus=ExecutionEventBus(),
         cancel_requested=asyncio.Event(),
         history_facade=BrowserHistory(),
-        model_info={"context_window_tokens": 10_000},
+        model_info={"context_window_tokens": 1_000},
         routing_input="你好",
     )
 
@@ -2678,6 +3363,8 @@ def test_kernel_agent_loop_executor_enforce_mode_uses_ledger_prompt_with_raw_rou
     assert seen["routing_input"] == "你好"
     assert result.final_output == "ledger answer"
     assert result.metadata["context_ledger"]["applied"] is True
+    assert result.metadata["context_ledger"]["enforce_eligible"] is True
+    assert result.metadata["context_ledger"]["apply_reason"] == "budget_triggered"
     metadata_text = json.dumps(result.metadata, ensure_ascii=False)
     assert "https://example.com" not in metadata_text
 
@@ -2719,7 +3406,7 @@ def test_runtime_second_turn_enforce_uses_history_prompt_but_keeps_raw_routing_i
                     "name": "GPT-5.5",
                     "provider": "openai",
                     "configured": True,
-                    "context_window_tokens": 10_000,
+                    "context_window_tokens": 1_000,
                 }
             ]
         },
@@ -2730,11 +3417,12 @@ def test_runtime_second_turn_enforce_uses_history_prompt_but_keeps_raw_routing_i
         headers=_auth_headers(),
         json={"title": "context sequence"},
     ).json()["session_id"]
+    first_input = "Historical browser task context. " * 500
 
     first_run_id = client.post(
         "/api/runs",
         headers=_auth_headers(),
-        json={"session_id": session_id, "input": "你好"},
+        json={"session_id": session_id, "input": first_input},
     ).json()["run_id"]
     with client.websocket_connect(f"/api/runs/{first_run_id}/events?token={TOKEN}") as websocket:
         first_events = [websocket.receive_json() for _ in range(2)]
@@ -2752,11 +3440,11 @@ def test_runtime_second_turn_enforce_uses_history_prompt_but_keeps_raw_routing_i
     assert len(calls) == 2
     assert str(calls[0]["prompt"]).count(str(calls[0]["routing_input"])) == 1
     assert str(calls[1]["prompt"]).count(str(calls[1]["routing_input"])) == 1
-    assert calls[0]["routing_input"] == "你好"
+    assert calls[0]["routing_input"] == first_input.strip()
     assert calls[1]["routing_input"] == "继续解释"
     assert calls[1]["prompt"] != "继续解释"
     assert "history_background" in str(calls[1]["prompt"])
-    assert "你好" in str(calls[1]["prompt"])
+    assert "Historical browser task context." in str(calls[1]["prompt"])
     assert "answer 1" in str(calls[1]["prompt"])
     assert str(calls[1]["prompt"]).rstrip().endswith("继续解释")
     assert second_events[-1]["payload"]["context_ledger"]["applied"] is True
@@ -2845,3 +3533,105 @@ def test_websocket_rejects_invalid_runtime_token(tmp_path):
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(f"/api/runs/{run_id}/events?token=wrong-token"):
             pass
+
+
+def test_run_event_stream_snapshot_filters_events_at_or_before_cursor():
+    stream = RunEventStream()
+    for index in range(3):
+        stream.emit(
+            run_id="run_cursor",
+            session_id="session_cursor",
+            event_type=f"test.event.{index + 1}",
+        )
+
+    events = stream.snapshot("run_cursor", after_seq=1)
+
+    assert [event.seq for event in events] == [2, 3]
+
+
+def test_websocket_replays_only_events_after_requested_cursor(tmp_path):
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=_quick_stage_runner)
+    client = TestClient(app)
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "cursor replay"},
+    ).json()["session_id"]
+    run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "show only unseen events"},
+    ).json()["run_id"]
+
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}&after_seq=1") as websocket:
+        first_replayed = websocket.receive_json()
+
+    assert first_replayed["seq"] > 1
+
+
+def test_websocket_subscribes_before_taking_event_snapshot(tmp_path, monkeypatch):
+    app = create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_executor=_quick_stage_runner)
+    client = TestClient(app)
+    session_id = client.post(
+        "/api/sessions",
+        headers=_auth_headers(),
+        json={"title": "subscription ordering"},
+    ).json()["session_id"]
+    run_id = client.post(
+        "/api/runs",
+        headers=_auth_headers(),
+        json={"session_id": session_id, "input": "keep event ordering safe"},
+    ).json()["run_id"]
+    stream = app.state.lucode_run_manager.events
+    original_snapshot = stream.snapshot
+    subscriber_counts: list[int] = []
+
+    def observed_snapshot(stream_run_id, *, after_seq=0):
+        subscriber_counts.append(stream.subscriber_count(stream_run_id))
+        return original_snapshot(stream_run_id, after_seq=after_seq)
+
+    monkeypatch.setattr(stream, "snapshot", observed_snapshot)
+
+    with client.websocket_connect(f"/api/runs/{run_id}/events?token={TOKEN}") as websocket:
+        websocket.receive_json()
+
+    assert subscriber_counts == [1]
+
+
+def test_active_runs_endpoint_lists_only_live_in_memory_runs(tmp_path):
+    manager = RuntimeRunManager(tmp_path)
+    manager._runs["run_active"] = ServerRun(
+        run_id="run_active",
+        session_id="session_active",
+        user_input="keep this run active",
+        status="running",
+        created_at="2026-07-14T10:00:00+00:00",
+        updated_at="2026-07-14T10:01:00+00:00",
+    )
+    manager._runs["run_completed"] = ServerRun(
+        run_id="run_completed",
+        session_id="session_completed",
+        user_input="already finished",
+        status="completed",
+        created_at="2026-07-14T09:00:00+00:00",
+        updated_at="2026-07-14T09:01:00+00:00",
+    )
+    client = TestClient(create_app(workspace_root=tmp_path, runtime_token=TOKEN, run_manager=manager))
+
+    assert client.get("/api/runs/active").status_code == 401
+    response = client.get("/api/runs/active", headers=_auth_headers())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "runs.v1",
+        "runs": [
+                {
+                    "schema_version": "run.v1",
+                    "run_id": "run_active",
+                    "session_id": "session_active",
+                    "status": "running",
+                    "created_at": "2026-07-14T10:00:00+00:00",
+                    "updated_at": "2026-07-14T10:01:00+00:00",
+                }
+            ],
+        }

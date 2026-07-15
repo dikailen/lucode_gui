@@ -107,7 +107,6 @@ def test_no_candidates_leaves_models_untouched(monkeypatch):
 
 # ---- GUI helper ----
 
-def test_worker_pool_available_only_in_full():
-    assert worker_pool_available_for_mode("full") is True
-    assert worker_pool_available_for_mode("serial") is False
-    assert worker_pool_available_for_mode("solo") is False
+def test_worker_pool_is_available_to_unified_automatic_routing():
+    for mode in ("auto", "full", "serial", "solo"):
+        assert worker_pool_available_for_mode(mode) is True

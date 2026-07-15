@@ -1,4 +1,6 @@
 import type {
+  ActiveRunsResponse,
+  AttachmentRequest,
   ComfyUiDetectionPayload,
   ComfyUiDetectionResponse,
   ComfyUiSettingsPayload,
@@ -15,6 +17,8 @@ import type {
   RunApprovalDecision,
   RunApprovalResponse,
   RuntimeModel,
+  RecoveryRun,
+  RecoveryRunsResponse,
   ServerRun,
   ServerSession,
   SessionPageResponse,
@@ -54,6 +58,19 @@ export class RuntimeClient {
     return this.request<ModelSettingsResponse>(`/api/settings/models/roles/${encodeURIComponent(role)}`, {
       method: "PUT",
       body: JSON.stringify({ model_id: modelId }),
+    });
+  }
+
+  async updateModelReasoningEffort(modelId: string, effort: string): Promise<ModelSettingsResponse> {
+    return this.request<ModelSettingsResponse>(`/api/settings/models/${encodeURIComponent(modelId)}/reasoning-effort`, {
+      method: "PUT",
+      body: JSON.stringify({ effort }),
+    });
+  }
+
+  async probeModelReasoningEffort(modelId: string): Promise<ModelSettingsResponse> {
+    return this.request<ModelSettingsResponse>(`/api/settings/models/${encodeURIComponent(modelId)}/probe-reasoning-effort`, {
+      method: "POST",
     });
   }
 
@@ -130,6 +147,37 @@ export class RuntimeClient {
     return this.request<PluginStateResponse>("/api/plugins/skills/install", {
       method: "POST",
       body: JSON.stringify({ path }),
+    });
+  }
+
+  async applySkillMetadata(
+    skillId: string,
+    payload: {
+      categories?: string[];
+      tags?: string[];
+      use_when?: string[];
+      do_not_use_when?: string[];
+      negative_queries: string[];
+      distinguish_from: Record<string, string>;
+    },
+  ): Promise<PluginStateResponse> {
+    return this.request<PluginStateResponse>(`/api/plugins/skills/${encodeURIComponent(skillId)}/metadata`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async setSkillEnabled(skillId: string, enabled: boolean): Promise<PluginStateResponse> {
+    return this.request<PluginStateResponse>(`/api/plugins/skills/${encodeURIComponent(skillId)}/enabled`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  async reindexSkillLibrary(): Promise<PluginStateResponse> {
+    return this.request<PluginStateResponse>("/api/plugins/skills/reindex", {
+      method: "POST",
+      body: JSON.stringify({}),
     });
   }
 
@@ -271,10 +319,39 @@ export class RuntimeClient {
     });
   }
 
-  async startRun(sessionId: string, input: string): Promise<ServerRun> {
+  async startRun(
+    sessionId: string,
+    input: string,
+    attachments: AttachmentRequest[] = [],
+    clientRequestId = "",
+  ): Promise<ServerRun> {
+    const payload: Record<string, unknown> = { session_id: sessionId, input };
+    if (clientRequestId) {
+      payload.client_request_id = clientRequestId;
+    }
+    if (attachments.length) {
+      payload.attachments = attachments;
+    }
     return this.request<ServerRun>("/api/runs", {
       method: "POST",
-      body: JSON.stringify({ session_id: sessionId, input }),
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listActiveRuns(): Promise<ServerRun[]> {
+    const payload = await this.request<ActiveRunsResponse>("/api/runs/active");
+    return payload.runs;
+  }
+
+  async listRecoveryRuns(): Promise<RecoveryRun[]> {
+    const payload = await this.request<RecoveryRunsResponse>("/api/runs/recovery");
+    return payload.runs;
+  }
+
+  async abandonRecoveryRun(runId: string): Promise<{ abandoned: boolean; run_id: string }> {
+    return this.request<{ abandoned: boolean; run_id: string }>(`/api/runs/${encodeURIComponent(runId)}/abandon`, {
+      method: "POST",
+      body: JSON.stringify({}),
     });
   }
 
@@ -312,15 +389,16 @@ export class RuntimeClient {
     );
   }
 
-  runEventsUrl(runId: string): string {
+  runEventsUrl(runId: string, afterSeq = 0): string {
     const url = new URL(`/api/runs/${encodeURIComponent(runId)}/events`, this.baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.search = `?token=${encodeURIComponent(this.token)}`;
+    const cursor = Math.max(0, Math.floor(Number(afterSeq) || 0));
+    url.search = `?token=${encodeURIComponent(this.token)}${cursor > 0 ? `&after_seq=${cursor}` : ""}`;
     return url.toString();
   }
 
-  openRunEventSocket(runId: string): WebSocket {
-    return new WebSocket(this.runEventsUrl(runId));
+  openRunEventSocket(runId: string, afterSeq = 0): WebSocket {
+    return new WebSocket(this.runEventsUrl(runId, afterSeq));
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

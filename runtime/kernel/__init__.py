@@ -4,7 +4,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from catalog_system.model_catalog import ModelRegistry
 from mcp_servers import MCPServerManager
@@ -24,6 +24,10 @@ class KernelRequest:
     execution_mode: str = ""
     show_plan: bool = True
     routing_input: str = ""
+    inline_files: tuple[dict[str, str], ...] = ()
+    recovery_envelope: dict[str, Any] = field(default_factory=dict)
+    checkpoint_sink: Any | None = None
+    tool_lifecycle_sink: Any | None = None
 
 
 @dataclass
@@ -33,7 +37,9 @@ class KernelResponse:
     turn_status: str = "完成"
     mcp_ids_used: list[str] = field(default_factory=list)
     run_context_summary: str = ""
+    tool_dehydration_items: list[dict[str, object]] = field(default_factory=list)
     output_already_printed: bool = False
+    recovery_outcome: str = ""
     _summary_printer: Callable[[], None] | None = field(default=None, repr=False)
 
     def print_summary(self) -> None:
@@ -60,6 +66,10 @@ class KernelFacade:
         verbose_runtime: bool = False,
         output_controller=None,
         event_bus=None,
+        inline_files: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        recovery_envelope: dict[str, Any] | None = None,
+        checkpoint_sink=None,
+        tool_lifecycle_sink=None,
     ) -> KernelResponse:
         user_input = str(prompt or "").strip()
         if not user_input:
@@ -72,6 +82,17 @@ class KernelFacade:
             execution_mode=settings.execution_mode,
             show_plan=show_plan,
             routing_input=str(routing_input or user_input).strip(),
+            inline_files=tuple(
+                {
+                    "path": str(item.get("path") or ""),
+                    "content": str(item.get("content") or ""),
+                }
+                for item in list(inline_files or [])
+                if isinstance(item, dict) and str(item.get("path") or "").strip()
+            ),
+            recovery_envelope=dict(recovery_envelope or {}),
+            checkpoint_sink=checkpoint_sink,
+            tool_lifecycle_sink=tool_lifecycle_sink,
         )
         hooks = hooks or create_token_logger_hooks()
         model_registry = model_registry or ModelRegistry()
@@ -85,6 +106,8 @@ class KernelFacade:
         output = ""
         started_mcp_ids: list[str] = []
         run_context_summary = ""
+        tool_dehydration_items: list[dict[str, object]] = []
+        recovery_outcome = ""
 
         _emit_kernel_event(
             event_bus,
@@ -121,6 +144,9 @@ class KernelFacade:
                         supervisor_approval_decider=supervisor_approval_decider,
                         stream_output=stream_output,
                         on_delta=on_delta or _agent_delta_emitter(event_bus, agent=getattr(agent, "name", "") or ""),
+                        lifecycle_sink=getattr(turn_hooks, "tool_lifecycle_sink", request.tool_lifecycle_sink),
+                        run_id=getattr(request.tool_lifecycle_sink, "run_id", ""),
+                        task_id=getattr(turn_hooks, "task_id", ""),
                     )
 
                 strategy = create_execution_strategy(
@@ -148,6 +174,8 @@ class KernelFacade:
                     turn_status = "timeout"
                 started_mcp_ids = list(mcp_manager.started_ids)
                 run_context_summary = str(getattr(output, "run_context_summary", "") or "")
+                tool_dehydration_items = list(getattr(output, "tool_dehydration_items", []) or [])
+                recovery_outcome = str(getattr(output, "recovery_outcome", "") or "")
         except Exception:
             _emit_kernel_event(
                 event_bus,
@@ -176,7 +204,9 @@ class KernelFacade:
             turn_status="超时" if stopped else "完成",
             mcp_ids_used=started_mcp_ids,
             run_context_summary=run_context_summary,
+            tool_dehydration_items=tool_dehydration_items,
             output_already_printed=should_suppress_final_output(hooks, str(output or "")),
+            recovery_outcome=recovery_outcome,
             _summary_printer=hooks.print_summary,
         )
 

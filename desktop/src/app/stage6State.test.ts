@@ -11,9 +11,30 @@ import {
   runStageMeta,
   runStageLabel,
   workAreaSnapshot,
+  workAreaSnapshotFromMessage,
 } from "./appState";
 
 describe("stage 6 run state", () => {
+  it("ignores a replayed event sequence so streamed answer text is not duplicated", () => {
+    const initial = markRunStarted(createInitialAppState(), "session_1", "run_1");
+    const delta = {
+      schema_version: "run_event.v1" as const,
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 2,
+      type: "answer.delta",
+      created_at: "2026-07-14T10:00:00+08:00",
+      payload: { text: "partial answer" },
+    };
+
+    const once = reduceRunEvent(initial, delta);
+    const replayed = reduceRunEvent(once, delta);
+
+    expect(replayed.events).toHaveLength(1);
+    expect(replayed.messages).toHaveLength(1);
+    expect(replayed.messages[0].content).toBe("partial answer");
+  });
+
   it("uses the active session display title for the chat header", () => {
     const state = {
       ...createInitialAppState(),
@@ -232,7 +253,7 @@ describe("stage 6 run state", () => {
       payload: { final_output: "done" },
     });
 
-    const snapshot = workAreaSnapshot(state);
+    const snapshot = workAreaSnapshotFromMessage(state.messages.at(-1)!);
 
     expect(snapshot).toMatchObject({
       runStatus: "completed",

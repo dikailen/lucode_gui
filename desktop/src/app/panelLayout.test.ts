@@ -9,6 +9,7 @@ import {
   openRightDockWindow,
   rightDockWindows,
   setRightDockWindowStatus,
+  shouldRenderSessionSidebar,
   shouldForceCompactSidebar,
   toggleBottomShell,
   toggleRightDockHome,
@@ -135,6 +136,12 @@ describe("panel layout state", () => {
     expect(shouldForceCompactSidebar(1060, false)).toBe(false);
     expect(shouldForceCompactSidebar(1060, true)).toBe(true);
     expect(shouldForceCompactSidebar(900, false)).toBe(true);
+  });
+
+  it("keeps workspace navigation visible after switching to plugins", () => {
+    expect(shouldRenderSessionSidebar("chat")).toBe(true);
+    expect(shouldRenderSessionSidebar("settings")).toBe(true);
+    expect(shouldRenderSessionSidebar("plugins")).toBe(true);
   });
 
   it("clamps the right dock width to preserve the workspace at tested viewports", () => {

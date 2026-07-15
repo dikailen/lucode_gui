@@ -20,7 +20,7 @@ class FakeHistory:
         return self.summary[:max_chars]
 
 
-def test_observe_mode_builds_ledger_without_replacing_run_input_or_routing_input():
+def test_observe_mode_includes_recent_history_without_changing_routing_input():
     history = FakeHistory(
         messages=[
             {"role": "user", "content": "Use the embedded browser to open https://example.com"},
@@ -37,7 +37,10 @@ def test_observe_mode_builds_ledger_without_replacing_run_input_or_routing_input
     )
 
     assert result.mode == "observe"
-    assert result.run_input == user_input
+    assert result.run_input != user_input
+    assert "[history_background]" in result.run_input
+    assert "Browser task completed." in result.run_input
+    assert result.run_input.rstrip().endswith(user_input)
     assert result.routing_input == user_input
     assert result.applied is False
     assert result.observed is True
@@ -45,9 +48,50 @@ def test_observe_mode_builds_ledger_without_replacing_run_input_or_routing_input
     assert "Old summary says" in result.ledger_result.run_input
     assert result.ledger_result.run_input.rstrip().endswith(user_input)
     assert result.metadata["context_ledger"]["mode"] == result.ledger_result.mode
+    assert result.metadata["history_context"] == {
+        "applied": True,
+        "recent_turn_count": 2,
+    }
 
 
-def test_enforce_mode_uses_ledger_run_input_but_keeps_routing_input_original():
+def test_observe_mode_adds_explicit_attachment_context_but_keeps_routing_input_original():
+    user_input = "你好"
+    result = ContextCompressionMiddleware(mode="observe").prepare_run_input(
+        session_id="s1",
+        user_input=user_input,
+        inline_files=[
+            {
+                "path": ".lucode/attachments/s1/r1/notes.txt",
+                "content": "desktop_browser appears inside an attached document",
+            }
+        ],
+    )
+
+    assert result.run_input != user_input
+    assert "[inline_files]" in result.run_input
+    assert "desktop_browser appears inside an attached document" in result.run_input
+    assert result.run_input.rstrip().endswith(user_input)
+    assert result.routing_input == user_input
+    assert result.applied is False
+    assert result.metadata["attachment_context"]["applied_to_model_input"] is True
+
+
+def test_off_mode_still_passes_explicit_attachment_context_without_enabling_history_compression():
+    result = ContextCompressionMiddleware(mode="off").prepare_run_input(
+        session_id="s1",
+        user_input="summarize the attached file",
+        inline_files=[{"path": "notes.txt", "content": "bounded attachment body"}],
+    )
+
+    assert "bounded attachment body" in result.run_input
+    assert result.routing_input == "summarize the attached file"
+    assert result.mode == "off"
+    assert result.applied is False
+    assert result.metadata["context_ledger"]["mode"] == "off"
+    assert result.metadata["attachment_context"]["applied_to_model_input"] is True
+
+
+def test_enforce_mode_keeps_recent_history_before_budget_triggers():
     history = FakeHistory(messages=[{"role": "user", "content": "old context"}])
     user_input = "Only answer this new question."
 
@@ -62,7 +106,36 @@ def test_enforce_mode_uses_ledger_run_input_but_keeps_routing_input_original():
     assert "old context" in result.run_input
     assert result.run_input.rstrip().endswith(user_input)
     assert result.routing_input == user_input
+    assert result.applied is False
+    assert result.metadata["context_ledger"]["enforce_eligible"] is False
+    assert result.metadata["context_ledger"]["apply_reason"] == "below_enforce_threshold"
+    assert result.metadata["history_context"]["applied"] is True
+
+
+def test_enforce_mode_uses_ledger_only_after_budget_trigger_and_keeps_routing_input_original():
+    history = FakeHistory(
+        messages=[
+            {"role": "user", "content": "old browser task " + ("details " * 350)},
+            {"role": "assistant", "content": "browser result " + ("summary " * 350)},
+        ],
+        summary="old browser summary " + ("context " * 250),
+    )
+    user_input = "Only answer this new question."
+
+    result = ContextCompressionMiddleware(history=history, mode="enforce").prepare_run_input(
+        session_id="s1",
+        user_input=user_input,
+        model_info={"context_window_tokens": 1_000},
+    )
+
+    assert result.run_input != user_input
+    assert result.ledger_result is not None
+    assert result.ledger_result.triggered is True
+    assert result.run_input.rstrip().endswith(user_input)
+    assert result.routing_input == user_input
     assert result.applied is True
+    assert result.metadata["context_ledger"]["enforce_eligible"] is True
+    assert result.metadata["context_ledger"]["apply_reason"] == "budget_triggered"
 
 
 def test_off_mode_returns_user_input_without_history_or_tool_processing():

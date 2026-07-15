@@ -32,7 +32,6 @@ from runtime.config.model_config import (
     reset_role_model_priorities,
     select_role_model_priority,
     select_model_priority,
-    set_execution_mode,
     set_query_refiner_enabled,
 )
 from runtime.config.model_tuner import build_model_tuner_state, render_model_tuner_snapshot
@@ -181,8 +180,6 @@ def parse_writable_config_command(command: str) -> tuple[str, str] | None:
     if len(parts) != 2:
         return None
     name, value = parts[0].lower(), parts[1].lower()
-    if name == "/mode" and value in {"auto", "solo", "serial", "full"}:
-        return ("mode", value)
     if name == "/refiner" and value in {"on", "off"}:
         return ("refiner", value)
     return None
@@ -199,7 +196,7 @@ def apply_writable_config_command(
     if parsed is None:
         return (
             "无法识别这个配置切换命令。\n"
-            "可用命令：/mode auto、/refiner on、/refiner off、"
+            "可用命令：/refiner on、/refiner off、"
             "/models select provider/model [fallback...]、/models role <role> provider/model [...]",
             False,
         )
@@ -337,15 +334,6 @@ def apply_writable_config_command(
             f"当前主模型：{primary_ref}\n"
             f"Fallback：{fallback_text}\n"
             "配置已写入 .lucode/config.toml，API key 仍只保存在用户级 auth.json。",
-            True,
-        )
-
-    if kind == "mode":
-        set_execution_mode(value, workspace_root=_workspace_root(workspace_context))
-        settings.execution_mode = value
-        return (
-            f"已切换执行模式：{execution_mode_label_zh(value)}。\n"
-            "本次会话已立即生效，配置已写入 .lucode/config.toml。",
             True,
         )
 
@@ -820,12 +808,9 @@ def _render_mode(settings: RuntimeSettings) -> str:
         [
             f"当前执行：{execution_mode_label_zh(settings.execution_mode)}",
             "",
-            "主入口：auto（统一 Agent Loop）",
-            "兼容值：solo / serial / full 仍可读取和写入，用于迁移旧配置。",
-            "solo 兼容：auto + fast_single_agent，保留快速单 Agent 策略。",
-            "serial 兼容：auto + parallel_enabled=False，由 Scheduler 保守串行。",
-            "full 兼容：auto + parallel_enabled=True，允许无冲突任务并行。",
-            "说明：新配置请使用 /mode auto；旧命令 /mode solo、/mode serial、/mode full 暂时保留兼容。",
+            "执行入口：auto（统一 Agent Loop）。",
+            "并行由任务依赖、写入冲突、资源锁和工具能力自动决定。",
+            "主管审查、审批和 Evidence Gate 由任务路由与风险规则决定。",
         ],
     )
 
@@ -943,7 +928,7 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
         return "\n".join(
             [
                 f"/mode 切换请求：{value}",
-                "当前 /mode 主入口：/mode auto；solo、serial、full 仅作为旧配置兼容值保留。",
+                "Lucode 已统一自动执行，无需切换执行模式。",
             ]
         )
     if command_name == "/models":
@@ -951,14 +936,6 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
             [
                 f"/models 请求：{value}",
                 "查看模型请用 /models；切换主模型请用 /models select provider/model [fallback...]。",
-            ]
-        )
-    if command_name == "/model" and value in {"solo", "serial", "full"}:
-        return "\n".join(
-            [
-                f"/model 检测到可能的执行模式：{value}",
-                "如果你要切换统一执行入口，请使用 /mode auto；solo / serial / full 仅是兼容值。",
-                "推荐命令：/mode auto",
             ]
         )
     return "\n".join(

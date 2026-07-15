@@ -33,8 +33,8 @@ def _skill(skill_id: str) -> dict | None:
     return None
 
 
-def test_solo_executor_contract_registered_as_internal_non_assignable():
-    item = _skill("solo_executor_contract")
+def test_worker_contract_registered_as_internal_non_assignable():
+    item = _skill("worker_contract")
 
     assert item is not None
     assert item.get("internal") is True
@@ -43,17 +43,16 @@ def test_solo_executor_contract_registered_as_internal_non_assignable():
     assert item.get("planner_visible") is False
 
 
-def test_solo_agent_prompt_uses_unified_fast_agent_contract_without_claude_branding():
+def test_worker_contract_keeps_worker_boundaries_without_mode_words():
     factory = AgentFactory(_DummyModelRegistry(), mcp_manager=None)
 
-    text = _instructions(factory.create_solo_agent("deepseek"))
+    text = factory._role_contract_for_mode("auto")
 
-    assert "统一 Agent Loop 的快速单 Agent 执行契约" in text
+    assert "统一 Agent Loop Worker 角色契约" in text
     assert "solo 模式" not in text
-    assert "serial/full" not in text
-    assert "Claude CLI" not in text
-    assert "不要自称系统上下文没有明确提供的 Claude" in text
-    assert "不要猜测底层模型品牌" in text
+    assert "serial 模式" not in text
+    assert "full 模式" not in text
+    assert "WorkerReport" in text
 
 
 def test_direct_answer_prompt_does_not_expose_removed_execution_modes():
@@ -87,11 +86,7 @@ def test_direct_answer_prompt_allows_known_configured_model_name():
 
 
 def test_identity_skill_contract_allows_system_provided_model_name():
-    solo_text = load_skill("solo_executor_contract")
-    supervisor_text = load_skill("full_supervisor")
+    supervisor_text = load_skill("execution_supervisor")
 
-    assert "系统上下文明确提供" in solo_text
     assert "系统上下文明确提供" in supervisor_text
-    assert "如果当前模型名本身包含这些品牌或模型族" in solo_text
     assert "如果当前模型名本身包含这些品牌或模型族" in supervisor_text
-    assert "只能说明：你是 Lucode 当前配置模型驱动的快速单 Agent" not in solo_text

@@ -105,6 +105,7 @@ def test_parse_planner_result_ignores_task_level_bound_skills_without_interface_
 
 def test_agent_factory_injects_only_bound_extra_skill_bodies(monkeypatch):
     bodies = {
+        "worker_contract": "WORKER_CONTRACT",
         "code_engineer": "PRIMARY_CODE_ENGINEER",
         "electron_ui_refactor": "BOUND_ELECTRON_UI",
         "project_explorer": "BOUND_PROJECT_EXPLORER",
@@ -147,6 +148,7 @@ def test_agent_factory_injects_only_bound_extra_skill_bodies(monkeypatch):
 
 def test_agent_factory_skips_non_assignable_bound_skill_bodies(monkeypatch):
     bodies = {
+        "worker_contract": "WORKER_CONTRACT",
         "code_engineer": "PRIMARY_CODE_ENGINEER",
         "ready_skill": "READY_BODY",
         "disabled_skill": "DISABLED_BODY",
@@ -220,7 +222,7 @@ def test_agent_factory_skips_non_assignable_bound_skill_bodies(monkeypatch):
 
 
 def test_skill_runtime_metadata_exposes_assignability_flags():
-    meta = skill_runtime_metadata("full_supervisor")
+    meta = skill_runtime_metadata("execution_supervisor")
 
     assert meta["enabled"] is True
     assert meta["assignable"] is False
@@ -232,7 +234,13 @@ def test_agent_factory_truncates_bound_skill_body(monkeypatch):
     long_body = "x" * 7000
     monkeypatch.setattr(
         "runtime.agents.factory.load_skill",
-        lambda skill_id: "PRIMARY" if skill_id == "code_engineer" else long_body,
+        lambda skill_id: (
+            "PRIMARY"
+            if skill_id == "code_engineer"
+            else "WORKER_CONTRACT"
+            if skill_id == "worker_contract"
+            else long_body
+        ),
     )
     monkeypatch.setattr(
         "runtime.agents.factory.skill_runtime_metadata",
@@ -251,5 +259,6 @@ def test_agent_factory_truncates_bound_skill_body(monkeypatch):
 
     instructions = factory._task_instructions(task)
 
-    assert len(instructions) < 7000
+    assert long_body not in instructions
+    assert long_body[:6000] in instructions
     assert "[truncated]" in instructions

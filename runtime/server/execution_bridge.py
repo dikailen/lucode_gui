@@ -28,6 +28,11 @@ class RunExecutionRequest:
     model_info: dict[str, Any] = field(default_factory=dict)
     routing_input: str = ""
     current_input_persisted: bool = False
+    attachments: tuple[dict[str, Any], ...] = ()
+    inline_files: tuple[dict[str, str], ...] = ()
+    recovery_envelope: dict[str, Any] = field(default_factory=dict)
+    checkpoint_sink: Callable[[str, dict[str, Any], dict[str, Any]], Any] | None = None
+    tool_lifecycle_sink: Any = None
 
 
 class RunExecutor(Protocol):
@@ -56,6 +61,7 @@ class KernelAgentLoopExecutor:
                 user_input=request.user_input,
                 model_info=request.model_info or {},
                 current_input_persisted=request.current_input_persisted,
+                inline_files=list(request.inline_files),
             )
             kernel_input = context_result.run_input
             routing_input = request.routing_input or context_result.routing_input or request.user_input
@@ -84,14 +90,26 @@ class KernelAgentLoopExecutor:
             settings=RuntimeSettings.from_env(workspace_root=request.workspace_root),
             routing_input=routing_input,
             event_bus=request.event_bus,
+            inline_files=list(request.inline_files),
+            recovery_envelope=dict(request.recovery_envelope or {}),
+            checkpoint_sink=request.checkpoint_sink,
+            tool_lifecycle_sink=request.tool_lifecycle_sink,
         )
         metadata = {
             "turn_status": str(getattr(response, "turn_status", "") or ""),
             "stopped": bool(getattr(response, "stopped", False)),
             "mcp_ids_used": list(getattr(response, "mcp_ids_used", []) or []),
             "output_already_printed": bool(getattr(response, "output_already_printed", False)),
+            "recovery_outcome": str(getattr(response, "recovery_outcome", "") or ""),
         }
         metadata.update(context_metadata)
+        runtime_tool_items = list(getattr(response, "tool_dehydration_items", []) or [])
+        if runtime_tool_items:
+            metadata["tool_dehydration"] = {
+                "count": len(runtime_tool_items),
+                "items": runtime_tool_items,
+                "source": "tool_end_events",
+            }
         return RunExecutionResult(
             final_output=str(getattr(response, "final_output", "") or ""),
             metadata=metadata,
@@ -145,6 +163,7 @@ def map_execution_event_type(event_type: str) -> str:
         "TaskCompleted": "task.completed",
         "TaskFailed": "task.failed",
         "AgentMessageDelta": "worker.delta",
+        "FinalAnswerDelta": "answer.delta",
         "ToolInvoked": "tool.requested",
         "ToolApprovalPre": "tool.approval_required",
         "ToolApprovalPost": "tool.completed",

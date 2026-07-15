@@ -9,10 +9,8 @@ INTERNAL_SKILLS = frozenset(
         "query_refiner",
         "orchestrator_planner",
         "final_synthesizer",
-        "full_supervisor",
-        "full_worker_contract",
-        "serial_executor_contract",
-        "solo_executor_contract",
+        "execution_supervisor",
+        "worker_contract",
     }
 )
 PROTECTED_SYSTEM_SKILLS = INTERNAL_SKILLS

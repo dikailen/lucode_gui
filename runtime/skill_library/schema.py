@@ -66,6 +66,8 @@ def normalize_skill_metadata(
     category = _tuple(raw, "category", "categories")
     tags = _tuple(raw, "tags")
     use_when = _tuple(raw, "use_when", "use-when", "good_for", "trigger", "triggers")
+    if not use_when and isinstance(raw.get("metadata"), dict):
+        use_when = _tuple(dict(raw["metadata"]), "trigger", "triggers", "use_when", "use-when")
     do_not_use_when = _tuple(raw, "do_not_use_when", "do-not-use-when", "not_for")
     missing_fields = _missing_fields(
         skill_id=skill_id,

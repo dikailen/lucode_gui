@@ -100,3 +100,22 @@ create table if not exists evidence_refs (
 
 create index if not exists idx_evidence_refs_session_created
 on evidence_refs(session_id, created_at);
+
+create table if not exists skill_metadata_proposals (
+  proposal_id text primary key,
+  skill_id text not null,
+  content_hash text not null,
+  source text not null,
+  status text not null default 'pending',
+  confidence real not null default 0,
+  payload_json text not null default '{}',
+  reason text not null default '',
+  created_at text not null,
+  updated_at text not null
+);
+
+create unique index if not exists idx_skill_metadata_proposals_version_source
+on skill_metadata_proposals(skill_id, content_hash, source);
+
+create index if not exists idx_skill_metadata_proposals_status
+on skill_metadata_proposals(skill_id, status, updated_at desc);

@@ -70,13 +70,13 @@ def _summary_plan() -> PlannerResult:
     )
 
 
-def test_create_supervisor_agent_loads_full_supervisor_skill():
+def test_create_supervisor_agent_loads_execution_supervisor_skill():
     factory = AgentFactory(_FakeRegistry(), _FakeMcpManager())
     server = _FakeReadonlyServer()
 
     agent = factory.create_supervisor_agent("supervisor-model", [server])
 
-    assert agent.name == "full_supervisor_agent"
+    assert agent.name == "execution_supervisor_agent"
     assert agent.model == "model:supervisor-model"
     assert agent.mcp_servers == [server]
     assert "主管" in agent.instructions
@@ -104,7 +104,7 @@ def test_supervisor_finalizer_calls_agent_with_reports_and_blackboard(monkeypatc
         def create_supervisor_agent(self, model_id, readonly_servers):
             captured["model_id"] = model_id
             captured["servers"] = readonly_servers
-            return SimpleNamespace(name="full_supervisor_agent")
+            return SimpleNamespace(name="execution_supervisor_agent")
 
     class FakeServer:
         async def __aenter__(self):
@@ -150,7 +150,7 @@ def test_supervisor_finalizer_calls_agent_with_reports_and_blackboard(monkeypatc
     assert captured["model_id"] == "supervisor-model"
     assert captured["servers"][0].name == "run_workspace_readonly"
     assert captured["server_name"] == "run_workspace_readonly"
-    assert captured["agent"].name == "full_supervisor_agent"
+    assert captured["agent"].name == "execution_supervisor_agent"
     assert "WorkerReport" in captured["prompt"]
     assert "共享黑板" in captured["prompt"]
     assert "auth.py 已经由 worker-a 读取" in captured["prompt"]
@@ -165,7 +165,7 @@ def test_supervisor_finalizer_streams_answer_delta(monkeypatch, tmp_path):
     class FakeFactory:
         def create_supervisor_agent(self, model_id, readonly_servers):
             del model_id, readonly_servers
-            return SimpleNamespace(name="full_supervisor_agent")
+            return SimpleNamespace(name="execution_supervisor_agent")
 
     class FakeServer:
         async def __aenter__(self):
@@ -206,12 +206,12 @@ def test_supervisor_finalizer_streams_answer_delta(monkeypatch, tmp_path):
     )
 
     events = [event.to_dict() for event in state.event_bus.snapshot()]
-    delta = [event for event in events if event["event_type"] == "AgentMessageDelta"]
+    delta = [event for event in events if event["event_type"] == "FinalAnswerDelta"]
 
     assert output == "supervisor final"
     assert captured["kwargs"]["stream_output"] is True
     assert len(delta) == 1
-    assert delta[0]["agent"] == "full_supervisor_agent"
+    assert delta[0]["agent"] == "execution_supervisor_agent"
     assert "task_id" not in delta[0] or not delta[0]["task_id"]
     assert delta[0]["payload"]["text"] == "supervisor streaming"
 
@@ -269,7 +269,7 @@ def test_summary_helper_streams_final_synthesizer_delta(monkeypatch, tmp_path):
     )
 
     events = [event.to_dict() for event in state.event_bus.snapshot()]
-    delta = [event for event in events if event["event_type"] == "AgentMessageDelta"]
+    delta = [event for event in events if event["event_type"] == "FinalAnswerDelta"]
 
     assert output == "synthesizer final"
     assert captured["model_id"] == "summary-model"

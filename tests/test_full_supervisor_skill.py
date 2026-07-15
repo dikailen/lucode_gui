@@ -11,8 +11,8 @@ def _skill(skill_id: str) -> dict | None:
     return None
 
 
-def test_full_supervisor_registered_as_internal_non_assignable():
-    item = _skill("full_supervisor")
+def test_execution_supervisor_registered_as_internal_non_assignable():
+    item = _skill("execution_supervisor")
 
     assert item is not None
     assert item.get("internal") is True
@@ -21,8 +21,8 @@ def test_full_supervisor_registered_as_internal_non_assignable():
     assert item.get("planner_visible") is False
 
 
-def test_full_supervisor_skill_loads_as_prompt():
-    text = load_skill("full_supervisor")
+def test_execution_supervisor_skill_loads_as_prompt():
+    text = load_skill("execution_supervisor")
 
     assert "主管" in text
     assert "统一 Agent Loop" in text

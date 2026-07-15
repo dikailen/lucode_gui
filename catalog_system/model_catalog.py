@@ -126,6 +126,8 @@ def _build_model_catalog() -> dict:
                     "best_for_skills": item["best_for_skills"],
                     "cost_level": item["cost_level"],
                     "reasoning_level": item["reasoning_level"],
+                    "supports_reasoning_effort": bool(item.get("supports_reasoning_effort")),
+                    "reasoning_effort_levels": list(item.get("reasoning_effort_levels") or []),
                     "model_tier": strategy.tier.value,
                     "execution_strategy": strategy.to_dict(),
                     "shared_config_group": item.get("shared_config_group") or "",
@@ -296,6 +298,8 @@ def _merge_probe(project_root: Path, model_info: dict) -> dict:
             "context_tier",
             "context_source",
             "recommended_roles",
+            "supports_reasoning_effort",
+            "reasoning_effort_levels",
         ]:
             if key in probe and probe.get(key) is not None:
                 merged[key] = probe.get(key)

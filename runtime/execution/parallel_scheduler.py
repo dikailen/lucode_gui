@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from runtime.config.execution_mode import execution_mode_policy
-
-
 PARALLEL_SAFE_MCPS = {
     "project_filesystem_readonly",
     "code_locator",
@@ -64,22 +61,10 @@ def execution_batch_decisions_for_mode(
     execution_mode: str,
     capability_resolver=None,
 ) -> list[ExecutionBatchDecision]:
+    del execution_mode
     task_list = list(tasks or [])
     if not task_list:
         return []
-
-    policy = execution_mode_policy(execution_mode)
-    if not policy.parallel_enabled:
-        detail = f"parallel disabled by compatibility mode: {policy.legacy_mode or execution_mode or 'unknown'}"
-        return [
-            ExecutionBatchDecision(
-                tasks=[task],
-                status="serialized",
-                reason="parallel_disabled",
-                details=(detail,),
-            )
-            for task in task_list
-        ]
     return execution_batch_decisions_for_group(task_list, capability_resolver=capability_resolver)
 
 

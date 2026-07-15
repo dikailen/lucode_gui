@@ -126,6 +126,33 @@
       "path": "skills/code-engineer"
     },
     {
+      "id": "execution_supervisor",
+      "folder": "execution-supervisor",
+      "display_name_zh": "execution-supervisor",
+      "summary_zh": "",
+      "tags": [
+        "general"
+      ],
+      "default_model": "",
+      "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
+      "good_for": [],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
+      "selectable": false,
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/execution-supervisor"
+    },
+    {
       "id": "final_synthesizer",
       "folder": "final-synthesizer",
       "display_name_zh": "final-synthesizer",
@@ -153,35 +180,6 @@
       "planner_visible": false,
       "source": "sample",
       "path": "skills/final-synthesizer"
-    },
-    {
-      "id": "full_worker_contract",
-      "folder": "full-worker-contract",
-      "display_name_zh": "full-worker-contract",
-      "summary_zh": "full team mode Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements for supervised execution.",
-      "tags": [
-        "general"
-      ],
-      "default_model": "",
-      "allowed_mcp": [],
-      "allowed_tools": [],
-      "trigger": [],
-      "argument_hint": "",
-      "model": "",
-      "disable_model_invocation": false,
-      "good_for": [
-        "full team mode Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements for s"
-      ],
-      "not_for": [],
-      "cost_level": "medium",
-      "risk_level": "medium",
-      "borrowable": false,
-      "assignable": false,
-      "selectable": false,
-      "internal": true,
-      "planner_visible": false,
-      "source": "sample",
-      "path": "skills/full-worker-contract"
     },
     {
       "id": "orchestrator_planner",
@@ -282,35 +280,6 @@
       "path": "skills/query-refiner"
     },
     {
-      "id": "serial_executor_contract",
-      "folder": "serial-executor-contract",
-      "display_name_zh": "serial-executor-contract",
-      "summary_zh": "serial mode sequential execution Agent role contract. Defines serial-only boundaries so task agents do not borrow full team or supervisor behavior.",
-      "tags": [
-        "general"
-      ],
-      "default_model": "",
-      "allowed_mcp": [],
-      "allowed_tools": [],
-      "trigger": [],
-      "argument_hint": "",
-      "model": "",
-      "disable_model_invocation": false,
-      "good_for": [
-        "serial mode sequential execution Agent role contract. Defines serial-only boundaries so task agents do not borrow full t"
-      ],
-      "not_for": [],
-      "cost_level": "medium",
-      "risk_level": "medium",
-      "borrowable": false,
-      "assignable": false,
-      "selectable": false,
-      "internal": true,
-      "planner_visible": false,
-      "source": "sample",
-      "path": "skills/serial-executor-contract"
-    },
-    {
       "id": "skill_creator",
       "folder": "skill-creator",
       "display_name_zh": "Skill 创建与优化",
@@ -358,6 +327,35 @@
       "planner_visible": true,
       "source": "sample",
       "path": "skills/skill-creator"
+    },
+    {
+      "id": "worker_contract",
+      "folder": "worker-contract",
+      "display_name_zh": "full-worker-contract",
+      "summary_zh": "Unified Agent Loop Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements for supervised execution.",
+      "tags": [
+        "general"
+      ],
+      "default_model": "",
+      "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
+      "good_for": [
+        "Unified Agent Loop Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements f"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
+      "selectable": false,
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/worker-contract"
     }
   ],
   "future_memory_interface": {

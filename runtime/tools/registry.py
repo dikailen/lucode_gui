@@ -8,6 +8,12 @@ from typing import Any
 from runtime.config.extensions import discover_mcp_layers
 from runtime.safety.privacy import normalize_privacy_mode
 
+
+TOOL_SIDE_EFFECT_CLASSES = frozenset(
+    {"read_only", "idempotent_write", "non_idempotent", "unknown"}
+)
+
+
 LUCODE_BLUE = "\033[94m"
 ANSI_RESET = "\033[0m"
 PANEL_WIDTH = 96
@@ -63,6 +69,7 @@ class ToolRegistry:
 CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     "project_filesystem_readonly": {
         "capability": "read",
+        "side_effects": "read_only",
         "offline_allowed": True,
         "budget_policy": "read-only budget: max read calls/files/chars/tree entries",
         "log_policy": "read-only MCP session; no mutation operation log",
@@ -71,6 +78,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "skills_filesystem_readonly": {
         "capability": "read",
+        "side_effects": "read_only",
         "offline_allowed": True,
         "budget_policy": "read-only budget: max read calls/files/chars/tree entries",
         "log_policy": "read-only MCP session; no mutation operation log",
@@ -79,6 +87,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "code_locator": {
         "capability": "code_index",
+        "side_effects": "read_only",
         "offline_allowed": True,
         "budget_policy": "local index budget: max files/file bytes plus SQLite graph cache",
         "log_policy": "cache rebuild/hit only; no mutation operation log",
@@ -87,6 +96,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "safe_backup": {
         "capability": "backup",
+        "side_effects": "non_idempotent",
         "offline_allowed": True,
         "budget_policy": "backup budget: max bytes/files before zip creation",
         "log_policy": "writes unified operation log for backup attempts",
@@ -95,6 +105,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "workspace_edit": {
         "capability": "write",
+        "side_effects": "non_idempotent",
         "offline_allowed": True,
         "budget_policy": "strict sha256 optimistic concurrency plus backup size/file budgets",
         "log_policy": "writes unified operation log for every mutation attempt",
@@ -103,6 +114,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "command_runner": {
         "capability": "shell",
+        "side_effects": "unknown",
         "offline_allowed": True,
         "budget_policy": "no shell execution; argv parsing, timeout, cwd confinement, deny list",
         "log_policy": "writes unified operation log before local process execution",
@@ -111,6 +123,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "git_tools": {
         "capability": "git",
+        "side_effects": "unknown",
         "offline_allowed": True,
         "budget_policy": "read-only git status/diff/log fast path; commit only with approval",
         "log_policy": "logs commit and runtime fast-path git reads",
@@ -120,6 +133,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "web_search": {
         "capability": "web",
+        "side_effects": "read_only",
         "offline_allowed": False,
         "budget_policy": "network timeout and max result/fetch limits",
         "log_policy": "logs network search/fetch fast path metadata",
@@ -128,6 +142,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "context7_docs": {
         "capability": "docs",
+        "side_effects": "read_only",
         "offline_allowed": False,
         "budget_policy": "remote MCP timeout and narrow library-query budget",
         "log_policy": "remote docs lookup metadata only; no project file mutation",
@@ -136,6 +151,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "grep_code_search": {
         "capability": "code_search",
+        "side_effects": "read_only",
         "offline_allowed": False,
         "budget_policy": "remote MCP timeout and narrow public GitHub query budget",
         "log_policy": "remote public code search metadata only; no project file mutation",
@@ -144,6 +160,7 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
     },
     "desktop_browser": {
         "capability": "browser",
+        "side_effects": "unknown",
         "offline_allowed": True,
         "budget_policy": "local desktop bridge over authenticated loopback HTTP; browser actions require approval",
         "log_policy": "logs browser navigation, DOM summary reads, and approved page actions",
@@ -152,6 +169,103 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
         "summary": "Operate the embedded desktop browser through a local authenticated bridge. DOM actions require approval.",
     },
 }
+
+
+def classify_tool_side_effect(
+    tool_name: str,
+    *,
+    server_id: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Return a conservative recovery class for one concrete tool call."""
+
+    normalized_name = str(tool_name or "").strip().lower()
+    normalized_server = str(server_id or "").strip().lower()
+    if not normalized_server:
+        if _tool_name_is_non_idempotent(normalized_name):
+            return "non_idempotent"
+        return "unknown"
+    is_core_server = normalized_server in CORE_SERVER_METADATA
+    resolved_metadata = dict(metadata or CORE_SERVER_METADATA.get(normalized_server, {}) or {})
+
+    # External servers must make a trusted, explicit declaration. A tool name is
+    # controlled by the extension and is not enough to downgrade recovery risk.
+    if not is_core_server:
+        if metadata is None or not bool(resolved_metadata.get("trusted")):
+            return "unknown"
+        return normalize_tool_side_effect_class(resolved_metadata.get("side_effects"))
+
+    if _tool_name_is_read_only(normalized_name):
+        return "read_only"
+    if _tool_name_is_non_idempotent(normalized_name):
+        return "non_idempotent"
+    if normalized_server == "command_runner":
+        return "unknown"
+
+    return normalize_tool_side_effect_class(resolved_metadata.get("side_effects"))
+
+
+def normalize_tool_side_effect_class(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "none": "read_only",
+        "read": "read_only",
+        "readonly": "read_only",
+        "read_only": "read_only",
+        "idempotent": "idempotent_write",
+        "idempotent_write": "idempotent_write",
+        "non_idempotent": "non_idempotent",
+        "nonidempotent": "non_idempotent",
+        "write": "non_idempotent",
+        "writes": "non_idempotent",
+        "mutation": "non_idempotent",
+        "mutating": "non_idempotent",
+        "unknown": "unknown",
+    }
+    return aliases.get(normalized, "unknown")
+
+
+def _tool_name_is_read_only(tool_name: str) -> bool:
+    return any(
+        marker in tool_name
+        for marker in (
+            "browser_navigate",
+            "browser_get_page_summary",
+            "browser_get_interactive_elements",
+            "browser_read",
+            "read_file",
+            "list_directory",
+            "search_files",
+            "locate_code",
+            "get_file_outline",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_show",
+            "web_search",
+            "web_fetch",
+            "fetch_doc",
+            "grep_code_search",
+        )
+    )
+
+
+def _tool_name_is_non_idempotent(tool_name: str) -> bool:
+    return any(
+        marker in tool_name
+        for marker in (
+            "browser_click",
+            "browser_set_input",
+            "browser_submit",
+            "create_file",
+            "write_file",
+            "replace_in_file",
+            "apply_unified_patch",
+            "delete_file",
+            "safe_delete",
+            "git_commit",
+        )
+    )
 
 
 def build_tool_registry(settings=None, workspace_context=None) -> ToolRegistry:

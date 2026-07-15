@@ -27,20 +27,12 @@ SKILLS = {
         "folder": "final-synthesizer",
         "description": "Synthesize final answers from multiple task results.",
     },
-    "full_supervisor": {
-        "folder": "full-supervisor",
+    "execution_supervisor": {
+        "folder": "execution-supervisor",
         "description": "Unified Agent Loop supervisor role contract.",
     },
-    "full_worker_contract": {
-        "folder": "full-worker-contract",
+    "worker_contract": {
+        "folder": "worker-contract",
         "description": "Unified Agent Loop supervised worker role contract.",
-    },
-    "serial_executor_contract": {
-        "folder": "serial-executor-contract",
-        "description": "Conservative sequential scheduling executor contract.",
-    },
-    "solo_executor_contract": {
-        "folder": "solo-executor-contract",
-        "description": "Fast single-agent execution contract.",
     },
 }

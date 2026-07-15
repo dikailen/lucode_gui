@@ -27,11 +27,9 @@ STATUS_EVENTS = {
 }
 ANSWER_DELTA_AGENTS = {
     "supervisor",
-    "full_supervisor_agent",
+    "execution_supervisor_agent",
     "final_synthesizer",
     "final_synthesizer_agent",
-    "solo",
-    "solo_agent",
 }
 
 
@@ -41,11 +39,12 @@ def classify_gui_stream_event(event: dict, mode: str = "") -> GuiStreamRoute:
     event_type = str(event.get("event_type") or "")
     task_id = str(event.get("task_id") or "")
     agent = str(event.get("agent") or "")
-    normalized_mode = str(mode or "").strip().lower()
+    del mode
+
+    if event_type == "FinalAnswerDelta":
+        return "answer"
 
     if event_type == "AgentMessageDelta":
-        if normalized_mode == "solo" or agent == "solo":
-            return "answer"
         if task_id:
             return "work_area"
         if agent in ANSWER_DELTA_AGENTS:

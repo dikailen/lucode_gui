@@ -51,6 +51,30 @@ class PluginStateStore:
         self._write_state(data)
         return removed
 
+    def load_disabled_skill_ids(self) -> set[str]:
+        data = self._read_state()
+        raw_ids = data.get("disabled_skill_ids") if isinstance(data, dict) else []
+        if not isinstance(raw_ids, list):
+            return set()
+        return {skill_id for value in raw_ids if (skill_id := _normalize_plugin_id(value))}
+
+    def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
+        normalized = _normalize_plugin_id(skill_id)
+        if not normalized:
+            raise ValueError("Invalid skill id")
+        data = self._read_state()
+        disabled = self.load_disabled_skill_ids()
+        if enabled:
+            disabled.discard(normalized)
+        else:
+            disabled.add(normalized)
+        if disabled:
+            data["disabled_skill_ids"] = sorted(disabled)
+        else:
+            data.pop("disabled_skill_ids", None)
+        self._write_state(data)
+        return bool(enabled)
+
     def load_custom_skill_cards(self) -> list[SkillCard]:
         data = self._read_state()
         raw_cards = data.get("custom_skill_cards") if isinstance(data, dict) else []
@@ -226,6 +250,11 @@ class PluginStateStore:
             data["removed_skill_ids"] = sorted(removed_skill_ids)
         else:
             data.pop("removed_skill_ids", None)
+        disabled_skill_ids = [item for item in _string_list(data.get("disabled_skill_ids")) if item not in set(skill_ids)]
+        if disabled_skill_ids:
+            data["disabled_skill_ids"] = sorted(disabled_skill_ids)
+        else:
+            data.pop("disabled_skill_ids", None)
         self._write_state(data)
 
         for skill_id in skill_ids:
@@ -350,7 +379,7 @@ class PluginStateStore:
 
 
 def _normalize_plugin_id(value: object) -> str:
-    text = str(value or "").strip()
+    text = str(value or "").strip().casefold()
     if not text or not _PLUGIN_ID_PATTERN.match(text):
         return ""
     return text

@@ -3,15 +3,15 @@ from __future__ import annotations
 from lucode.gui.stream_routing import classify_gui_stream_event
 
 
-def test_solo_delta_routes_to_answer_even_with_task_id():
+def test_worker_delta_with_task_id_routes_to_work_area():
     event = {
         "event_type": "AgentMessageDelta",
-        "agent": "solo",
-        "task_id": "solo_agent",
+        "agent": "worker",
+        "task_id": "worker_1",
         "payload": {"text": "hello"},
     }
 
-    assert classify_gui_stream_event(event, mode="solo") == "answer"
+    assert classify_gui_stream_event(event, mode="auto") == "work_area"
 
 
 def test_worker_delta_routes_to_work_area_outside_solo():
@@ -44,7 +44,7 @@ def test_supervisor_and_synthesizer_delta_without_task_id_route_to_answer():
 def test_factory_named_supervisor_and_synthesizer_delta_route_to_answer():
     supervisor_event = {
         "event_type": "AgentMessageDelta",
-        "agent": "full_supervisor_agent",
+        "agent": "execution_supervisor_agent",
         "payload": {"text": "final"},
     }
     synthesizer_event = {
@@ -65,6 +65,16 @@ def test_unknown_delta_without_task_id_is_ignored():
     }
 
     assert classify_gui_stream_event(event, mode="full") == "ignore"
+
+
+def test_final_answer_delta_routes_to_answer_without_agent_name_heuristics():
+    event = {
+        "event_type": "FinalAnswerDelta",
+        "agent": "direct_answer",
+        "payload": {"text": "final"},
+    }
+
+    assert classify_gui_stream_event(event, mode="auto") == "answer"
 
 
 def test_lifecycle_events_route_to_status():

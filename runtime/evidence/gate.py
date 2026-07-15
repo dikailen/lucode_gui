@@ -136,6 +136,96 @@ def accepted_evidence_packet(result: EvidenceGateResult) -> dict:
     }
 
 
+def recovery_reconciliation_evidence_packet(envelope, *, reusable_task_ids) -> dict:
+    """Render only durably bound recovery postconditions as final-answer evidence."""
+
+    from runtime.recovery.policy import validated_reconciled_items
+
+    allowed = {str(task_id or "") for task_id in list(reusable_task_ids or []) if str(task_id or "")}
+    reconciled_by_task = validated_reconciled_items(envelope)
+    claims: list[dict] = []
+    evidence: list[dict] = []
+    for task_id in sorted(allowed):
+        item = reconciled_by_task.get(task_id)
+        if item is None:
+            continue
+        observed = dict(item.get("observed") or {})
+        evidence_ref = str(item.get("evidence_ref") or "")
+        invocation_id = str(item.get("invocation_id") or "")
+        checkpoint_id = str(item.get("checkpoint_id") or "")
+        source_run_id = str(item.get("source_run_id") or "")
+        event_seq = int(item.get("event_seq") or 0)
+        if not (evidence_ref and invocation_id and checkpoint_id and source_run_id and event_seq > 0):
+            continue
+        kind = str(item.get("kind") or "")
+        if kind == "workspace_file_sha256.v1":
+            path = str(observed.get("path") or "")
+            sha256 = str(observed.get("sha256") or "")
+            if not (path and sha256):
+                continue
+            claims.append(
+                {
+                    "claim_id": f"recovery-postcondition:{invocation_id}",
+                    "task_id": task_id,
+                    "text": f"Recovered verified workspace file postcondition: {path}",
+                    "claim_type": "code_change",
+                    "confidence": 1.0,
+                    "evidence_refs": [evidence_ref],
+                    "risk_level": "high",
+                }
+            )
+            evidence.append(
+                {
+                    "ref_id": evidence_ref,
+                    "kind": "file_write",
+                    "source": "recovery_postcondition",
+                    "event_seq": event_seq,
+                    "excerpt": path,
+                    "sha256": sha256,
+                    "invocation_id": invocation_id,
+                    "checkpoint_id": checkpoint_id,
+                    "run_id": source_run_id,
+                }
+            )
+        elif kind == "browser_navigation_url_sha256.v1":
+            tab_id = str(observed.get("tab_id") or "")
+            url_sha256 = str(observed.get("url_sha256") or "")
+            if not (tab_id and _is_sha256(url_sha256)):
+                continue
+            claims.append(
+                {
+                    "claim_id": f"recovery-postcondition:{invocation_id}",
+                    "task_id": task_id,
+                    "text": f"Recovered verified browser navigation: tab {tab_id}",
+                    "claim_type": "browser_fact",
+                    "confidence": 1.0,
+                    "evidence_refs": [evidence_ref],
+                    "risk_level": "high",
+                }
+            )
+            evidence.append(
+                {
+                    "ref_id": evidence_ref,
+                    "kind": "browser_summary",
+                    "source": "recovery_postcondition",
+                    "event_seq": event_seq,
+                    "excerpt": f"tab_id={tab_id}",
+                    "url_sha256": url_sha256,
+                    "invocation_id": invocation_id,
+                    "checkpoint_id": checkpoint_id,
+                    "run_id": source_run_id,
+                }
+            )
+    if not claims:
+        return {}
+    return {
+        "mode": "recovery_verified",
+        "claims": claims,
+        "evidence": evidence,
+        "blocked_claims": [],
+    }
+
+
 def _requires_material_evidence(claim: Claim) -> bool:
     if str(getattr(claim, "risk_level", "") or "").lower() in HIGH_RISK_LEVELS:
         return True
@@ -150,6 +240,10 @@ def _is_high_risk_claim(claim: Claim | None) -> bool:
     risk_level = str(getattr(claim, "risk_level", "") or "").strip().lower()
     claim_type = str(getattr(claim, "claim_type", "") or "").strip().lower()
     return risk_level in HIGH_RISK_LEVELS or claim_type in HIGH_RISK_CLAIM_TYPES
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
 
 
 def _record_gate_result(run_state, result: EvidenceGateResult) -> None:

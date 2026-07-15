@@ -25,11 +25,11 @@ class ContextMiddlewareResult:
 
 
 class ContextCompressionMiddleware:
-    """Prepare context selection artifacts without forcing runtime adoption.
+    """Prepare conversation context and optional long-context compression.
 
-    The default mode is observe: build ledger/dehydration metadata, but keep
-    the model input and routing input equal to the original user input. This
-    lets the runtime collect evidence before switching behavior.
+    Recent conversation is always model context when it exists. The mode only
+    controls whether the ledger may apply its long-context compression policy.
+    Routing always uses the original current user input.
     """
 
     def __init__(self, *, history: Any | None = None, mode: str | None = None) -> None:
@@ -46,17 +46,32 @@ class ContextCompressionMiddleware:
         evidence_tokens: int = 0,
         tool_results: list[dict[str, Any]] | None = None,
         current_input_persisted: bool = False,
+        inline_files: list[dict[str, Any]] | None = None,
     ) -> ContextMiddlewareResult:
         current_input = str(user_input or "")
         routing_input = current_input
+        current_turn_input = _current_turn_input(
+            current_input,
+            inline_files=inline_files or [],
+            model_info=model_info or {},
+        )
+        attachment_metadata = {
+            "count": len(inline_files or []),
+            "applied_to_model_input": bool(inline_files),
+        }
         if self.mode == "off":
             return ContextMiddlewareResult(
-                run_input=current_input,
+                run_input=current_turn_input,
                 routing_input=routing_input,
                 mode="off",
                 observed=False,
                 applied=False,
-                metadata={"context_ledger": {"mode": "off"}, "tool_dehydration": {"count": 0, "items": []}},
+                metadata={
+                    "context_ledger": {"mode": "off"},
+                    "history_context": {"applied": False, "recent_turn_count": 0},
+                    "tool_dehydration": {"count": 0, "items": []},
+                    "attachment_context": attachment_metadata,
+                },
             )
 
         try:
@@ -71,6 +86,7 @@ class ContextCompressionMiddleware:
                     messages=messages,
                     existing_summary=summary,
                     model_info=model_info or {},
+                    inline_files=inline_files or [],
                     tool_schema_tokens=tool_schema_tokens,
                     evidence_tokens=evidence_tokens,
                 )
@@ -78,7 +94,7 @@ class ContextCompressionMiddleware:
         except Exception as exc:
             tool_summaries = self._dehydrate_tool_results(tool_results or [])
             return ContextMiddlewareResult(
-                run_input=current_input,
+                run_input=current_turn_input,
                 routing_input=routing_input,
                 mode=self.mode,
                 observed=False,
@@ -90,23 +106,37 @@ class ContextCompressionMiddleware:
                         "mode": self.mode,
                         "error": str(exc),
                     },
+                    "history_context": {"applied": False, "recent_turn_count": 0},
                     "tool_dehydration": _tool_dehydration_metadata(tool_summaries),
+                    "attachment_context": attachment_metadata,
                 },
             )
 
         tool_summaries = self._dehydrate_tool_results(tool_results or [])
-        applied = self.mode == "enforce"
+        enforce_eligible = bool(ledger.triggered)
+        compression_applied = self.mode == "enforce" and enforce_eligible
+        history_applied = bool(ledger.recent_turns or ledger.session_summary)
         return ContextMiddlewareResult(
-            run_input=ledger.run_input if applied else current_input,
+            run_input=ledger.run_input if history_applied or compression_applied else current_turn_input,
             routing_input=routing_input,
             mode=self.mode,
             observed=True,
-            applied=applied,
+            applied=compression_applied,
             ledger_result=ledger,
             tool_summaries=tool_summaries,
             metadata={
-                "context_ledger": _ledger_metadata(ledger, applied=applied),
+                "context_ledger": _ledger_metadata(
+                    ledger,
+                    requested_mode=self.mode,
+                    applied=compression_applied,
+                    enforce_eligible=enforce_eligible,
+                ),
+                "history_context": {
+                    "applied": history_applied,
+                    "recent_turn_count": len(ledger.recent_turns),
+                },
                 "tool_dehydration": _tool_dehydration_metadata(tool_summaries),
+                "attachment_context": attachment_metadata,
             },
         )
 
@@ -146,11 +176,45 @@ class ContextCompressionMiddleware:
         return summaries
 
 
-def _ledger_metadata(ledger: ContextLedgerResult, *, applied: bool) -> dict[str, Any]:
+def _current_turn_input(
+    current_input: str,
+    *,
+    inline_files: list[dict[str, Any]],
+    model_info: dict[str, Any],
+) -> str:
+    if not inline_files:
+        return current_input
+    result = build_context_ledger(
+        ContextLedgerInput(
+            session_id="current_turn",
+            current_input=current_input,
+            inline_files=inline_files,
+            model_info=model_info,
+        )
+    )
+    return result.run_input
+
+
+def _ledger_metadata(
+    ledger: ContextLedgerResult,
+    *,
+    requested_mode: str,
+    applied: bool,
+    enforce_eligible: bool,
+) -> dict[str, Any]:
     return {
         "mode": ledger.mode,
+        "requested_mode": requested_mode,
         "triggered": ledger.triggered,
         "applied": bool(applied),
+        "enforce_eligible": bool(enforce_eligible),
+        "apply_reason": (
+            "budget_triggered"
+            if applied
+            else "below_enforce_threshold"
+            if requested_mode == "enforce"
+            else "observe_only"
+        ),
         "estimated_input_tokens": ledger.estimated_input_tokens,
         "context_window_tokens": ledger.context_window_tokens,
         "compression_reasons": list(ledger.compression_reasons),

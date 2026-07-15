@@ -2,6 +2,7 @@
 .env.example
 __pycache__/
 .pytest_cache/
+/.pytest_*/
 .lucode/
 .codex-snapshot-*
 .codex-sandbox-debug/
@@ -58,8 +59,10 @@ skills/task-router/
 !/desktop/scripts/build-renderer-lite.mjs
 !/desktop/scripts/electron-smoke.mjs
 /desktop/node_modules/
+/node_modules/
 /desktop/dist/
 /desktop/dist-electron/
+/desktop/output/
 /.playwright-cli/
 /desktop/.playwright-cli/
 /output/

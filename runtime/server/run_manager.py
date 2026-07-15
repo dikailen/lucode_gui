@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from catalog_system.model_probe import fetch_upstream_models
+from catalog_system.model_probe import fetch_upstream_models, probe_reasoning_effort_capabilities
 from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
 from runtime.config.extensions import discover_mcp_layers
 from runtime.events import ExecutionEventBus
@@ -30,11 +32,18 @@ from runtime.config.model_config import (
     set_privacy_mode,
     set_query_refiner_enabled,
 )
+from runtime.config.model_effort import reasoning_effort_levels, selected_reasoning_effort, set_reasoning_effort
 from runtime.config.execution_mode import execution_mode_policy
 from runtime.config.model_selection import model_runtime_available
 from runtime.config.settings import RuntimeSettings
 from runtime.consistency.timeline import reliability_flags_from_env
 from runtime.context.token_counter import context_window_for_model
+from runtime.recovery.config import run_recovery_settings_from_env
+from runtime.recovery.checkpoint_codec import decode_pipeline_checkpoint
+from runtime.recovery.coordinator import RecoveryClaim, RecoveryCoordinator
+from runtime.recovery.journal import RecoveryLeaseUnavailableError, RunJournal
+from runtime.recovery.models import RecoveryDecision, canonical_json
+from runtime.recovery.tool_lifecycle import JournalToolLifecycleSink
 from runtime.history.titles import smart_session_title
 from runtime.safety.privacy import PrivacyPolicy, normalize_privacy_mode
 from runtime.history.store import HistoryFacade
@@ -46,6 +55,7 @@ from runtime.server.execution_bridge import (
     emit_execution_event_as_run_event,
 )
 from runtime.server.approval_session import RuntimeApprovalSession
+from runtime.server.attachments import remove_session_attachments, stage_run_attachments
 from runtime.server.comfyui import (
     check_comfyui_connection,
     comfyui_state,
@@ -55,6 +65,7 @@ from runtime.server.comfyui import (
 from runtime.server.event_stream import RunEventStream
 from runtime.server.schemas import (
     MODEL_LIST_SCHEMA_VERSION,
+    RUN_LIST_SCHEMA_VERSION,
     RUNTIME_SERVER_SCHEMA_VERSION,
     SESSION_MESSAGES_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION,
@@ -95,13 +106,28 @@ class RuntimeRunManager:
         self._history_facade = history_facade or HistoryFacade(self.workspace_root)
         self._run_executor = run_executor or KernelAgentLoopExecutor()
         self.events = event_stream or RunEventStream()
+        self._run_recovery_settings = run_recovery_settings_from_env()
+        self._run_journal = RunJournal(self.workspace_root) if self._run_recovery_settings.records_journal else None
+        self._journal_degraded_runs: dict[str, str] = {}
+        self._recovery_decisions: list[RecoveryDecision] = []
+        self._recovery_claims_by_run: dict[str, RecoveryClaim] = {}
+        self._recovery_envelopes_by_run: dict[str, dict[str, Any]] = {}
         self._sessions: dict[str, ServerSession] = {}
         self._runs: dict[str, ServerRun] = {}
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._run_cancel_events: dict[str, asyncio.Event] = {}
         self._approval_sessions: dict[str, RuntimeApprovalSession] = {}
         self._active_run_ids_by_session: dict[str, str] = {}
+        self._client_request_runs: dict[str, tuple[str, str, str]] = {}
+        self._model_probe_overrides: dict[str, dict[str, Any]] = {}
         self._terminal_session = TerminalSession(workspace_root=self.workspace_root)
+        if self._run_journal is not None and self._run_recovery_settings.allows_event_reconnect:
+            try:
+                self._recovery_decisions = RecoveryCoordinator(self._run_journal).scan_startup()
+                if self._run_recovery_settings.allows_safe_resume:
+                    self._repair_checkpointed_finals()
+            except Exception as exc:
+                self._journal_degraded_runs["startup_recovery"] = str(exc)
 
     def health(self) -> dict[str, Any]:
         bridge_url = str(os.environ.get("LUCODE_DESKTOP_BROWSER_BRIDGE_URL") or "").strip()
@@ -111,6 +137,12 @@ class RuntimeRunManager:
             "service": "lucode-runtime-server",
             "schema_version": RUNTIME_SERVER_SCHEMA_VERSION,
             "workspace_root": str(self.workspace_root),
+            "run_recovery": {
+                "mode": self._run_recovery_settings.mode,
+                "journal_enabled": self._run_journal is not None,
+                "degraded": bool(self._journal_degraded_runs),
+                "degraded_run_count": len(self._journal_degraded_runs),
+            },
             "desktop_browser_bridge": {
                 "available": bool(bridge_url and bridge_token),
                 "url_configured": bool(bridge_url),
@@ -177,7 +209,7 @@ class RuntimeRunManager:
 
     def model_settings(self) -> dict[str, Any]:
         raw_models = self._catalog_models()
-        models = [_sanitize_model_settings_item(item) for item in raw_models if item.get("id")]
+        models = [_sanitize_model_settings_item(item, workspace_root=self.workspace_root) for item in raw_models if item.get("id")]
         providers = _provider_summaries(models, workspace_root=self.workspace_root)
         roles = _role_summaries(models, workspace_root=self.workspace_root)
         preferences = _runtime_preference_summary(workspace_root=self.workspace_root)
@@ -219,6 +251,39 @@ class RuntimeRunManager:
         )
         clear_model_catalog_cache()
         return self.model_settings()
+
+    def update_model_reasoning_effort(self, *, model_id: str, effort: str) -> dict[str, Any]:
+        clean_model_id = str(model_id or "").strip()
+        model_info = next((item for item in self._catalog_models() if str(item.get("id") or "") == clean_model_id), None)
+        if model_info is None:
+            raise ValueError(f"unknown model_id: {clean_model_id}")
+        if not model_info.get("configured"):
+            raise ValueError(f"model is not configured: {clean_model_id}")
+        set_reasoning_effort(
+            workspace_root=self.workspace_root,
+            model_id=clean_model_id,
+            effort=effort,
+            model_info=model_info,
+        )
+        return self.model_settings()
+
+    def probe_model_reasoning_effort(self, *, model_id: str) -> dict[str, Any]:
+        clean_model_id = str(model_id or "").strip()
+        model_info = next((item for item in self._catalog_models() if str(item.get("id") or "") == clean_model_id), None)
+        if model_info is None:
+            raise ValueError(f"unknown model_id: {clean_model_id}")
+        if not model_info.get("configured"):
+            raise ValueError(f"model is not configured: {clean_model_id}")
+        result = probe_reasoning_effort_capabilities(self.workspace_root, model_info)
+        self._model_probe_overrides[clean_model_id] = {
+            "supports_reasoning_effort": bool(result.get("supports_reasoning_effort")),
+            "reasoning_effort_levels": list(result.get("reasoning_effort_levels") or []),
+            "reasoning_effort": dict(result.get("reasoning_effort") or {}),
+        }
+        clear_model_catalog_cache()
+        state = self.model_settings()
+        state["probed_model_id"] = clean_model_id
+        return state
 
     def update_query_refiner_enabled(self, enabled: bool) -> dict[str, Any]:
         set_query_refiner_enabled(bool(enabled), workspace_root=self.workspace_root)
@@ -345,6 +410,8 @@ class RuntimeRunManager:
         return {
             "schema_version": "plugin_state.v1",
             "skills": skills,
+            "skill_library": _skill_library_payload(self.workspace_root),
+            "skill_library_categories": _skill_library_categories_payload(),
             "mcp": mcp_rows,
             "installed_plugins": store.load_installed_plugin_packages(),
             "runtime_capabilities": _runtime_capabilities_payload(self.workspace_root),
@@ -353,6 +420,7 @@ class RuntimeRunManager:
     def delete_skill(self, skill_id: str) -> dict[str, Any]:
         from lucode.gui.plugin_state import PluginStateStore
         from lucode.gui.sidebar_data import load_default_skill_cards
+        from runtime.skill_library.metadata_proposals import delete_skill_metadata_proposals
 
         clean_skill_id = str(skill_id or "").strip()
         if not clean_skill_id:
@@ -365,6 +433,11 @@ class RuntimeRunManager:
         if _is_core_skill_card(card):
             raise ValueError("core skills cannot be removed")
         store.mark_skill_removed(clean_skill_id)
+        try:
+            delete_skill_metadata_proposals(self.workspace_root, skill_id=clean_skill_id)
+        except Exception:
+            # Metadata proposal cleanup is auxiliary and must not block removing the Skill itself.
+            pass
         payload = self.plugin_state()
         payload["deleted_skill_id"] = clean_skill_id
         return payload
@@ -380,6 +453,54 @@ class RuntimeRunManager:
         payload = self.plugin_state()
         payload["installed_skill_id"] = card.id
         return payload
+
+    def apply_skill_metadata_tuning(self, skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from runtime.skill_library.indexer import build_skill_index
+        from runtime.skill_library.metadata_editor import apply_skill_metadata_tuning
+
+        result = apply_skill_metadata_tuning(
+            workspace_root=self.workspace_root,
+            skill_id=skill_id,
+            categories=_string_list(payload.get("categories")) if "categories" in payload else None,
+            tags=_string_list(payload.get("tags")) if "tags" in payload else None,
+            use_when=_string_list(payload.get("use_when")) if "use_when" in payload else None,
+            do_not_use_when=_string_list(payload.get("do_not_use_when")) if "do_not_use_when" in payload else None,
+            negative_queries=_string_list(payload.get("negative_queries")),
+            distinguish_from={str(key): str(value) for key, value in dict(payload.get("distinguish_from") or {}).items()},
+        )
+        build_skill_index(SimpleNamespace(workspace_root=self.workspace_root), write=True)
+        state = self.plugin_state()
+        state["updated_skill_id"] = result["skill_id"]
+        return state
+
+    def set_skill_enabled(self, skill_id: str, enabled: bool) -> dict[str, Any]:
+        from lucode.gui.plugin_state import PluginStateStore
+        from runtime.skill_library.indexer import build_skill_index
+
+        clean_skill_id = str(skill_id or "").strip()
+        if not clean_skill_id:
+            raise ValueError("skill_id is required")
+        context = SimpleNamespace(workspace_root=self.workspace_root)
+        entries = build_skill_index(context, write=False)
+        entry = next((item for item in entries if item.id == clean_skill_id), None)
+        if entry is None:
+            raise ValueError(f"unknown skill_id: {clean_skill_id}")
+        if entry.source != "workspace" or entry.core:
+            raise ValueError("only workspace non-core skills can be enabled or disabled")
+        PluginStateStore(self.workspace_root).set_skill_enabled(entry.id, bool(enabled))
+        build_skill_index(context, write=True)
+        state = self.plugin_state()
+        state["updated_skill_id"] = entry.id
+        return state
+
+    def reindex_skill_library(self) -> dict[str, Any]:
+        from runtime.skill_library.indexer import build_skill_index
+
+        build_skill_index(SimpleNamespace(workspace_root=self.workspace_root), write=True)
+        state = self.plugin_state()
+        state["reindexed_skill_library"] = True
+        return state
+
 
     def install_mcp(self, source_path: str) -> dict[str, Any]:
         from lucode.gui.plugin_state import PluginStateStore
@@ -410,12 +531,19 @@ class RuntimeRunManager:
 
     def uninstall_plugin_package(self, plugin_id: str) -> dict[str, Any]:
         from lucode.gui.plugin_state import PluginStateStore
+        from runtime.skill_library.metadata_proposals import delete_skill_metadata_proposals
 
         clean_plugin_id = str(plugin_id or "").strip()
         if not clean_plugin_id:
             raise ValueError("plugin_id is required")
         store = PluginStateStore(self.workspace_root)
         removed = store.uninstall_plugin_package(clean_plugin_id)
+        for skill_id in list(removed.get("skill_ids") or []):
+            try:
+                delete_skill_metadata_proposals(self.workspace_root, skill_id=str(skill_id))
+            except Exception:
+                # Proposal cleanup must not block package removal.
+                continue
         payload = self.plugin_state()
         payload["deleted_plugin_id"] = removed["id"]
         payload["deleted_skill_ids"] = removed["skill_ids"]
@@ -519,6 +647,7 @@ class RuntimeRunManager:
         if session_id not in self._sessions and not self._history_contains(session_id):
             raise ValueError(f"unknown session_id: {session_id}")
         result = self._history_facade.delete(session_id)
+        remove_session_attachments(self.workspace_root, session_id)
         self._sessions.pop(session_id, None)
         return {
             "schema_version": SESSION_SCHEMA_VERSION,
@@ -527,50 +656,157 @@ class RuntimeRunManager:
             "title": result.title,
         }
 
-    def start_run(self, *, session_id: str, user_input: str) -> dict[str, Any]:
+    def start_run(
+        self,
+        *,
+        session_id: str,
+        user_input: str,
+        attachments: Any = None,
+        client_request_id: str = "",
+    ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()
         if not session_id:
             raise ValueError("session_id is required")
-        active_run_id = self._active_run_ids_by_session.get(session_id)
-        if active_run_id:
-            raise RunConflictError(f"session already has an active run: {active_run_id}")
         if session_id not in self._sessions and not self._history_contains(session_id):
             raise ValueError(f"unknown session_id: {session_id}")
         text = str(user_input or "").strip()
         if not text:
             raise ValueError("input is required")
+        request_id = str(client_request_id or "").strip()
+        input_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if request_id:
+            existing = self._client_request_runs.get(request_id)
+            if existing is None:
+                existing = self._journal_request_run(request_id)
+            if existing is not None:
+                existing_run_id, existing_session_id, existing_input_hash = existing
+                if existing_session_id == session_id and existing_input_hash == input_hash:
+                    existing_run = self._runs.get(existing_run_id)
+                    if existing_run is not None:
+                        return existing_run.to_dict()
+                raise RunConflictError("client_request_id was already used for a different request")
+        active_run_id = self._active_run_ids_by_session.get(session_id)
+        if active_run_id:
+            raise RunConflictError(f"session already has an active run: {active_run_id}")
         now = utc_now_iso()
+        run_id = _new_id("run")
+        recovery_claim = None
+        if self._run_recovery_settings.allows_safe_resume and self._run_journal is not None:
+            try:
+                recovery_claim = RecoveryCoordinator(self._run_journal).claim_for_message(
+                    session_id=session_id,
+                    owner_id=run_id,
+                )
+            except RecoveryLeaseUnavailableError as exc:
+                raise RunConflictError(f"recovery lease is already held for run: {exc.run_id}") from exc
+            except Exception as exc:
+                self._journal_degraded_runs[f"recovery_claim:{session_id}"] = str(exc)
+        try:
+            staged = stage_run_attachments(
+                workspace_root=self.workspace_root,
+                session_id=session_id,
+                run_id=run_id,
+                requested=attachments,
+            )
+        except Exception:
+            if recovery_claim is not None and self._run_journal is not None:
+                RecoveryCoordinator(self._run_journal).release_claim(recovery_claim)
+            raise
+        public_attachments = staged.public_items()
         run = ServerRun(
-            run_id=_new_id("run"),
+            run_id=run_id,
             session_id=session_id,
             user_input=text,
             status="running",
             created_at=now,
             updated_at=now,
+            attachments=public_attachments,
+            inline_files=[dict(item) for item in staged.inline_files],
         )
-        self._promote_placeholder_title_for_first_message(session_id, text, updated_at=now)
-        self._history_facade.history_store.append_message(
-            session_id,
-            "user",
-            text,
-            metadata={"run_id": run.run_id},
-        )
+        try:
+            self._promote_placeholder_title_for_first_message(session_id, text, updated_at=now)
+            self._history_facade.history_store.append_message(
+                session_id,
+                "user",
+                text,
+                metadata={
+                    "run_id": run.run_id,
+                    **({"attachments": public_attachments} if public_attachments else {}),
+                },
+            )
+        except Exception:
+            if recovery_claim is not None and self._run_journal is not None:
+                RecoveryCoordinator(self._run_journal).release_claim(recovery_claim)
+            raise
         self._runs[run.run_id] = run
+        if recovery_claim is not None:
+            self._recovery_claims_by_run[run.run_id] = recovery_claim
+            self._recovery_envelopes_by_run[run.run_id] = recovery_claim.envelope.to_dict()
+        if request_id:
+            self._client_request_runs[request_id] = (run.run_id, session_id, input_hash)
         self._touch_memory_session(session_id, updated_at=now)
         cancel_requested = asyncio.Event()
         self._run_cancel_events[run.run_id] = cancel_requested
-        self.events.emit(
+        self._observe_run_created(run)
+        self._emit_run_event(
             run_id=run.run_id,
             session_id=session_id,
             event_type="run.started",
-            payload={"input": text},
+            payload={
+                "input": text,
+                "input_hash": input_hash,
+                **({"attachments": public_attachments} if public_attachments else {}),
+            },
         )
-        self._run_tasks[run.run_id] = asyncio.create_task(self._execute_run(run, cancel_requested))
+        try:
+            self._run_tasks[run.run_id] = asyncio.create_task(self._execute_run(run, cancel_requested))
+        except Exception:
+            self._runs.pop(run.run_id, None)
+            self._run_cancel_events.pop(run.run_id, None)
+            self._recovery_claims_by_run.pop(run.run_id, None)
+            self._recovery_envelopes_by_run.pop(run.run_id, None)
+            if recovery_claim is not None and self._run_journal is not None:
+                RecoveryCoordinator(self._run_journal).release_claim(recovery_claim)
+            raise
         self._active_run_ids_by_session[session_id] = run.run_id
         return run.to_dict()
 
-    def start_mock_run(self, *, session_id: str, user_input: str) -> dict[str, Any]:
-        return self.start_run(session_id=session_id, user_input=user_input)
+    def start_mock_run(
+        self,
+        *,
+        session_id: str,
+        user_input: str,
+        attachments: Any = None,
+        client_request_id: str = "",
+    ) -> dict[str, Any]:
+        return self.start_run(
+            session_id=session_id,
+            user_input=user_input,
+            attachments=attachments,
+            client_request_id=client_request_id,
+        )
+
+    def list_active_runs(self) -> dict[str, Any]:
+        active_runs = [run for run in self._runs.values() if run.status == "running"]
+        active_runs.sort(key=lambda run: (run.updated_at, run.run_id), reverse=True)
+        return {
+            "schema_version": RUN_LIST_SCHEMA_VERSION,
+            "runs": [run.to_dict() for run in active_runs],
+        }
+
+    def list_recovery_runs(self) -> dict[str, Any]:
+        return {
+            "schema_version": "run_recovery.v1",
+            "runs": [decision.to_dict() for decision in self._recovery_decisions],
+        }
+
+    def abandon_recovery_run(self, run_id: str) -> dict[str, Any]:
+        journal = self._run_journal
+        clean_run_id = str(run_id or "").strip()
+        if journal is None or not clean_run_id or not journal.abandon_interrupted_run(clean_run_id):
+            raise ValueError(f"interrupted recovery run not found: {clean_run_id}")
+        self._recovery_decisions = [item for item in self._recovery_decisions if item.run_id != clean_run_id]
+        return {"abandoned": True, "run_id": clean_run_id}
 
     def stop_run(self, run_id: str) -> dict[str, Any]:
         run = self._runs.get(str(run_id or "").strip())
@@ -626,7 +862,12 @@ class RuntimeRunManager:
             catalog = self._model_catalog_provider() or {}
         except Exception:
             catalog = {}
-        return [item for item in catalog.get("models", []) if isinstance(item, dict)]
+        models = [dict(item) for item in catalog.get("models", []) if isinstance(item, dict)]
+        for item in models:
+            override = self._model_probe_overrides.get(str(item.get("id") or ""))
+            if override:
+                item.update(override)
+        return models
 
     def _context_model_info(self) -> dict[str, Any]:
         models = self._catalog_models()
@@ -693,18 +934,13 @@ class RuntimeRunManager:
 
     async def _execute_run(self, run: ServerRun, cancel_requested: asyncio.Event) -> None:
         event_bus = ExecutionEventBus()
-        unsubscribe = event_bus.subscribe(
-            lambda event: emit_execution_event_as_run_event(
-                run_events=self.events,
-                run_id=run.run_id,
-                session_id=run.session_id,
-                event=event,
-            )
-        )
+        unsubscribe = event_bus.subscribe(lambda event: self._emit_execution_event(run, event))
         approval_session = RuntimeApprovalSession(
             run_id=run.run_id,
             session_id=run.session_id,
             run_events=self.events,
+            event_observer=self._observe_run_event,
+            attempt_id=f"attempt:{run.run_id}",
         )
         self._approval_sessions[run.run_id] = approval_session
         request = RunExecutionRequest(
@@ -719,6 +955,11 @@ class RuntimeRunManager:
             model_info=self._context_model_info(),
             routing_input=run.user_input,
             current_input_persisted=True,
+            attachments=tuple(dict(item) for item in run.attachments),
+            inline_files=tuple(dict(item) for item in run.inline_files),
+            recovery_envelope=dict(self._recovery_envelopes_by_run.get(run.run_id) or {}),
+            checkpoint_sink=self._checkpoint_sink_for_run(run),
+            tool_lifecycle_sink=self._tool_lifecycle_sink_for_run(run),
         )
         try:
             result = await call_run_executor(self._run_executor, request)
@@ -730,12 +971,20 @@ class RuntimeRunManager:
         else:
             if run.status != "cancelled":
                 self._mark_completed(run, final_output=result.final_output, metadata=result.metadata)
+                self._settle_recovery_claim(
+                    run.run_id,
+                    outcome=str((result.metadata or {}).get("recovery_outcome") or ""),
+                )
         finally:
             approval_session.cancel_pending("run_finished")
             unsubscribe()
             self._run_tasks.pop(run.run_id, None)
             self._run_cancel_events.pop(run.run_id, None)
             self._approval_sessions.pop(run.run_id, None)
+            if run.status != "completed":
+                self._release_recovery_claim(run.run_id)
+            self._recovery_claims_by_run.pop(run.run_id, None)
+            self._recovery_envelopes_by_run.pop(run.run_id, None)
             if self._active_run_ids_by_session.get(run.session_id) == run.run_id:
                 self._active_run_ids_by_session.pop(run.session_id, None)
 
@@ -743,9 +992,10 @@ class RuntimeRunManager:
         now = utc_now_iso()
         run.status = "completed"
         run.updated_at = now
+        self._observe_run_status(run)
         payload = {"final_output": str(final_output or "")}
         payload.update(dict(metadata or {}))
-        self.events.emit(
+        self._emit_run_event(
             run_id=run.run_id,
             session_id=run.session_id,
             event_type="run.completed",
@@ -763,12 +1013,135 @@ class RuntimeRunManager:
         )
         self._touch_memory_session(run.session_id, updated_at=now)
 
+    def _checkpoint_sink_for_run(self, run: ServerRun):
+        journal = self._run_journal
+        if journal is None or not self._run_recovery_settings.allows_safe_resume:
+            return None
+
+        def write(kind: str, state: dict[str, Any], compatibility: dict[str, Any]):
+            return journal.write_checkpoint(
+                run_id=run.run_id,
+                kind=str(kind or ""),
+                state=dict(state or {}),
+                compatibility=dict(compatibility or {}),
+            )
+
+        return write
+
+    def _tool_lifecycle_sink_for_run(self, run: ServerRun):
+        journal = self._run_journal
+        if journal is None or not self._run_recovery_settings.allows_safe_resume:
+            return None
+
+        def report_error(exc: Exception) -> None:
+            self._journal_degraded_runs[f"tool_lifecycle:{run.run_id}"] = str(exc)
+
+        return JournalToolLifecycleSink(journal, run_id=run.run_id, on_error=report_error)
+
+    def _complete_recovery_claim(self, run_id: str) -> None:
+        claim = self._recovery_claims_by_run.get(str(run_id))
+        if claim is None or self._run_journal is None:
+            return
+        try:
+            RecoveryCoordinator(self._run_journal).complete_claim(claim)
+            self._recovery_decisions = [item for item in self._recovery_decisions if item.run_id != claim.source_run_id]
+        except Exception as exc:
+            self._journal_degraded_runs[f"recovery:{claim.source_run_id}"] = str(exc)
+
+    def _settle_recovery_claim(self, run_id: str, *, outcome: str) -> None:
+        claim = self._recovery_claims_by_run.get(str(run_id))
+        if claim is None or self._run_journal is None:
+            return
+        coordinator = RecoveryCoordinator(self._run_journal)
+        normalized = str(outcome or "").strip().lower()
+        try:
+            if normalized == "blocked":
+                coordinator.block_claim(claim)
+                return
+            if normalized in {"completed", "superseded", "replan", "ignore_previous"}:
+                coordinator.complete_claim(claim)
+                self._recovery_decisions = [
+                    item for item in self._recovery_decisions if item.run_id != claim.source_run_id
+                ]
+                return
+            coordinator.release_claim(claim)
+        except Exception as exc:
+            self._journal_degraded_runs[f"recovery:{claim.source_run_id}"] = str(exc)
+
+    def _release_recovery_claim(self, run_id: str) -> None:
+        claim = self._recovery_claims_by_run.get(str(run_id))
+        if claim is None or self._run_journal is None:
+            return
+        try:
+            RecoveryCoordinator(self._run_journal).release_claim(claim)
+        except Exception as exc:
+            self._journal_degraded_runs[f"recovery:{claim.source_run_id}"] = str(exc)
+
+    def _append_checkpointed_final_once(self, run_id: str) -> bool:
+        journal = self._run_journal
+        if journal is None:
+            return False
+        checkpoint = journal.latest_checkpoint_for_run(str(run_id), kinds=("final.ready",))
+        run_record = journal.recovery_run(str(run_id))
+        if checkpoint is None or run_record is None:
+            return False
+        if str(run_record.get("status") or "") not in {"running", "completed"}:
+            return False
+        state = decode_pipeline_checkpoint(checkpoint.state)
+        final_output = str(state.get("final_output") or "")
+        if not final_output:
+            return False
+        session_id = str(run_record.get("session_id") or "")
+        if self._history_has_assistant_run(session_id, str(run_id)):
+            journal.mark_checkpointed_run_completed(str(run_id))
+            return False
+        self._history_facade.history_store.append_message(
+            session_id,
+            "assistant",
+            final_output,
+            metadata={
+                "run_id": str(run_id),
+                "recovered_from_checkpoint": checkpoint.checkpoint_id,
+            },
+        )
+        journal.mark_checkpointed_run_completed(str(run_id))
+        return True
+
+    def _repair_checkpointed_finals(self) -> None:
+        journal = self._run_journal
+        if journal is None:
+            return
+        run_ids = [decision.run_id for decision in self._recovery_decisions]
+        for run_id in journal.final_checkpoint_run_ids():
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+        for run_id in run_ids:
+            self._append_checkpointed_final_once(run_id)
+        self._recovery_decisions = [
+            decision
+            for decision in self._recovery_decisions
+            if str((journal.recovery_run(decision.run_id) or {}).get("status") or "") != "completed"
+        ]
+
+    def _history_has_assistant_run(self, session_id: str, run_id: str) -> bool:
+        try:
+            events = self._history_facade.history_store.load_events(session_id)
+        except Exception:
+            return False
+        return any(
+            str(item.get("type") or "") == "message"
+            and str(item.get("role") or "") == "assistant"
+            and str((item.get("metadata") or {}).get("run_id") or "") == str(run_id)
+            for item in events
+        )
+
     def _mark_failed(self, run: ServerRun, *, error: str) -> None:
         now = utc_now_iso()
         run.status = "failed"
         run.updated_at = now
+        self._observe_run_status(run)
         self._touch_memory_session(run.session_id, updated_at=now)
-        self.events.emit(
+        self._emit_run_event(
             run_id=run.run_id,
             session_id=run.session_id,
             event_type="run.failed",
@@ -781,13 +1154,138 @@ class RuntimeRunManager:
         now = utc_now_iso()
         run.status = "cancelled"
         run.updated_at = now
+        self._observe_run_status(run)
         self._touch_memory_session(run.session_id, updated_at=now)
-        self.events.emit(
+        self._emit_run_event(
             run_id=run.run_id,
             session_id=run.session_id,
             event_type="run.cancelled",
             payload={"reason": str(reason or "user_requested")},
         )
+
+    def _emit_execution_event(self, run: ServerRun, event) -> None:
+        run_event = emit_execution_event_as_run_event(
+            run_events=self.events,
+            run_id=run.run_id,
+            session_id=run.session_id,
+            event=event,
+        )
+        self._observe_run_event(run_event)
+
+    def _emit_run_event(self, *, run_id: str, session_id: str, event_type: str, payload: dict[str, Any] | None = None):
+        run_event = self.events.emit(
+            run_id=run_id,
+            session_id=session_id,
+            event_type=event_type,
+            payload=payload,
+        )
+        self._observe_run_event(run_event)
+        return run_event
+
+    def _observe_run_event(self, event) -> None:
+        journal = self._run_journal
+        if journal is None:
+            return
+        try:
+            journal.append_event(
+                run_id=event.run_id,
+                session_id=event.session_id,
+                event_type=event.type,
+                payload=event.payload,
+            )
+            if event.type == "approval.requested":
+                approval_id = str(event.payload.get("approval_id") or "")
+                if approval_id:
+                    journal.record_pending_approval(
+                        approval_id=approval_id,
+                        run_id=event.run_id,
+                        invocation_id=str(event.payload.get("invocation_id") or ""),
+                        action_digest=hashlib.sha256(
+                            canonical_json(
+                                {
+                                    "tool_name": event.payload.get("tool_name"),
+                                    "action": event.payload.get("action"),
+                                    "arguments_summary": event.payload.get("arguments_summary"),
+                                    "tool_rule": event.payload.get("tool_rule"),
+                                    "attempt_id": event.payload.get("attempt_id"),
+                                }
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                        requested_at=event.created_at,
+                    )
+            elif event.type == "approval.resolved":
+                journal.resolve_approval(
+                    approval_id=str(event.payload.get("approval_id") or ""),
+                    status=str(event.payload.get("status") or "cancelled"),
+                    decision=str(event.payload.get("decision") or ""),
+                    resolved_at=event.created_at,
+                )
+        except Exception as exc:
+            self._journal_degraded_runs[str(event.run_id)] = str(exc)
+
+    def _observe_run_created(self, run: ServerRun) -> None:
+        journal = self._run_journal
+        if journal is None:
+            return
+        try:
+            journal.create_run(
+                run_id=run.run_id,
+                session_id=run.session_id,
+                status=run.status,
+                client_request_id=next(
+                    (
+                        request_id
+                        for request_id, (stored_run_id, _session_id, _input_hash) in self._client_request_runs.items()
+                        if stored_run_id == run.run_id
+                    ),
+                    "",
+                ),
+                created_at=run.created_at,
+            )
+        except Exception as exc:
+            self._journal_degraded_runs[run.run_id] = str(exc)
+
+    def _observe_run_status(self, run: ServerRun) -> None:
+        journal = self._run_journal
+        if journal is None:
+            return
+        try:
+            if not journal.update_run_status(run_id=run.run_id, status=run.status):
+                raise KeyError(f"unknown run_id: {run.run_id}")
+        except Exception as exc:
+            self._journal_degraded_runs[run.run_id] = str(exc)
+
+    def _journal_request_run(self, request_id: str) -> tuple[str, str, str] | None:
+        journal = self._run_journal
+        if journal is None:
+            return None
+        try:
+            record = journal.find_run_by_client_request_id(request_id)
+            if record is None:
+                return None
+            run_id = str(record["run_id"])
+            events = journal.events_for_run(run_id)
+            started = next((event for event in events if event.event_type == "run.started"), None)
+            input_hash = str((started.payload if started else {}).get("input_hash") or "")
+            if not input_hash:
+                return None
+            self._runs.setdefault(
+                run_id,
+                ServerRun(
+                    run_id=run_id,
+                    session_id=str(record["session_id"]),
+                    user_input="",
+                    status=str(record["status"]),
+                    created_at=str(record["created_at"]),
+                    updated_at=str(record["updated_at"]),
+                ),
+            )
+            value = (run_id, str(record["session_id"]), input_hash)
+            self._client_request_runs[request_id] = value
+            return value
+        except Exception as exc:
+            self._journal_degraded_runs[f"request:{request_id}"] = str(exc)
+            return None
 
     def _touch_memory_session(self, session_id: str, *, updated_at: str) -> None:
         session = self._sessions.get(session_id)
@@ -1122,8 +1620,10 @@ def _sanitize_model(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _sanitize_model_settings_item(item: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_model_settings_item(item: dict[str, Any], *, workspace_root: Path | None = None) -> dict[str, Any]:
     model_id = str(item.get("id") or item.get("model") or "").strip()
+    levels = reasoning_effort_levels(item)
+    probe = dict(item.get("reasoning_effort") or {})
     return {
         "id": model_id,
         "ref": _model_ref_for_settings(item),
@@ -1138,6 +1638,13 @@ def _sanitize_model_settings_item(item: dict[str, Any]) -> dict[str, Any]:
         "privacy_level": str(item.get("privacy_level") or "").strip(),
         "supports_tools": bool(item.get("supports_tools")),
         "reasoning_level": str(item.get("reasoning_level") or "").strip(),
+        "supports_reasoning_effort": bool(levels),
+        "reasoning_effort_levels": (["auto", *levels] if levels else []),
+        "selected_reasoning_effort": (
+            selected_reasoning_effort(workspace_root=workspace_root, model_id=model_id) if levels else "auto"
+        ),
+        "reasoning_effort_probe_status": str(probe.get("status") or "unknown"),
+        "reasoning_effort_verification": str(probe.get("verification") or ""),
         "cost_level": str(item.get("cost_level") or "").strip(),
         "model_tier": str(item.get("model_tier") or "").strip(),
     }
@@ -1334,6 +1841,8 @@ def _string_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+
+
 def _payload_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return bool(default)
@@ -1417,6 +1926,191 @@ def _runtime_capability_ability_keys(item: dict[str, Any]) -> list[str]:
         if key and key not in keys:
             keys.append(key)
     return keys
+
+
+def _skill_library_payload(workspace_root: Path) -> list[dict[str, Any]]:
+    """Return display-safe Skill metadata without exposing local source paths."""
+    try:
+        from runtime.skill_library.indexer import load_skill_index
+        from runtime.skill_library.metadata_tuner import suggest_metadata_tuning_from_usage
+        from runtime.skill_library.metadata_proposals import sync_rule_metadata_proposals
+        from runtime.skill_library.taxonomy import load_skill_taxonomy, suggest_categories_for_skill
+
+        context = SimpleNamespace(workspace_root=workspace_root)
+        entries = load_skill_index(context)
+        taxonomy = load_skill_taxonomy()
+        existing_negative_queries = {entry.id: entry.negative_queries for entry in entries}
+        suggestions = {
+            suggestion.skill_id: suggestion
+            for suggestion in suggest_metadata_tuning_from_usage(
+                workspace_root,
+                existing_negative_queries=existing_negative_queries,
+            )
+        }
+    except Exception:
+        # The library is auxiliary UI data and must not block plugin management.
+        return []
+
+    try:
+        persisted_proposals = sync_rule_metadata_proposals(workspace_root, entries, taxonomy=taxonomy)
+    except Exception:
+        # Proposal persistence must not hide an otherwise usable Skill library.
+        persisted_proposals = {}
+
+    payload: list[dict[str, Any]] = []
+    for entry in entries:
+        proposal = persisted_proposals.get(entry.id)
+        rule_payload = _rule_payload_for_library_entry(entry, proposal, taxonomy)
+        payload.append(
+            _skill_library_entry_to_dict(
+                entry,
+                suggestions.get(entry.id),
+                suggested_categories=[] if entry.category else rule_payload["categories"],
+                suggested_tags=rule_payload["tags"],
+                suggested_use_when=rule_payload["use_when"],
+                metadata_proposal=proposal,
+            )
+        )
+    return payload
+
+
+def _skill_library_categories_payload() -> list[dict[str, str]]:
+    try:
+        from runtime.skill_library.taxonomy import load_skill_taxonomy
+
+        taxonomy = load_skill_taxonomy()
+    except Exception:
+        return []
+    return [
+        {
+            "id": category_id,
+            "name": str(item.get("name") or category_id),
+            "description": str(item.get("description") or ""),
+        }
+        for category_id, item in sorted(taxonomy.categories.items())
+    ]
+
+
+def _rule_payload_for_library_entry(entry: Any, proposal: Any | None, taxonomy: Any) -> dict[str, list[str]]:
+    if proposal is not None and isinstance(getattr(proposal, "payload", None), dict):
+        proposal_payload = dict(proposal.payload)
+        return {
+            "categories": [str(item) for item in list(proposal_payload.get("categories") or [])],
+            "tags": [str(item) for item in list(proposal_payload.get("tags") or [])],
+            "use_when": [str(item) for item in list(proposal_payload.get("use_when") or [])],
+        }
+    from runtime.skill_library.taxonomy import suggest_categories_for_skill
+
+    return {
+        "categories": suggest_categories_for_skill(entry, taxonomy),
+        "tags": _suggest_skill_tags(entry),
+        "use_when": _suggest_skill_use_when(entry),
+    }
+
+
+def _skill_library_entry_to_dict(
+    entry: Any,
+    suggestion: Any,
+    *,
+    suggested_categories: list[str],
+    suggested_tags: list[str],
+    suggested_use_when: list[str],
+    metadata_proposal: Any | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": str(entry.id),
+        "name": str(entry.name),
+        "summary": str(entry.summary),
+        "source": str(entry.source),
+        "editable_metadata": str(entry.source) == "workspace" and not bool(entry.core),
+        "category": [str(item) for item in entry.category],
+        "tags": [str(item) for item in entry.tags],
+        "use_when": [str(item) for item in entry.use_when],
+        "do_not_use_when": [str(item) for item in entry.do_not_use_when],
+        "negative_queries": [str(item) for item in entry.negative_queries],
+        "distinguish_from": {str(key): str(value) for key, value in entry.distinguish_from.items()},
+        "risk_level": str(entry.risk_level),
+        "enabled": bool(entry.enabled),
+        "core": bool(entry.core),
+        "assignable": bool(entry.assignable),
+        "metadata_status": str(entry.metadata_status),
+        "missing_fields": [str(item) for item in entry.missing_fields],
+        "usage": _skill_library_usage_to_dict(entry.usage),
+        "metadata_proposal": _skill_metadata_proposal_to_dict(metadata_proposal),
+        "suggestion": {
+            "categories": [str(item) for item in suggested_categories],
+            "tags": [str(item) for item in suggested_tags],
+            "use_when": [str(item) for item in suggested_use_when],
+            # Never invent exclusion rules for third-party Skills. The owner confirms them in the library.
+            "do_not_use_when": [],
+            "negative_queries": [str(item) for item in getattr(suggestion, "suggested_negative_queries", ()) or ()],
+            "distinguish_from": {
+                str(key): str(value)
+                for key, value in dict(getattr(suggestion, "suggested_distinguish_from", {}) or {}).items()
+            },
+            "source_count": int(getattr(suggestion, "source_count", 0) or 0),
+        },
+    }
+
+
+def _skill_metadata_proposal_to_dict(proposal: Any | None) -> dict[str, Any] | None:
+    if proposal is None:
+        return None
+    return {
+        "proposal_id": str(getattr(proposal, "proposal_id", "")),
+        "source": str(getattr(proposal, "source", "")),
+        "status": str(getattr(proposal, "status", "")),
+        "confidence": float(getattr(proposal, "confidence", 0.0) or 0.0),
+        "payload": {
+            str(key): [str(item) for item in list(values or [])]
+            for key, values in dict(getattr(proposal, "payload", {}) or {}).items()
+        },
+        "reason": str(getattr(proposal, "reason", "")),
+        "updated_at": str(getattr(proposal, "updated_at", "")),
+    }
+
+
+def _suggest_skill_tags(entry: Any, *, limit: int = 8) -> list[str]:
+    """Offer bounded keyword hints without changing imported Skill metadata."""
+
+    if list(getattr(entry, "tags", ()) or ()):
+        return [str(item) for item in list(entry.tags) if str(item).strip()][:limit]
+    stop_words = {
+        "and", "are", "for", "from", "generic", "main", "remove", "skill", "the", "this", "to", "with", "zh",
+    }
+    text = " ".join(
+        str(value or "")
+        for value in (getattr(entry, "name", ""), getattr(entry, "summary", ""))
+    ).casefold()
+    tags: list[str] = []
+    for token in re.findall(r"[a-z][a-z0-9]{3,}", text):
+        normalized = token.strip()
+        if not normalized or normalized in stop_words or normalized in tags:
+            continue
+        tags.append(normalized)
+        if len(tags) >= limit:
+            break
+    return tags
+
+
+def _suggest_skill_use_when(entry: Any) -> list[str]:
+    existing = [str(item) for item in list(getattr(entry, "use_when", ()) or ()) if str(item).strip()]
+    if existing:
+        return existing[:3]
+    summary = str(getattr(entry, "summary", "") or "").strip()
+    if not summary:
+        return []
+    first_sentence = re.split(r"(?<=[.!?。！？])\s*", summary, maxsplit=1)[0].strip()
+    return [first_sentence[:320]] if first_sentence else []
+
+
+def _skill_library_usage_to_dict(usage: Any) -> dict[str, Any]:
+    raw = dict(usage or {}) if isinstance(usage, dict) else {}
+    integer_keys = ("used_count", "success_count", "failure_count", "misfire_count", "rejected_by_planner_count")
+    text_keys = ("last_used_at", "last_rejected_at")
+    result = {key: max(0, int(raw.get(key) or 0)) for key in integer_keys}
+    result.update({key: str(raw.get(key) or "") for key in text_keys})
+    return result
 
 
 def _runtime_ability_key_for_tool(tool_name: str) -> str:

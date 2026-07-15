@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,12 @@ from runtime.execution.inline_context import (
     _resolve_explicit_project_file_paths,
 )
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
+from runtime.context.worker_observation import (
+    build_worker_context_observation,
+    enforce_worker_prompt,
+    render_worker_prompt,
+    worker_context_mode,
+)
 from runtime.hooks import TaskScopedHooks
 from runtime.memory.resolver import TaskMemoryPack
 from runtime.ui.live_status import dynamic_status
@@ -52,18 +59,53 @@ async def _run_direct_answer(
     hooks,
     run_agent,
     execution_mode: str = "",
+    run_state: PipelineRunState | None = None,
 ) -> str:
     agent = factory.create_direct_answer_agent(
         model_id,
         plan.direct_answer_instruction,
         execution_mode=execution_mode,
     )
+    event_bus = getattr(run_state, "event_bus", None) if run_state is not None else None
     run_agent_kwargs = {}
     if _run_agent_accepts_stream_output(run_agent):
-        run_agent_kwargs["stream_output"] = False
+        run_agent_kwargs["stream_output"] = bool(event_bus is not None)
+    if event_bus is not None:
+        run_agent_kwargs["on_delta"] = _final_answer_delta_emitter(event_bus, agent="direct_answer")
+    scoped_hooks = hooks
+    if run_state is not None:
+        run_context = getattr(run_state, "run_context", None)
+        event_bus = getattr(run_state, "event_bus", None)
+        lifecycle_sink = getattr(run_state, "tool_lifecycle_sink", None)
+        if event_bus is not None or run_context is not None or lifecycle_sink is not None:
+            scoped_hooks = TaskScopedHooks(
+                hooks,
+                task_id="direct_answer",
+                event_bus=event_bus,
+                run_context=run_context,
+                tool_lifecycle_sink=lifecycle_sink,
+            )
     with dynamic_status("direct answer", stage="direct"):
-        result = await run_agent(agent, raw_user_input, hooks, **run_agent_kwargs)
+        result = await run_agent(agent, raw_user_input, scoped_hooks, **run_agent_kwargs)
     return result.final_output
+
+
+def _final_answer_delta_emitter(event_bus, *, agent: str):
+    def _emit_delta(text: str) -> None:
+        if not text:
+            return
+        try:
+            event_bus.emit(
+                "FinalAnswerDelta",
+                str(text),
+                agent=str(agent or ""),
+                status="streaming",
+                payload={"text": str(text)},
+            )
+        except Exception:
+            return
+
+    return _emit_delta
 
 
 def _direct_answer_input_with_inline_context(
@@ -106,18 +148,15 @@ def _task_prompt(
     shared_context: str = "",
     task_memory_pack: TaskMemoryPack | None = None,
 ) -> str:
-    prefix = "优化后的用户请求：\n" f"{refined_request}\n\n"
-    if dependency_context.strip():
-        prefix += "前序任务输出：\n" f"{dependency_context}\n\n"
-    if shared_context.strip():
-        prefix += f"{shared_context.strip()}\n\n"
     task_memory_context = task_memory_pack.render_for_worker() if task_memory_pack is not None else ""
-    if task_memory_context.strip():
-        prefix += f"{task_memory_context.strip()}\n\n"
-    if workspace_context.strip():
-        prefix += f"{workspace_context.strip()}\n\n"
-    prefix += "你的具体任务：\n" f"{task_instruction}"
-    return prefix
+    return render_worker_prompt(
+        refined_request=refined_request,
+        task_instruction=task_instruction,
+        dependency_context=dependency_context,
+        workspace_context=workspace_context,
+        shared_context=shared_context,
+        memory_context=task_memory_context,
+    )
 
 
 async def _run_planned_task(
@@ -195,16 +234,21 @@ async def _run_planned_task(
             else contextlib.nullcontext()
         )
         with status_context:
+            worker_prompt = _worker_prompt_with_context_budget(
+                factory,
+                run_state,
+                task,
+                refined_request,
+                task_instruction=task.instruction,
+                dependency_context=dependency_context,
+                workspace_context=workspace_context,
+                shared_context=shared_context,
+                task_memory_pack=task_memory_pack,
+                execution_mode=execution_mode,
+            )
             result = await run_agent(
                 agent,
-                _task_prompt(
-                    refined_request,
-                    task.instruction,
-                    dependency_context,
-                    workspace_context,
-                    shared_context,
-                    task_memory_pack=task_memory_pack,
-                ),
+                worker_prompt,
                 scoped_hooks,
                 **run_agent_kwargs,
             )
@@ -288,14 +332,84 @@ def _task_status_label(task) -> str:
 def _task_scoped_hooks(hooks, run_state: PipelineRunState | None, task):
     event_bus = getattr(run_state, "event_bus", None)
     run_context = getattr(run_state, "run_context", None)
-    if hooks is None or (event_bus is None and run_context is None):
+    lifecycle_sink = getattr(run_state, "tool_lifecycle_sink", None)
+    if hooks is None or (event_bus is None and run_context is None and lifecycle_sink is None):
         return hooks
     return TaskScopedHooks(
         hooks,
         task_id=str(getattr(task, "id", "") or ""),
         event_bus=event_bus,
         run_context=run_context,
+        tool_lifecycle_sink=lifecycle_sink,
     )
+
+
+def _observe_worker_context(factory, run_state: PipelineRunState | None, task, prompt: str, *, execution_mode: str = "") -> None:
+    if run_state is None or not hasattr(run_state, "record_worker_context_observation"):
+        return None
+    if str(os.environ.get("LUCODE_CONTEXT_LEDGER") or "observe").strip().lower() == "off":
+        return None
+    if worker_context_mode() == "off":
+        return None
+    try:
+        budget = factory.worker_context_budget(task, execution_mode=execution_mode)
+        observation = build_worker_context_observation(
+            task=task,
+            prompt=prompt,
+            model_info=dict(budget.get("model_info") or {}),
+            mcp_ids=list(budget.get("mcp_ids") or []),
+            tool_context=str(budget.get("tool_context") or ""),
+            accepted_evidence=dict(getattr(run_state, "accepted_evidence", {}) or {}),
+        )
+        run_state.record_worker_context_observation(observation)
+        return observation
+    except Exception:
+        return None
+
+
+def _worker_prompt_with_context_budget(
+    factory,
+    run_state: PipelineRunState | None,
+    task,
+    refined_request: str,
+    *,
+    task_instruction: str,
+    dependency_context: str = "",
+    workspace_context: str = "",
+    shared_context: str = "",
+    task_memory_pack: TaskMemoryPack | None = None,
+    execution_mode: str = "",
+) -> str:
+    memory_context = task_memory_pack.render_for_worker() if task_memory_pack is not None else ""
+    prompt = render_worker_prompt(
+        refined_request=refined_request,
+        task_instruction=task_instruction,
+        dependency_context=dependency_context,
+        workspace_context=workspace_context,
+        shared_context=shared_context,
+        memory_context=memory_context,
+    )
+    observation = _observe_worker_context(factory, run_state, task, prompt, execution_mode=execution_mode)
+    if observation is None:
+        return prompt
+    compacted, applied, dropped = enforce_worker_prompt(
+        observation=observation,
+        refined_request=refined_request,
+        task_instruction=task_instruction,
+        dependency_context=dependency_context,
+        workspace_context=workspace_context,
+        shared_context=shared_context,
+        memory_context=memory_context,
+    )
+    if applied and run_state is not None:
+        run_state.emit_event(
+            "WorkerContextEnforced",
+            "worker context compressed after budget trigger",
+            task_id=str(getattr(task, "id", "") or ""),
+            status="completed",
+            payload={"budget_mode": observation.budget_mode, "dropped_sections": dropped},
+        )
+    return compacted
 
 
 def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:

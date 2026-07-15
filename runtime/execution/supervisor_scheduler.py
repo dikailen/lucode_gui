@@ -17,8 +17,8 @@ DECLARED_WRITE_MCPS = frozenset({"workspace_edit"})
 SERIAL_MCPS = frozenset({"command_runner", "safe_backup"})
 
 
-def supervisor_execution_batches_for_full(tasks: list) -> list[list]:
-    """Build supervised full-mode batches with deterministic resource safety rules."""
+def supervisor_execution_batches_for_team(tasks: list) -> list[list]:
+    """Build supervised team batches with deterministic resource safety rules."""
 
     if not tasks:
         return []

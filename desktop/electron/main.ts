@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, shell } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +7,7 @@ import { DesktopBrowserManager } from "./browserManager.js";
 import { RuntimeLauncher } from "./runtimeLauncher.js";
 import { resolveWorkspaceRoot } from "./runtimeLauncher.js";
 import { DesktopTerminalManager } from "./terminalManager.js";
+import { chooseAttachmentFiles, choosePluginSource } from "./filePicker.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +20,12 @@ const browserManager = new DesktopBrowserManager();
 const browserBridge = new DesktopBrowserBridge(browserManager);
 terminalManager.registerIpc();
 browserManager.registerIpc();
+ipcMain.handle("lucode-desktop:choose-plugin-source", (_event, kind) =>
+  choosePluginSource((options) => dialog.showOpenDialog(options), kind === "mcp" || kind === "package" ? kind : "skill"),
+);
+ipcMain.handle("lucode-desktop:choose-attachments", () =>
+  chooseAttachmentFiles((options) => dialog.showOpenDialog(options)),
+);
 
 async function createWindow() {
   const bridge = await browserBridge.start();
@@ -109,7 +116,7 @@ async function waitForPreloadBridge(win: BrowserWindow, timeoutMs: number): Prom
   while (Date.now() - startedAt < timeoutMs) {
     const ready = await win.webContents
       .executeJavaScript(
-        "Boolean(window.lucodeRuntime?.baseUrl && window.lucodeDesktop?.droppedFilePaths && window.lucodeTerminal?.create && window.lucodeBrowser?.createTab && window.lucodeBrowser?.listTabs && window.lucodeBrowser?.getPageSummary)",
+        "Boolean(window.lucodeRuntime?.baseUrl && window.lucodeDesktop?.chooseAttachmentFiles && window.lucodeDesktop?.droppedFilePath && window.lucodeTerminal?.create && window.lucodeBrowser?.createTab && window.lucodeBrowser?.listTabs && window.lucodeBrowser?.getPageSummary)",
         true,
       )
       .catch(() => false);

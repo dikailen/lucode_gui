@@ -4,9 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from planning.planner_schema import PlannerResult
-from runtime.config.execution_mode import normalize_execution_mode
-
-
 MUTATING_OR_TERMINAL_TOOLS = {
     "workspace_edit",
     "command_runner",
@@ -25,7 +22,7 @@ class ExecutionContractDecision:
     """Deterministic execution contract applied after planner output."""
 
     readonly_hard_constraint: bool
-    full_supervisor_route: str
+    supervisor_route: str
     summary_helper_enabled: bool
     reason: str
     normalized_task_ids: list[str]
@@ -33,7 +30,7 @@ class ExecutionContractDecision:
     def to_dict(self) -> dict[str, Any]:
         return {
             "readonly_hard_constraint": self.readonly_hard_constraint,
-            "supervisor_route": self.full_supervisor_route,
+            "supervisor_route": self.supervisor_route,
             "summary_helper": {
                 "enabled": self.summary_helper_enabled,
                 "reason": "summary_helper_requested" if self.summary_helper_enabled else "lead_supervisor_final_answer",
@@ -56,7 +53,7 @@ def normalize_execution_contract(
     runtime facts here.
     """
 
-    normalized_mode = normalize_execution_mode(mode)
+    del mode
     text = _combined_contract_text(plan, user_request)
     readonly = _has_readonly_hard_constraint(text)
     normalized_task_ids: list[str] = []
@@ -70,17 +67,17 @@ def normalize_execution_contract(
             if _constrain_code_repair_scope(task):
                 normalized_task_ids.append(str(getattr(task, "id", "") or ""))
 
-    supervisor_route = _supervisor_route(plan, normalized_mode)
-    summary_helper_enabled = _should_enable_summary_helper(plan, normalized_mode, supervisor_route)
-    if normalized_mode == "full" and supervisor_route == "team" and not summary_helper_enabled:
+    supervisor_route = _supervisor_route(plan)
+    summary_helper_enabled = _should_enable_summary_helper(plan, supervisor_route)
+    if supervisor_route == "team" and not summary_helper_enabled:
         plan.needs_synthesis = False
         plan.synthesis_instruction = ""
 
     _store_contract(plan, ExecutionContractDecision(
         readonly_hard_constraint=readonly,
-        full_supervisor_route=supervisor_route,
+        supervisor_route=supervisor_route,
         summary_helper_enabled=summary_helper_enabled,
-        reason=_decision_reason(readonly, normalized_mode, supervisor_route),
+        reason=_decision_reason(readonly, supervisor_route),
         normalized_task_ids=[item for item in normalized_task_ids if item],
     ))
     return _decision_from_plan(plan)
@@ -135,9 +132,7 @@ def _constrain_code_repair_scope(task) -> bool:
     return changed
 
 
-def _supervisor_route(plan: PlannerResult, mode: str) -> str:
-    if mode != "full":
-        return normalize_execution_mode(mode)
+def _supervisor_route(plan: PlannerResult) -> str:
     if plan.route_type in {"direct_answer", "clarify"}:
         return "direct"
     if plan.route_type == "single_agent" or len(plan.tasks or []) <= 1:
@@ -145,8 +140,8 @@ def _supervisor_route(plan: PlannerResult, mode: str) -> str:
     return "team"
 
 
-def _should_enable_summary_helper(plan: PlannerResult, mode: str, supervisor_route: str) -> bool:
-    if mode != "full" or supervisor_route != "team":
+def _should_enable_summary_helper(plan: PlannerResult, supervisor_route: str) -> bool:
+    if supervisor_route != "team":
         return bool(plan.needs_synthesis)
     raw = dict(getattr(plan, "memory_interface", {}) or {})
     contract = dict(raw.get("execution_contract") or {})
@@ -211,7 +206,7 @@ def _decision_from_plan(plan: PlannerResult) -> ExecutionContractDecision:
     helper = dict(contract.get("summary_helper") or {})
     return ExecutionContractDecision(
         readonly_hard_constraint=bool(contract.get("readonly_hard_constraint")),
-        full_supervisor_route=str(contract.get("supervisor_route") or ""),
+        supervisor_route=str(contract.get("supervisor_route") or ""),
         summary_helper_enabled=bool(helper.get("enabled")),
         reason=str(contract.get("reason") or ""),
         normalized_task_ids=[str(item) for item in list(contract.get("normalized_task_ids") or [])],
@@ -223,12 +218,12 @@ def _contract_dict(plan: PlannerResult) -> dict[str, Any]:
     return dict(memory_interface.get("execution_contract") or {})
 
 
-def _decision_reason(readonly: bool, mode: str, route: str) -> str:
+def _decision_reason(readonly: bool, route: str) -> str:
     parts = []
     if readonly:
         parts.append("readonly_hard_constraint")
-    if mode == "full":
-        parts.append(f"full_supervisor_{route}")
+    if route == "team":
+        parts.append("team_supervisor")
     return ", ".join(parts) if parts else "no_contract_changes"
 
 

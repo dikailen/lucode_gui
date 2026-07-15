@@ -1,4 +1,4 @@
-export type DockToolId = "" | "home" | "review" | "terminal" | "browser" | "files" | "sidechat";
+export type DockToolId = "" | "home" | "review" | "terminal" | "browser" | "files";
 export type RightDockWindowTool = Exclude<DockToolId, "" | "home">;
 export type RightDockWindowStatus = "idle" | "running" | "attention";
 
@@ -185,6 +185,11 @@ export function closeBottomShell(state: PanelLayoutState): PanelLayoutState {
 export function shouldForceCompactSidebar(viewportWidth: number, rightDockOpen: boolean): boolean {
   const width = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1280;
   return width < FORCE_COMPACT_WIDTH || (rightDockOpen && width < FORCE_COMPACT_WITH_DOCK_WIDTH);
+}
+
+export function shouldRenderSessionSidebar(workspace: "chat" | "plugins" | "settings"): boolean {
+  void workspace;
+  return true;
 }
 
 export function clampRightDockWidth(width: number, sidebarCollapsed: boolean, viewportWidth: number): number {

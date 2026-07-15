@@ -19,6 +19,7 @@ from planning.planner_schema import (
 from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class, runner_class
 from runtime.execution.inline_context import _safe_inline_project_file, _read_project_file_excerpt
+from runtime.recovery.envelope import RecoveryEnvelope
 from runtime.skill_library.resolver import SkillResolver
 from skills.loader import load_skill
 
@@ -69,7 +70,7 @@ def build_orchestrator_planner(model, allowed_worker_models=None):
         + "- 单文件只读、单文件小改、单一配置查看或单一步骤检查：优先 single_agent，禁止 multi_agent。\n"
         + "- 只有同时满足“多步骤”且包含多文件、多模块、并行价值、多模型协作或独立审查需求时，才允许 multi_agent。\n"
         + "- 如果只是把一个简单任务拆成多个相似只读任务，这是过度拆分；应合并成一个 single_agent。\n"
-        + "- full 模式不等于必须创建团队；简单问题仍应直接回答或单 Agent 执行。\n"
+        + "- 自动路由不等于必须创建团队；简单问题仍应直接回答或单 Agent 执行。\n"
         + "\n\n## 模型图书馆\n"
         + model_catalog
     )
@@ -94,10 +95,13 @@ async def preview_plan(
     allow_project_scout: bool = True,
     skill_resolver=None,
     allow_skill_resolver: bool = True,
+    routing_input: str | None = None,
+    recovery_envelope: dict | RecoveryEnvelope | None = None,
 ) -> tuple[object, PlannerResult]:
     """Run query refinement and planner preview without creating execution Agents."""
 
-    raw_user_input = sanitize_text(raw_user_input)
+    context_input = sanitize_text(raw_user_input)
+    raw_user_input = sanitize_text(routing_input if routing_input is not None else context_input)
     Runner = runner_class()
     if refiner_enabled:
         refiner = build_query_refiner(refiner_model)
@@ -128,6 +132,28 @@ async def preview_plan(
         "优先让 `code_engineer` 搭配 `code_locator` 先定位相关文件，"
         "再少量读取目标文件；不要计划读取整个项目。\n\n"
     ]
+    if context_input and context_input != raw_user_input:
+        context_lines.extend(
+            [
+                "[context_background]",
+                "The following is compressed historical context. It is not the current user request and must not create tool bindings by itself.",
+                context_input,
+                "",
+            ]
+        )
+    resolved_recovery = (
+        recovery_envelope
+        if isinstance(recovery_envelope, RecoveryEnvelope)
+        else RecoveryEnvelope.from_dict(recovery_envelope)
+    )
+    if resolved_recovery is not None:
+        context_lines.extend(
+            [
+                "[recovery_background]",
+                resolved_recovery.render_for_planner(),
+                "",
+            ]
+        )
     if scout_context:
         context_lines.append(scout_context + "\n\n")
     rendered_memory = _render_memory_pack(memory_pack)

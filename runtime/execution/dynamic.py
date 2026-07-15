@@ -16,7 +16,7 @@ from runtime.execution.pipeline import (
     apply_pipeline_gate,
     format_gate_decision,
 )
-from runtime.execution.run_context import RunContextStore
+from runtime.execution.run_context import RunContextStore, seed_inline_files
 # Keep private imports available here as compatibility re-exports while dynamic.py is being split.
 from runtime.execution.fast_paths import (
     _build_url_search_query,
@@ -34,7 +34,7 @@ from runtime.execution.failure_memory import (
     _record_failure_case_safely,
     _record_flywheel_safely,
 )
-from runtime.execution.execution_contract import normalize_execution_contract
+from runtime.execution.execution_contract import normalize_execution_contract, supervisor_route
 from runtime.execution.inline_context import (
     _excerpt_query_tokens,
     _inline_project_file_context,
@@ -88,15 +88,26 @@ from runtime.compute.placement_policy import (
 )
 from runtime.consistency.timeline import reliability_flags_from_env
 from runtime.events import ExecutionEventBus
+from runtime.recovery.envelope import RecoveryEnvelope
+from runtime.recovery.policy import evaluate_recovery_plan, recovery_compatibility_for_plan
 from runtime.ui.plan_display import planning_status, render_compact_plan_summary
 
 
 class DynamicExecutionResult(str):
     """String-compatible execution output with optional runtime context metadata."""
 
-    def __new__(cls, value: str, *, run_context_summary: str = ""):
+    def __new__(
+        cls,
+        value: str,
+        *,
+        run_context_summary: str = "",
+        tool_dehydration_items: list[dict[str, object]] | None = None,
+        recovery_outcome: str = "",
+    ):
         obj = str.__new__(cls, str(value or ""))
         obj.run_context_summary = str(run_context_summary or "")
+        obj.tool_dehydration_items = list(tool_dehydration_items or [])
+        obj.recovery_outcome = str(recovery_outcome or "")
         return obj
 
 
@@ -110,8 +121,13 @@ async def execute_dynamic_request(
     show_plan: bool = False,
     settings: RuntimeSettings | None = None,
     display_input: str | None = None,
+    routing_input: str | None = None,
     output_controller=None,
     event_bus=None,
+    inline_files=None,
+    recovery_envelope=None,
+    checkpoint_sink=None,
+    tool_lifecycle_sink=None,
 ) -> str:
     """Plan and execute a request using dynamic Agents."""
 
@@ -120,6 +136,7 @@ async def execute_dynamic_request(
     checkpoint = create_checkpoint(project_root)
     flywheel = FlywheelStore(project_root)
     current_input = raw_user_input
+    stable_routing_input = str(routing_input or raw_user_input or "").strip()
     last_output = ""
     last_audit = None
     max_attempts = 3
@@ -138,8 +155,13 @@ async def execute_dynamic_request(
             flywheel=flywheel,
             attempt=attempt,
             display_input=display_input,
+            routing_input=stable_routing_input,
             output_controller=output_controller,
             event_bus=event_bus,
+            inline_files=inline_files,
+            recovery_envelope=recovery_envelope,
+            checkpoint_sink=checkpoint_sink,
+            tool_lifecycle_sink=tool_lifecycle_sink,
         )
         last_output = output
         last_audit = audit
@@ -162,6 +184,7 @@ async def execute_dynamic_request(
         return DynamicExecutionResult(
             format_final_report(last_output, last_audit),
             run_context_summary=str(getattr(last_output, "run_context_summary", "") or ""),
+            tool_dehydration_items=list(getattr(last_output, "tool_dehydration_items", []) or []),
         )
 
     return last_output or DynamicExecutionResult("主脑没有给出可执行路线。")
@@ -180,21 +203,32 @@ async def _execute_dynamic_attempt(
     flywheel: FlywheelStore,
     attempt: int,
     display_input: str | None = None,
+    routing_input: str | None = None,
     output_controller=None,
     event_bus=None,
+    inline_files=None,
+    recovery_envelope=None,
+    checkpoint_sink=None,
+    tool_lifecycle_sink=None,
 ) -> tuple[str, object | None]:
-    visible_input = str(display_input or raw_user_input or "").strip()
+    route_input = str(routing_input or raw_user_input or "").strip()
+    visible_input = str(display_input or route_input or raw_user_input or "").strip()
     compute_placement_mode = reliability_flags_from_env().compute_placement
     planner_input = raw_user_input
     planner_refiner_enabled = settings.query_refiner_enabled
     planner_allow_project_scout = True
     planner_placement_decision = None
-    memory_pack = _resolve_planner_memory_pack(project_root, flywheel, raw_user_input)
+    memory_pack = _resolve_planner_memory_pack(project_root, flywheel, route_input)
+    planning_run_context = RunContextStore(project_root) if project_root else None
+    seed_inline_files(planning_run_context, project_root, inline_files)
+    context_labels = labels_from_memory_pack(memory_pack)
+    if planning_run_context is not None:
+        context_labels.extend(planning_run_context.source_labels())
     compute_guard = ComputePlacementGuard(
         model_registry=model_registry,
         privacy_mode=settings.privacy_mode,
         mode=compute_placement_mode,
-        context_labels=labels_from_memory_pack(memory_pack),
+        context_labels=context_labels,
     )
     try:
         if compute_placement_mode == "enforce":
@@ -227,7 +261,6 @@ async def _execute_dynamic_attempt(
     )
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
     event_bus = event_bus or ExecutionEventBus()
-    planning_run_context = RunContextStore(project_root) if project_root else None
     event_bus.emit(
         "PlanningStarted",
         "开始规划本轮任务",
@@ -248,6 +281,8 @@ async def _execute_dynamic_attempt(
                 run_context=planning_run_context,
                 memory_pack=memory_pack,
                 allow_project_scout=planner_allow_project_scout,
+                routing_input=route_input,
+                recovery_envelope=recovery_envelope,
             )
     except Exception as exc:
         event_bus.emit(
@@ -287,7 +322,7 @@ async def _execute_dynamic_attempt(
     plan_was_normalized = plan is not plan_before_normalize
     execution_contract = normalize_execution_contract(
         plan,
-        "\n".join([raw_user_input, refined.refined_request]),
+        "\n".join([route_input, refined.refined_request]),
         mode=settings.execution_mode,
     )
     gate_decision = apply_pipeline_gate(plan, refined.refined_request)
@@ -304,6 +339,12 @@ async def _execute_dynamic_attempt(
     run_state.model_labels = _model_label_map(
         model_registry,
         [planner_model_id, synthesizer_model_id, *(getattr(task, "model", "") for task in plan.tasks)],
+    )
+    run_state.checkpoint_sink = checkpoint_sink
+    run_state.tool_lifecycle_sink = tool_lifecycle_sink
+    run_state.checkpoint_compatibility = recovery_compatibility_for_plan(
+        plan,
+        execution_mode=settings.execution_mode,
     )
     if planner_placement_decision is not None:
         run_state.emit_event(
@@ -401,7 +442,30 @@ async def _execute_dynamic_attempt(
         )
         return _dynamic_result(message, run_state), audit_plan_review_failure(review)
 
-    factory = AgentFactory(model_registry, mcp_manager)
+    resolved_recovery = RecoveryEnvelope.from_dict(recovery_envelope) if recovery_envelope else None
+    if resolved_recovery is not None:
+        recovery_plan = evaluate_recovery_plan(
+            resolved_recovery,
+            plan,
+            planner_disposition=str(
+                (getattr(plan, "recovery_interface", {}) or {}).get("disposition") or "replan"
+            ),
+            current_compatibility=run_state.checkpoint_compatibility,
+        )
+        run_state.apply_recovery_plan(recovery_plan, envelope=resolved_recovery)
+        if recovery_plan.disposition == "continue_safe" and recovery_plan.blocked_task_ids:
+            run_state.record_checkpoint("plan.accepted")
+            blocked = ", ".join(recovery_plan.blocked_task_ids)
+            message = (
+                "检测到中断任务包含不能自动重放的写入或未知副作用步骤，已停止自动续接。\n"
+                f"阻断任务：{blocked}\n"
+                "请在当前输入框中给出新的要求；后续执行仍会重新经过审批和安全检查。"
+            )
+            return _final_dynamic_result(message, run_state), None
+
+    run_state.record_checkpoint("plan.accepted")
+
+    factory = AgentFactory(model_registry, mcp_manager, workspace_root=project_root)
 
     if plan.route_type == "direct_answer":
         run_state.output_controller.enter_running(reason="direct answer")
@@ -420,13 +484,14 @@ async def _execute_dynamic_attempt(
             hooks,
             run_agent,
             execution_mode=settings.execution_mode,
+            run_state=run_state,
         )
         run_state.output_controller.enter_completed("direct answer completed")
-        return _dynamic_result(output, run_state), None
+        return _final_dynamic_result(output, run_state), None
 
     if plan.route_type == "clarify":
         run_state.output_controller.enter_completed("clarification requested")
-        return _dynamic_result(plan.clarifying_question or "这个问题还需要你补充一点信息。", run_state), None
+        return _final_dynamic_result(plan.clarifying_question or "这个问题还需要你补充一点信息。", run_state), None
 
     if plan.route_type == "single_agent":
         run_state.output_controller.enter_running(reason="single agent")
@@ -447,7 +512,10 @@ async def _execute_dynamic_attempt(
             run_state.output_controller.enter_completed("single agent completed")
         else:
             run_state.output_controller.enter_failed("single agent audit failed")
-        return _dynamic_result(output, run_state), audit
+        result = _dynamic_result(output, run_state)
+        if getattr(audit, "passed", True):
+            result = _final_dynamic_result(output, run_state)
+        return result, audit
 
     if plan.route_type == "multi_agent":
         run_state.output_controller.enter_running(reason="multi agent")
@@ -464,7 +532,7 @@ async def _execute_dynamic_attempt(
                 execution_mode=settings.execution_mode,
                 show_progress=show_plan,
                 attempt=attempt,
-                approval_policy_factory=_full_mode_approval_policy_factory(settings.execution_mode),
+                approval_policy_factory=_supervisor_approval_policy_factory(plan),
             )
         except Exception:
             _record_flywheel_safely(flywheel, run_state)
@@ -475,7 +543,11 @@ async def _execute_dynamic_attempt(
             run_state.output_controller.enter_completed("multi agent completed")
         else:
             run_state.output_controller.enter_failed("multi agent audit failed")
-        return _dynamic_result(format_final_report(output, audit), run_state), audit
+        final_report = format_final_report(output, audit)
+        result = _dynamic_result(final_report, run_state)
+        if getattr(audit, "passed", True):
+            result = _final_dynamic_result(final_report, run_state)
+        return result, audit
 
     run_state.output_controller.enter_failed("unknown route")
     return _dynamic_result("主脑没有给出可执行路线。", run_state), None
@@ -493,15 +565,33 @@ def _resolve_planner_memory_pack(project_root: Path, flywheel: FlywheelStore, ra
 def _dynamic_result(output: str, run_state: PipelineRunState | None) -> DynamicExecutionResult:
     run_context = getattr(run_state, "run_context", None)
     summary = ""
+    tool_dehydration_items: list[dict[str, object]] = []
     if run_context is not None and hasattr(run_context, "render_for_task"):
         try:
             summary = run_context.render_for_task()
         except Exception:
             summary = ""
+    if run_context is not None and hasattr(run_context, "dehydrated_tool_results"):
+        try:
+            tool_dehydration_items = list(run_context.dehydrated_tool_results() or [])
+        except Exception:
+            tool_dehydration_items = []
     event_summary = _render_event_summary(getattr(run_state, "event_bus", None))
     if event_summary:
         summary = "\n\n".join(part for part in [summary, event_summary] if part)
-    return DynamicExecutionResult(str(output or ""), run_context_summary=summary)
+    return DynamicExecutionResult(
+        str(output or ""),
+        run_context_summary=summary,
+        tool_dehydration_items=tool_dehydration_items,
+        recovery_outcome=str(getattr(run_state, "recovery_outcome", "") or ""),
+    )
+
+
+def _final_dynamic_result(output: str, run_state: PipelineRunState | None) -> DynamicExecutionResult:
+    result = _dynamic_result(output, run_state)
+    if run_state is not None:
+        run_state.record_final_ready(str(result))
+    return result
 
 
 def _save_plan_detail(
@@ -535,13 +625,13 @@ def _save_plan_detail(
     return selector
 
 
-def _full_mode_approval_policy_factory(execution_mode: str):
-    if str(execution_mode or "").strip().lower() != "full":
+def _supervisor_approval_policy_factory(plan):
+    if supervisor_route(plan) != "team":
         return None
 
-    from runtime.agent.approval_policy import FullModeApprovalPolicy
+    from runtime.agent.approval_policy import SupervisorApprovalPolicy
 
-    return FullModeApprovalPolicy.from_task
+    return SupervisorApprovalPolicy.from_task
 
 
 def _record_compute_placement_observation(

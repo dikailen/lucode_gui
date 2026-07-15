@@ -6,21 +6,17 @@ from typing import Any
 from planning.planner_schema import PlannerResult
 from runtime.agent.spec import TaskSpec
 from runtime.agent.supervisor import ContextPack, ResourceLease, SupervisorDecision, SupervisorPlanView
-from runtime.config.execution_mode import normalize_execution_mode
+def build_supervisor_plan_view(plan: PlannerResult, *, mode: str = "auto") -> SupervisorPlanView:
+    """Build a read-only supervisor view for a multi-agent plan."""
 
-
-def build_supervisor_plan_view(plan: PlannerResult, *, mode: str = "full") -> SupervisorPlanView:
-    """Build a read-only supervised-full view over the existing plan."""
-
-    normalized_mode = normalize_execution_mode(mode)
-    task_specs = [TaskSpec.from_planned_task(task, mode_hint=normalized_mode) for task in plan.tasks]
+    task_specs = [TaskSpec.from_planned_task(task, mode_hint="auto") for task in plan.tasks]
     leases = _resource_leases_for_tasks(plan.tasks)
     conflicts = _detect_resource_conflicts(leases)
     context_packs = _context_packs_for_tasks(plan.tasks, leases)
     decisions = _decisions_for_conflicts(conflicts)
     notes = _notes_for_view(task_specs, conflicts)
     return SupervisorPlanView(
-        mode=normalized_mode,
+        mode="auto",
         route_type=str(plan.route_type or ""),
         task_specs=task_specs,
         resource_leases=leases,
@@ -31,19 +27,19 @@ def build_supervisor_plan_view(plan: PlannerResult, *, mode: str = "full") -> Su
     )
 
 
-def emit_supervisor_observation(plan: PlannerResult, *, mode: str, event_bus=None) -> SupervisorPlanView | None:
-    """Emit a non-blocking supervisor event for full mode."""
+def emit_supervisor_observation(plan: PlannerResult, *, mode: str = "auto", event_bus=None) -> SupervisorPlanView | None:
+    """Emit a non-blocking supervisor event for a multi-agent plan."""
 
-    normalized_mode = normalize_execution_mode(mode)
-    if normalized_mode != "full" or plan.route_type != "multi_agent":
+    del mode
+    if plan.route_type != "multi_agent":
         return None
-    view = build_supervisor_plan_view(plan, mode=normalized_mode)
+    view = build_supervisor_plan_view(plan)
     if event_bus is not None and hasattr(event_bus, "emit"):
         try:
             event_bus.emit(
                 "SupervisorObservation",
                 _event_message_for_view(view),
-                mode=normalized_mode,
+                mode="auto",
                 agent="supervisor",
                 status="warning" if view.has_conflicts else "completed",
                 payload={

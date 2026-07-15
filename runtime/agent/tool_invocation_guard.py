@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,22 +15,38 @@ class ApprovalToken:
     tool_rule: str
     arguments_hash: str
     task_id: str = ""
+    run_id: str = ""
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
 class ToolInvocation:
+    invocation_id: str
     tool_name: str
     arguments: str | None
     tool_rule: str
     approval_token: ApprovalToken
+    side_effect_class: str = "unknown"
 
 
 class ToolInvocationGuard:
     """Run-local approval state for concrete tool invocations."""
 
-    def __init__(self, *, approval_policy=None, task_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        approval_policy=None,
+        task_id: str = "",
+        run_id: str = "",
+        attempt: int = 1,
+        lifecycle_sink=None,
+    ) -> None:
         self.approval_policy = approval_policy
         self.task_id = str(task_id or getattr(approval_policy, "task_id", "") or "")
+        self.run_id = str(run_id or "")
+        self.attempt = max(0, int(attempt))
+        self.lifecycle_sink = lifecycle_sink
+        self._lifecycle_prepared_invocation_ids: set[str] = set()
         self._once_approved_tokens: set[str] = set()
         self._approved_tools_for_session: set[str] = set()
         self._approved_tool_rules: set[str] = set()
@@ -42,14 +59,38 @@ class ToolInvocationGuard:
             arguments,
             tool_rule=rule,
             task_id=self.task_id,
+            run_id=self.run_id,
+            attempt=self.attempt,
             scope="once",
         )
-        return ToolInvocation(
+        try:
+            from runtime.tools.registry import classify_tool_side_effect
+
+            side_effect_class = classify_tool_side_effect(name)
+        except Exception:
+            side_effect_class = "unknown"
+        invocation = ToolInvocation(
+            invocation_id=f"invocation_{uuid.uuid4().hex}",
             tool_name=name,
             arguments=arguments,
             tool_rule=rule,
             approval_token=token,
+            side_effect_class=side_effect_class,
         )
+        sink = self.lifecycle_sink
+        if sink is not None:
+            try:
+                prepared = sink.prepare(invocation, task_id=self.task_id, attempt=self.attempt)
+            except Exception:
+                prepared = False
+            if prepared is True:
+                self._lifecycle_prepared_invocation_ids.add(invocation.invocation_id)
+        return invocation
+
+    def lifecycle_prepare_succeeded(self, invocation: ToolInvocation) -> bool:
+        if self.lifecycle_sink is None:
+            return True
+        return invocation.invocation_id in self._lifecycle_prepared_invocation_ids
 
     def decide_policy(self, invocation: ToolInvocation):
         if self.approval_policy is None:
@@ -83,6 +124,8 @@ def build_approval_token(
     *,
     tool_rule: str = "",
     task_id: str = "",
+    run_id: str = "",
+    attempt: int = 0,
     scope: str = "once",
 ) -> ApprovalToken:
     name = str(tool_name or "")
@@ -90,7 +133,11 @@ def build_approval_token(
     args_hash = canonical_arguments_hash(arguments)
     clean_scope = str(scope or "once")
     clean_task_id = str(task_id or "")
-    token_material = "\0".join(["lucode_approval_v1", clean_scope, clean_task_id, name, rule, args_hash])
+    clean_run_id = str(run_id or "")
+    clean_attempt = max(0, int(attempt))
+    token_material = "\0".join(
+        ["lucode_approval_v2", clean_scope, clean_run_id, str(clean_attempt), clean_task_id, name, rule, args_hash]
+    )
     token_id = hashlib.sha256(token_material.encode("utf-8")).hexdigest()
     return ApprovalToken(
         scope=clean_scope,
@@ -99,6 +146,8 @@ def build_approval_token(
         tool_rule=rule,
         arguments_hash=args_hash,
         task_id=clean_task_id,
+        run_id=clean_run_id,
+        attempt=clean_attempt,
     )
 
 

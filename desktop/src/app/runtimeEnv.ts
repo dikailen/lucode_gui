@@ -4,7 +4,9 @@ declare global {
   interface Window {
     lucodeRuntime?: RuntimeConfig;
     lucodeDesktop?: {
-      droppedFilePaths?: (files: File[] | FileList) => string[];
+      choosePluginSource?: (kind: "skill" | "mcp" | "package") => Promise<string>;
+      chooseAttachmentFiles?: () => Promise<string[]>;
+      droppedFilePath?: (file: File) => string;
     };
     lucodeTerminal?: DesktopTerminalBridge;
     lucodeBrowser?: DesktopBrowserBridge;

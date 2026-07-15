@@ -135,6 +135,7 @@ class PipelineRunState:
     model_labels: dict[str, str] = field(default_factory=dict)
     memory_pack: Any | None = None
     worker_reports: list[Any] = field(default_factory=list)
+    worker_context_observations: list[Any] = field(default_factory=list)
     timeline: RunTimeline | None = None
     evidence_mode: str = "off"
     evidence_claims: list[Any] = field(default_factory=list)
@@ -145,6 +146,14 @@ class PipelineRunState:
     compute_placement_decisions: list[Any] = field(default_factory=list)
     project_root: Path | None = None
     skill_usage_tracker: SkillUsageTracker | None = None
+    checkpoint_sink: Any | None = None
+    tool_lifecycle_sink: Any | None = None
+    checkpoint_compatibility: dict[str, Any] = field(default_factory=dict)
+    recovery_plan: Any | None = None
+    recovery_envelope: Any | None = None
+    recovery_reused_outputs: dict[str, str] = field(default_factory=dict)
+    recovered_accepted_evidence: dict[str, Any] = field(default_factory=dict)
+    recovery_outcome: str = ""
 
     @classmethod
     def create(
@@ -239,6 +248,7 @@ class PipelineRunState:
             task_id=str(getattr(task, "id", "") or ""),
             status="completed",
         )
+        self.record_checkpoint("task.terminal")
 
     def record_task_error(self, task: PlannedTask, error: Exception | str) -> None:
         self._timeline_record_task_failed(task, error)
@@ -257,6 +267,7 @@ class PipelineRunState:
             status="failed",
             payload={"reason": message[:200]},
         )
+        self.record_checkpoint("task.terminal")
 
     def record_fast_path_used(self, task: PlannedTask, *, tool: str, action: str) -> None:
         self._timeline_record_fast_path_used(task, tool=tool, action=action)
@@ -297,8 +308,22 @@ class PipelineRunState:
                 "decisions": [_object_to_dict(item) for item in self.compute_placement_decisions],
             },
             "worker_reports": [_worker_report_to_dict(report) for report in self.worker_reports],
+            "worker_context_observations": [
+                _object_to_dict(item) for item in self.worker_context_observations
+            ],
             "output": self.output_controller.snapshot().to_dict(),
         }
+
+    def record_worker_context_observation(self, observation: Any) -> None:
+        payload = _object_to_dict(observation)
+        self.worker_context_observations.append(observation)
+        self.emit_event(
+            "WorkerContextObserved",
+            f"worker context observed: {payload.get('budget_mode') or 'normal'}",
+            task_id=str(payload.get("task_id") or ""),
+            status="completed",
+            payload=payload,
+        )
 
     def record_evidence_gate_result(self, result: Any) -> None:
         self.evidence_mode = str(getattr(result, "mode", "") or "off")
@@ -311,6 +336,85 @@ class PipelineRunState:
             self.accepted_evidence = accepted_evidence_packet(result)
         except Exception:
             self.accepted_evidence = {}
+        self.accepted_evidence = _merge_accepted_evidence_packets(
+            self.recovered_accepted_evidence,
+            self.accepted_evidence,
+        )
+        self.record_checkpoint("evidence.accepted")
+
+    def record_checkpoint(self, kind: str, *, final_output: str = ""):
+        sink = self.checkpoint_sink
+        if sink is None:
+            return None
+        try:
+            from runtime.recovery.checkpoint_codec import encode_pipeline_checkpoint
+
+            payload = encode_pipeline_checkpoint(self, final_output=final_output)
+            return sink(str(kind or ""), payload, dict(self.checkpoint_compatibility or {}))
+        except Exception as exc:
+            self.emit_event(
+                "RecoveryCheckpointFailed",
+                str(exc) or exc.__class__.__name__,
+                agent="runtime",
+                status="warning",
+                payload={"kind": str(kind or ""), "reason": str(exc)[:240]},
+            )
+            return None
+
+    def record_final_ready(self, final_output: str):
+        return self.record_checkpoint("final.ready", final_output=str(final_output or ""))
+
+    def apply_recovery_plan(self, decision: Any, *, envelope: Any) -> None:
+        self.recovery_plan = decision
+        self.recovery_envelope = envelope
+        self.recovery_reused_outputs = dict(getattr(decision, "reused_outputs", {}) or {})
+        checkpoint = getattr(envelope, "checkpoint", {}) if envelope is not None else {}
+        packet = checkpoint.get("accepted_evidence") if isinstance(checkpoint, dict) else {}
+        self.recovered_accepted_evidence = dict(packet or {}) if isinstance(packet, dict) else {}
+        disposition = str(getattr(decision, "disposition", "") or "")
+        if disposition != "continue_safe":
+            self.recovery_outcome = "superseded"
+            return
+        try:
+            from runtime.evidence.gate import recovery_reconciliation_evidence_packet
+
+            reconciled_packet = recovery_reconciliation_evidence_packet(
+                envelope,
+                reusable_task_ids=tuple(getattr(decision, "reusable_task_ids", ()) or ()),
+            )
+            self.recovered_accepted_evidence = _merge_accepted_evidence_packets(
+                self.recovered_accepted_evidence,
+                reconciled_packet,
+            )
+        except Exception:
+            # A failed evidence render must not transform a blocked mutation into accepted fact.
+            pass
+        self.recovery_outcome = "blocked" if tuple(getattr(decision, "blocked_task_ids", ()) or ()) else "completed"
+        for task_id in tuple(getattr(decision, "reusable_task_ids", ()) or ()):
+            record = self._find_task(str(task_id))
+            if record is None:
+                continue
+            record.status = "completed"
+            record.error = ""
+            record.output_preview = _preview(self.recovery_reused_outputs.get(str(task_id), ""))
+            self.emit_event(
+                "TaskReused",
+                f"reused accepted evidence for {task_id}",
+                task_id=str(task_id),
+                agent="runtime",
+                status="completed",
+                payload={"source": "accepted_recovery_evidence"},
+            )
+        self.accepted_evidence = _merge_accepted_evidence_packets(
+            self.recovered_accepted_evidence,
+            self.accepted_evidence,
+        )
+
+    def reused_task_output(self, task_id: str) -> str:
+        return str(self.recovery_reused_outputs.get(str(task_id or ""), "") or "")
+
+    def task_is_reused(self, task_id: str) -> bool:
+        return bool(self.reused_task_output(task_id))
 
     def record_compute_placement_result(self, result: Any) -> None:
         self.compute_placement_mode = str(getattr(result, "mode", "") or "off")
@@ -687,6 +791,42 @@ def _object_to_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     return dict(getattr(value, "__dict__", {}) or {})
+
+
+def _merge_accepted_evidence_packets(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    old = dict(previous or {}) if isinstance(previous, dict) else {}
+    new = dict(current or {}) if isinstance(current, dict) else {}
+    if not old:
+        return new
+    if not new:
+        return old
+    old_mode = str(old.get("mode") or "off")
+    new_mode = str(new.get("mode") or "off")
+    return {
+        "mode": new_mode if new_mode != "off" else old_mode,
+        "claims": _merge_packet_items(old.get("claims"), new.get("claims"), key="claim_id"),
+        "evidence": _merge_packet_items(old.get("evidence"), new.get("evidence"), key="ref_id"),
+        "blocked_claims": _merge_packet_items(
+            old.get("blocked_claims"),
+            new.get("blocked_claims"),
+            key="claim_id",
+        ),
+    }
+
+
+def _merge_packet_items(previous: Any, current: Any, *, key: str) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in [*list(previous or []), *list(current or [])]:
+        if not isinstance(item, dict):
+            continue
+        identity = str(item.get(key) or "")
+        if not identity:
+            continue
+        if identity not in merged:
+            order.append(identity)
+        merged[identity] = dict(item)
+    return [merged[identity] for identity in order]
 
 
 def _gate_to_dict(decision: GateDecision) -> dict[str, Any]:

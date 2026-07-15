@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 
+import { resolveDroppedFilePath } from "./filePicker.js";
+
 function argValue(name: string): string {
   const prefix = `--${name}=`;
   const match = process.argv.find((item) => item.startsWith(prefix));
@@ -14,16 +16,14 @@ contextBridge.exposeInMainWorld("lucodeRuntime", {
 });
 
 contextBridge.exposeInMainWorld("lucodeDesktop", {
-  droppedFilePaths(files: File[] | FileList): string[] {
-    return Array.from(files || [])
-      .map((file) => {
-        try {
-          return webUtils.getPathForFile(file);
-        } catch {
-          return "";
-        }
-      })
-      .filter((item) => item.length > 0);
+  choosePluginSource(kind: "skill" | "mcp" | "package") {
+    return ipcRenderer.invoke("lucode-desktop:choose-plugin-source", kind);
+  },
+  chooseAttachmentFiles(): Promise<string[]> {
+    return ipcRenderer.invoke("lucode-desktop:choose-attachments");
+  },
+  droppedFilePath(file: File): string {
+    return resolveDroppedFilePath(file, (item) => webUtils.getPathForFile(item));
   },
 });
 

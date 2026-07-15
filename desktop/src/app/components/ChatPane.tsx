@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useMemo, useState } from "react";
+import { DragEvent, FormEvent, KeyboardEvent, useMemo, useState } from "react";
 
 import {
   activeSessionTitle,
@@ -16,18 +16,24 @@ import type { Translator } from "../i18n";
 import { displayModelNameForModel } from "../modelDisplay";
 import { runtimeToastItems } from "../runtimeActivity";
 import type { RightDockWindowTool } from "../useLucodeApp";
+import type { AttachmentDraft } from "../attachmentDrafts";
 import { MarkdownContent } from "./MarkdownContent";
 import { RuntimeToastStack } from "./RuntimeToastStack";
 import { WorkAreaPanel } from "./WorkAreaPanel";
-import type { ChatMessage, ModelSettingsResponse } from "../../shared/types";
+import type { ChatMessage, ModelSettingsModel, ModelSettingsResponse } from "../../shared/types";
 
 export type ChatPaneProps = {
   t: Translator;
   state: AppState;
   input: string;
+  attachmentDrafts: AttachmentDraft[];
+  runStarting: boolean;
   runtimeError: string;
   modelSettings: ModelSettingsResponse | null;
   setInput: (value: string) => void;
+  chooseAttachments: () => void;
+  addDroppedAttachments: (files: FileList | File[]) => void;
+  removeAttachment: (attachmentId: string) => void;
   submit: (event: FormEvent) => void;
   stopRun: () => void;
   bottomShellOpen: boolean;
@@ -38,15 +44,21 @@ export type ChatPaneProps = {
   toggleBottomShell: () => void;
   openSettings: () => void;
   updateRoleModel: (role: string, modelId: string) => void;
+  updateModelReasoningEffort: (modelId: string, effort: string) => void;
 };
 
 export function ChatPane({
   t,
   state,
   input,
+  attachmentDrafts,
+  runStarting,
   runtimeError,
   modelSettings,
   setInput,
+  chooseAttachments,
+  addDroppedAttachments,
+  removeAttachment,
   submit,
   stopRun,
   bottomShellOpen,
@@ -57,8 +69,11 @@ export function ChatPane({
   toggleBottomShell,
   openSettings,
   updateRoleModel,
+  updateModelReasoningEffort,
 }: ChatPaneProps) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [attachmentDragActive, setAttachmentDragActive] = useState(false);
+  const composerBusy = state.runStatus === "running" || runStarting;
   const stage = runStageMeta(state, t);
   const visibleEvents = recentRunEvents(state);
   const toastItems = runtimeToastItems(state);
@@ -78,6 +93,7 @@ export function ChatPane({
   const activeTurn = turns.find((turn) => turn.id === activeTurnId);
   const configuredModels = useMemo(() => modelSettings?.models.filter((model) => model.configured) ?? [], [modelSettings]);
   const orchestratorRole = modelSettings?.roles.find((role) => role.role === "orchestrator");
+  const selectedOrchestratorModel = configuredModels.find((model) => model.id === orchestratorRole?.selected_model_id);
   const showThinking =
     state.runStatus === "running" &&
     !snapshot &&
@@ -91,6 +107,14 @@ export function ChatPane({
     }
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  function handleComposerDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setAttachmentDragActive(false);
+    if (!composerBusy && event.dataTransfer.files.length) {
+      addDroppedAttachments(event.dataTransfer.files);
+    }
   }
 
   return (
@@ -166,16 +190,55 @@ export function ChatPane({
       {runtimeError ? <div className="runtime-error">{runtimeError}</div> : null}
 
       <form className="composer" onSubmit={submit}>
-        <div className="composer-shell">
+        <div
+          className={[
+            "composer-shell",
+            attachmentDrafts.length ? "has-attachments" : "",
+            attachmentDragActive ? "attachment-drag-active" : "",
+          ].filter(Boolean).join(" ")}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            if (!composerBusy) setAttachmentDragActive(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={() => setAttachmentDragActive(false)}
+          onDrop={handleComposerDrop}
+        >
+          {attachmentDrafts.length ? (
+            <div className="composer-attachment-tray" aria-label={t("chat.attachments")}>
+              {attachmentDrafts.map((attachment) => (
+                <span className="composer-attachment-chip" key={attachment.id} title={attachment.name}>
+                  <span>{attachment.name}</span>
+                  <button
+                    type="button"
+                    aria-label={t("chat.removeAttachment", { name: attachment.name })}
+                    onClick={() => removeAttachment(attachment.id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={handleComposerKeyDown}
+            readOnly={runStarting}
             placeholder={t("chat.placeholder")}
             rows={3}
           />
           <div className="composer-footer">
-            <span />
+            <button
+              className="composer-attachment-button"
+              type="button"
+              disabled={composerBusy}
+              onClick={chooseAttachments}
+              title={t("chat.attachFile")}
+            >
+              <span aria-hidden="true">+</span>
+              {t("chat.attachFile")}
+            </button>
             <div className="composer-actions">
               {state.runStatus === "running" ? (
                 <button className="stop-button" type="button" onClick={stopRun}>
@@ -194,6 +257,13 @@ export function ChatPane({
                 {modelMenuOpen ? (
                   <div className="model-popover" role="menu">
                     <div className="model-popover-title">{t("chat.chooseOrchestrator")}</div>
+                    {selectedOrchestratorModel?.reasoning_effort_levels.length ? (
+                      <ReasoningEffortSelect
+                        t={t}
+                        model={selectedOrchestratorModel}
+                        onChange={updateModelReasoningEffort}
+                      />
+                    ) : null}
                     {configuredModels.length === 0 ? (
                       <div className="model-popover-empty">{t("chat.noModels")}</div>
                     ) : (
@@ -218,14 +288,25 @@ export function ChatPane({
                   </div>
                 ) : null}
               </div>
-              <button className="send-circle-button" type="submit" disabled={!input.trim() || state.runStatus === "running"} aria-label={t("chat.send")}>
-                &gt;
+              <button className="send-circle-button" type="submit" disabled={!input.trim() || composerBusy} aria-label={t("chat.send")}>
+                ↑
               </button>
             </div>
           </div>
         </div>
       </form>
     </section>
+  );
+}
+
+function ReasoningEffortSelect({ t, model, onChange }: { t: Translator; model: ModelSettingsModel; onChange: (modelId: string, effort: string) => void }) {
+  return (
+    <label className="composer-reasoning-control">
+      <span>{t("chat.reasoningEffort")}</span>
+      <select value={model.selected_reasoning_effort || "auto"} onChange={(event) => onChange(model.id, event.target.value)}>
+        {model.reasoning_effort_levels.map((effort) => <option key={effort} value={effort}>{t(`chat.reasoning.${effort}` as Parameters<Translator>[0])}</option>)}
+      </select>
+    </label>
   );
 }
 
@@ -275,6 +356,7 @@ function ErrorRecoveryPanel({ t, reason, openSettings }: { t: Translator; reason
 
 function MessageBubble({ t, message }: { t: Translator; message: ChatMessage }) {
   const isAssistant = message.role === "assistant";
+  const attachments = messageAttachmentItems(message.metadata);
   return (
     <article className={`message ${message.role} ${message.status || ""}`}>
       {!isAssistant || message.status === "streaming" ? (
@@ -299,8 +381,49 @@ function MessageBubble({ t, message }: { t: Translator; message: ChatMessage }) 
           )
         )}
       </div>
+      {attachments.length ? (
+        <div className="message-attachment-list" aria-label={t("chat.attachments")}>
+          {attachments.map((attachment, index) => (
+            <span className="message-attachment" key={`${message.id}_attachment_${index}`} title={attachment.name}>
+              <span>{attachment.name}</span>
+              {attachment.sizeBytes > 0 ? <small>{formatAttachmentSize(attachment.sizeBytes)}</small> : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </article>
   );
+}
+
+function messageAttachmentItems(metadata: ChatMessage["metadata"]): Array<{ name: string; sizeBytes: number }> {
+  const value = metadata?.attachments;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    if (!name) {
+      return [];
+    }
+    return [{
+      name,
+      sizeBytes: typeof record.size_bytes === "number" ? record.size_bytes : 0,
+    }];
+  });
+}
+
+function formatAttachmentSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function roleLabel(t: Translator, role: "user" | "assistant" | "system"): string {

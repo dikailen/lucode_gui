@@ -4,8 +4,9 @@ from catalog_system.model_catalog import ModelRegistry
 from planning.planner_schema import PlannedTask
 from runtime.capabilities.resolver import CapabilityResolver
 from runtime.common.text_utils import sanitize_text
-from runtime.agents.sdk import agent_class
+from runtime.agents.sdk import agent_class, model_settings_with_reasoning
 from skills.loader import load_skill, skill_runtime_metadata
+from runtime.config.model_effort import reasoning_effort_levels, selected_reasoning_effort
 
 
 MAX_BOUND_SKILL_BODIES = 2
@@ -15,10 +16,21 @@ MAX_BOUND_SKILL_BODY_CHARS = 6000
 class AgentFactory:
     """Create temporary execution Agents from planner tasks."""
 
-    def __init__(self, model_registry: ModelRegistry, mcp_manager, capability_resolver=None):
+    def __init__(self, model_registry: ModelRegistry, mcp_manager, capability_resolver=None, workspace_root=None):
         self.model_registry = model_registry
         self.mcp_manager = mcp_manager
         self.capability_resolver = capability_resolver or CapabilityResolver()
+        self.workspace_root = workspace_root
+
+    def _agent_kwargs(self, model_id: str) -> dict:
+        try:
+            model_info = self.model_registry.get_model_info(model_id)
+        except Exception:
+            return {}
+        if not reasoning_effort_levels(model_info):
+            return {}
+        effort = selected_reasoning_effort(workspace_root=self.workspace_root, model_id=model_id)
+        return {"model_settings": model_settings_with_reasoning(effort)} if effort != "auto" else {}
 
     def _configured_model_label(self, model_id: str) -> str:
         try:
@@ -84,7 +96,27 @@ class AgentFactory:
             instructions=instructions,
             model=model,
             mcp_servers=servers,
+            **self._agent_kwargs(task.model),
         )
+
+    def worker_context_budget(self, task: PlannedTask, execution_mode: str = "") -> dict:
+        """Return the task-specific MCP instruction text used for budget observation."""
+
+        capability_binding = self.capability_resolver.resolve_task(task)
+        tool_context = sanitize_text(
+            self._capability_context(capability_binding)
+            + self._tool_budget(task, capability_binding=capability_binding, execution_mode=execution_mode)
+            + self._tool_rules(task, capability_binding=capability_binding)
+        )
+        try:
+            model_info = dict(self.model_registry.get_model_info(task.model) or {})
+        except Exception:
+            model_info = {}
+        return {
+            "mcp_ids": list(getattr(capability_binding, "mcp", []) or []),
+            "tool_context": tool_context,
+            "model_info": model_info,
+        }
 
     def _task_instructions(
         self,
@@ -138,12 +170,8 @@ class AgentFactory:
         return "\n".join(lines)
 
     def _role_contract_for_mode(self, execution_mode: str = "") -> str:
-        mode = str(execution_mode or "").strip().lower()
-        if mode == "full":
-            return load_skill("full_worker_contract") + "\n\n"
-        if mode == "serial":
-            return load_skill("serial_executor_contract") + "\n\n"
-        return ""
+        del execution_mode
+        return load_skill("worker_contract") + "\n\n"
 
     def inline_direct_answer_instruction(self, task: PlannedTask) -> str:
         """Instruction for readonly inline-context tasks that still belong to a resolved skill."""
@@ -297,25 +325,6 @@ class AgentFactory:
             )
         if "web_search" not in task_mcp and not remote_lookup:
             if "code_locator" in task_mcp and "project_filesystem_readonly" in task_mcp:
-                if str(execution_mode or "").strip().lower() == "full":
-                    command_budget = ""
-                    if "command_runner" in task_mcp:
-                        command_budget = (
-                            "\n"
-                            "- `run_command` 最多调用 1 次；命令返回后必须立即根据结果给出结论。\n"
-                            "- 如果审批不可用或被拒绝，不要重复请求同一命令。\n"
-                        )
-                    return (
-                        "\n\n## 本次工具预算\n"
-                        "- 任务图主管策略：可以先在内部判断读取顺序，但用户可见最终输出只写已经拿到的事实、摘要和限制。\n"
-                        "- `locate_code` 最多调用 1 次。\n"
-                        "- `get_file_outline` 最多调用 1 次。\n"
-                        "- `read_file` / `read_multiple_files` 合计最多 4 次；读取到足够上下文后停止。\n"
-                        "- 真正超出基础预算时由主管评估是否启用主管扩容，扩容后必须把关键片段和结论共享给后续 Agent。\n"
-                        "- 拿到目标文件或关键片段后必须直接总结，不要继续搜索相邻文件或请求更多预算。\n"
-                        "- 如果预算仍不足以覆盖全文，明确说明只完成了部分分析，不要把部分结论伪装成全文结论。"
-                        + command_budget
-                    )
                 command_budget = ""
                 if "command_runner" in task_mcp:
                     command_budget = (
@@ -323,14 +332,14 @@ class AgentFactory:
                         "- `run_command` 最多调用 1 次；命令返回后必须立刻根据结果给出结论。\n"
                         "- 如果用户拒绝审批或审批不可用，不要重复请求同一命令。"
                     )
+                del execution_mode
                 return (
                     "\n\n## 本次工具预算\n"
+                    "- 任务图主管策略：可以先在内部判断读取顺序，但用户可见最终输出只写已经拿到的事实、摘要和限制。\n"
                     "- `locate_code` 最多调用 1 次。\n"
                     "- `get_file_outline` 最多调用 1 次。\n"
-                    "- 文件读取前必须先说明要读哪些文件以及为什么。\n"
-                    "- 如果目标文件过大，先获取文件信息，再用 locate_code/search_files 定位关键词，"
-                    "按相关片段分段读取；不要为了完整性反复读取整份大文件。\n"
-                    "- `read_file` / `read_multiple_files` 合计最多 2 次；读取到足够上下文后停止。"
+                    "- `read_file` / `read_multiple_files` 合计最多 4 次；读取到足够上下文后停止。\n"
+                    "- 真正超出基础预算时由主管评估是否启用主管扩容，扩容后必须把关键片段和结论共享给后续 Agent。\n"
                     "- 拿到目标文件或关键片段后必须直接总结，不要继续搜索相邻文件或请求更多预算。"
                     "- 如果预算不足以覆盖全文，明确说明只完成了部分分析，不要把部分结论伪装成全文结论。"
                     + command_budget
@@ -444,8 +453,7 @@ class AgentFactory:
         return "\n".join(lines) + "\n"
 
     def _worker_report_contract(self, task: PlannedTask, execution_mode: str = "") -> str:
-        if str(execution_mode or "").strip().lower() != "full":
-            return ""
+        del task, execution_mode
         return (
             "\n## WorkerReport\n"
             "受主管调度的任务图中，请在最终回答末尾保留一个简短的 Markdown WorkerReport 块，供主管收口审查：\n"
@@ -473,6 +481,7 @@ class AgentFactory:
             name="direct_answer_agent",
             instructions=sanitize_text(instructions),
             model=self.model_registry.get_model(model_id),
+            **self._agent_kwargs(model_id),
         )
 
     def _direct_answer_mode_context(self, execution_mode: str = "") -> str:
@@ -485,28 +494,6 @@ class AgentFactory:
             "如果系统没有提供当前配置的模型名，不要猜测底层模型品牌。\n\n"
         )
 
-    def create_solo_agent(self, model_id: str, mcp_servers=None):
-        servers = list(mcp_servers or [])
-        if servers:
-            model_info = self.model_registry.get_model_info(model_id)
-            if not model_info.get("supports_tools", True):
-                raise ValueError(
-                    "当前快速单 Agent 需要 MCP 工具，但所选模型不支持 tools/function calling："
-                    f"{model_id}（{model_info.get('model_name') or '未知模型名'}）。"
-                    "请换用支持工具调用的模型，或不要为本次任务挂载 MCP 工具。"
-                )
-        Agent = agent_class()
-        return Agent(
-            name="solo_agent",
-            instructions=sanitize_text(
-                load_skill("solo_executor_contract")
-                + "\n\n"
-                + self._current_model_identity_context(model_id, "快速单 Agent")
-            ),
-            model=self.model_registry.get_model(model_id),
-            mcp_servers=servers,
-        )
-
     def create_synthesizer_agent(self, model_id: str, run_workspace_server):
         Agent = agent_class()
         return Agent(
@@ -514,17 +501,19 @@ class AgentFactory:
             instructions=sanitize_text(load_skill("final_synthesizer")),
             model=self.model_registry.get_model(model_id),
             mcp_servers=[run_workspace_server],
+            **self._agent_kwargs(model_id),
         )
 
     def create_supervisor_agent(self, model_id: str, readonly_servers=None):
         Agent = agent_class()
         return Agent(
-            name="full_supervisor_agent",
+            name="execution_supervisor_agent",
             instructions=sanitize_text(
-                load_skill("full_supervisor")
+                load_skill("execution_supervisor")
                 + "\n\n"
                 + self._current_model_identity_context(model_id, "主管 Agent")
             ),
             model=self.model_registry.get_model(model_id),
             mcp_servers=list(readonly_servers or []),
+            **self._agent_kwargs(model_id),
         )

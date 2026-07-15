@@ -53,8 +53,8 @@ class SupervisorApprovalRequest:
     reason: str = ""
 
 
-class FullModeApprovalPolicy:
-    """Supervisor-scoped auto approval for planned full-mode tool calls."""
+class SupervisorApprovalPolicy:
+    """Supervisor-scoped approval for planned team-route tool calls."""
 
     def __init__(
         self,
@@ -82,7 +82,7 @@ class FullModeApprovalPolicy:
         self.acceptance_criteria = [str(item or "") for item in list(acceptance_criteria or []) if str(item or "")]
 
     @classmethod
-    def from_task(cls, task) -> "FullModeApprovalPolicy":
+    def from_task(cls, task) -> "SupervisorApprovalPolicy":
         return cls(
             task_id=str(getattr(task, "id", "") or ""),
             mcp=list(getattr(task, "mcp", []) or []),
@@ -109,7 +109,7 @@ class FullModeApprovalPolicy:
             return self._decide_command(parsed)
         if _is_read_tool(name):
             if self._allows_read_tool(name):
-                return AutoApprovalDecision(True, "full_supervisor_planned_scope")
+                return AutoApprovalDecision(True, "supervisor_planned_scope")
             return AutoApprovalDecision(False, "read_tool_not_declared")
         return AutoApprovalDecision(False, "tool_not_in_supervisor_policy")
 
@@ -120,7 +120,7 @@ class FullModeApprovalPolicy:
             return AutoApprovalDecision(False, "delete_requires_user")
         touched = _tool_target_paths(tool_name, parsed)
         if touched and self._paths_within_intent(touched, self.write_intent):
-            return AutoApprovalDecision(True, "full_supervisor_planned_scope")
+            return AutoApprovalDecision(True, "supervisor_planned_scope")
         return AutoApprovalDecision(False, "write_path_out_of_scope")
 
     def _decide_workspace_edit_with_supervisor_gate(self, tool_name: str, parsed: dict[str, Any]) -> AutoApprovalDecision:
@@ -239,7 +239,7 @@ def _decide_command_by_analyzer(command: str) -> AutoApprovalDecision:
     if analysis.should_deny or analysis.decision == "deny":
         return AutoApprovalDecision(False, "dangerous_command_requires_user")
     if analysis.decision in {"allow", "allow_limited"}:
-        return AutoApprovalDecision(True, "full_supervisor_command_analyzer")
+        return AutoApprovalDecision(True, "supervisor_command_analyzer")
     return AutoApprovalDecision(False, "command_requires_user")
 
 
@@ -290,7 +290,7 @@ def _workspace_operation(tool_name: str) -> str:
 
 
 def _supervisor_gate_enabled() -> bool:
-    raw = str(os.environ.get("LUCODE_FULL_SUPERVISOR_GATE", "1") or "").strip().lower()
+    raw = str(os.environ.get("LUCODE_SUPERVISOR_GATE", "1") or "").strip().lower()
     return raw not in {"0", "false", "off", "no", "disabled"}
 
 

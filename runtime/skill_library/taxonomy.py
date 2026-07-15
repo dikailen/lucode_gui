@@ -33,13 +33,42 @@ def load_skill_taxonomy(path: Path | None = None) -> SkillTaxonomy:
 def classify_query_by_rules(query: str, taxonomy: SkillTaxonomy) -> list[str]:
     text = str(query or "").casefold()
     scores: dict[str, int] = {}
-    for category_id, keywords in _CATEGORY_KEYWORDS.items():
+    keyword_sets = {
+        **_CATEGORY_KEYWORDS,
+        "programming": ["code", "coding", "software", "project structure", "architecture"],
+        "programming/backend": [*_CATEGORY_KEYWORDS["programming/backend"], "java", "spring", "mybatis"],
+        "documentation": [
+            "documentation", "writing", "editing", "edit text", "humanize", "pptx", "powerpoint", "presentation", "deck",
+        ],
+    }
+    for category_id, keywords in keyword_sets.items():
         if not taxonomy.has_category(category_id):
             continue
         score = sum(1 for keyword in keywords if keyword.casefold() in text)
         if score:
             scores[category_id] = score
-    return [category_id for category_id, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))]
+    if not scores:
+        return []
+    highest_score = max(scores.values())
+    if highest_score == 1:
+        # A lone keyword is only useful when it identifies one unambiguous category.
+        selected = scores if len(scores) == 1 else {}
+    else:
+        minimum_score = max(2, (highest_score * 3 + 4) // 5)
+        selected = {category_id: score for category_id, score in scores.items() if score >= minimum_score}
+    return [category_id for category_id, _ in sorted(selected.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def suggest_categories_for_skill(entry: Any, taxonomy: SkillTaxonomy, *, limit: int = 3) -> list[str]:
+    """Suggest taxonomy categories from Skill metadata without changing it."""
+
+    parts = [
+        str(getattr(entry, "name", "") or ""),
+        str(getattr(entry, "summary", "") or ""),
+        *[str(value) for value in list(getattr(entry, "tags", ()) or ())],
+        *[str(value) for value in list(getattr(entry, "use_when", ()) or ())],
+    ]
+    return classify_query_by_rules("\n".join(part for part in parts if part.strip()), taxonomy)[: max(1, int(limit))]
 
 
 def _flatten_category(raw: dict[str, Any], *, parent: str, categories: dict[str, dict[str, Any]]) -> None:

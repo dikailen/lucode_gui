@@ -3,7 +3,6 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from mcp_servers import apply_full_supervisor_readonly_budget_profile
 from runtime.execution.fast_paths import (
     _can_fast_path_git_diff,
     _can_fast_path_git_status,
@@ -22,6 +21,7 @@ from runtime.execution.task_runner import (
     _max_turns_for_task,
     _readonly_fast_path_result,
     _record_declared_read_set_context,
+    _worker_prompt_with_context_budget,
     _run_agent_kwargs,
     _task_prompt,
     _task_failure_output,
@@ -49,8 +49,12 @@ async def _run_single_agent(
     attempt: int,
 ) -> tuple[str, object]:
     task = plan.tasks[0]
-    _apply_full_supervisor_budget_profile(factory, task, execution_mode)
-    approval_policy = _full_mode_approval_policy_for_task(execution_mode, task)
+    approval_policy = None
+    reused_output = run_state.reused_task_output(str(getattr(task, "id", "") or ""))
+    if reused_output:
+        audit = audit_execution(plan, run_state, reused_output)
+        _record_flywheel_safely(flywheel, run_state, audit)
+        return format_final_report(reused_output, audit), audit
     if show_plan:
         run_state.record_task_started(task)
         _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active=task.title)
@@ -118,10 +122,21 @@ async def _run_single_agent(
                 run_agent,
                 max_turns=4,
                 approval_policy=approval_policy,
-                stream_output=False if show_plan else None,
+                stream_output=True if getattr(run_state, "event_bus", None) is not None else False if show_plan else None,
                 on_delta=_single_task_delta_emitter(run_state, task),
             )
             scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
+            worker_prompt = _worker_prompt_with_context_budget(
+                factory,
+                run_state,
+                task,
+                refined_request,
+                task_instruction=task.instruction,
+                workspace_context=f"{workspace_context}\n\n{inline_context}",
+                shared_context=shared_context,
+                task_memory_pack=task_memory_pack,
+                execution_mode=execution_mode,
+            )
             with dynamic_status(
                 _task_status_label(task),
                 mode=execution_mode,
@@ -130,13 +145,7 @@ async def _run_single_agent(
             ):
                 result = await run_agent(
                     agent,
-                    _task_prompt(
-                        refined_request,
-                        task.instruction,
-                        workspace_context=f"{workspace_context}\n\n{inline_context}",
-                        shared_context=shared_context,
-                        task_memory_pack=task_memory_pack,
-                    ),
+                    worker_prompt,
                     scoped_hooks,
                     **run_agent_kwargs,
                 )
@@ -172,10 +181,21 @@ async def _run_single_agent(
             run_agent,
             max_turns=_max_turns_for_task(task),
             approval_policy=approval_policy,
-            stream_output=False if show_plan else None,
+            stream_output=True if getattr(run_state, "event_bus", None) is not None else False if show_plan else None,
             on_delta=_single_task_delta_emitter(run_state, task),
         )
         scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
+        worker_prompt = _worker_prompt_with_context_budget(
+            factory,
+            run_state,
+            task,
+            refined_request,
+            task_instruction=task.instruction,
+            workspace_context=workspace_context,
+            shared_context=shared_context,
+            task_memory_pack=task_memory_pack,
+            execution_mode=execution_mode,
+        )
         with dynamic_status(
             _task_status_label(task),
             mode=execution_mode,
@@ -184,13 +204,7 @@ async def _run_single_agent(
         ):
             result = await run_agent(
                 agent,
-                _task_prompt(
-                    refined_request,
-                    task.instruction,
-                    workspace_context=workspace_context,
-                    shared_context=shared_context,
-                    task_memory_pack=task_memory_pack,
-                ),
+                worker_prompt,
                 scoped_hooks,
                 **run_agent_kwargs,
             )
@@ -253,10 +267,9 @@ def _single_task_delta_emitter(run_state: PipelineRunState, task):
             return
         try:
             event_bus.emit(
-                "AgentMessageDelta",
+                "FinalAnswerDelta",
                 str(text),
                 agent=str(getattr(task, "id", "") or "worker"),
-                task_id=str(getattr(task, "id", "") or ""),
                 status="streaming",
                 payload={"text": str(text)},
             )
@@ -317,25 +330,6 @@ def _single_shared_context(run_state, task) -> str:
         return run_context.render_for_task(str(getattr(task, "id", "") or ""))
     except Exception:
         return ""
-
-
-def _full_mode_approval_policy_for_task(execution_mode: str, task):
-    if str(execution_mode or "").strip().lower() != "full":
-        return None
-    try:
-        from runtime.agent.approval_policy import FullModeApprovalPolicy
-
-        return FullModeApprovalPolicy.from_task(task)
-    except Exception:
-        return None
-
-
-def _apply_full_supervisor_budget_profile(factory, task, execution_mode: str) -> bool:
-    if str(execution_mode or "").strip().lower() != "full":
-        return False
-    manager = getattr(factory, "mcp_manager", None)
-    mcp_ids = [str(mcp_id) for mcp_id in list(getattr(task, "mcp", []) or []) if str(mcp_id or "").strip()]
-    return apply_full_supervisor_readonly_budget_profile(manager, mcp_ids)
 
 
 async def _create_task_agent(factory, task, *, execution_mode: str = ""):

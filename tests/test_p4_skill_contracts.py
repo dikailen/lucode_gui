@@ -19,8 +19,8 @@ def test_final_synthesizer_contract_mentions_accepted_evidence_only():
 
 
 def test_worker_and_supervisor_contracts_mention_runtime_evidence_binding():
-    worker = _skill_text("full-worker-contract")
-    supervisor = _skill_text("full-supervisor")
+    worker = _skill_text("worker-contract")
+    supervisor = _skill_text("execution-supervisor")
 
     assert "runtime-owned evidence" in worker
     assert "timeline" in worker
@@ -37,13 +37,10 @@ def test_p7_planner_contract_mentions_reliability_fields():
     assert "evidence_requirements" in text
 
 
-def test_p7_executor_contracts_mention_claims_and_evidence_gaps():
-    worker = _skill_text("full-worker-contract")
-    serial = _skill_text("serial-executor-contract")
-    solo = _skill_text("solo-executor-contract")
+def test_worker_contract_mentions_claims_and_evidence_gaps():
+    worker = _skill_text("worker-contract")
 
     assert "claim_id" in worker
     assert "evidence_refs" in worker
-    assert "evidence_requirements" in serial
-    assert "evidence gap" in serial
-    assert "evidence gap" in solo
+    assert "evidence_requirements" in worker
+    assert "evidence gap" in worker

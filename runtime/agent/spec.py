@@ -74,7 +74,7 @@ class TaskSpec:
 
     task_id: str
     goal: str
-    mode_hint: str = "solo"
+    mode_hint: str = "auto"
     read_intent: list[str] = field(default_factory=list)
     write_intent: list[str] = field(default_factory=list)
     toolset_id: str = "general_agent"
@@ -89,7 +89,7 @@ class TaskSpec:
     notes: str = ""
 
     @classmethod
-    def from_planned_task(cls, task, *, mode_hint: str = "solo") -> "TaskSpec":
+    def from_planned_task(cls, task, *, mode_hint: str = "auto") -> "TaskSpec":
         read_intent = _string_list(getattr(task, "read_set", []))
         write_intent = _string_list(getattr(task, "write_intent", []))
         mcp = _string_list(getattr(task, "mcp", []))
@@ -98,7 +98,7 @@ class TaskSpec:
         return cls(
             task_id=str(getattr(task, "id", "") or ""),
             goal=str(getattr(task, "instruction", "") or getattr(task, "title", "") or ""),
-            mode_hint=str(mode_hint or "solo"),
+            mode_hint=str(mode_hint or "auto"),
             read_intent=read_intent,
             write_intent=write_intent,
             toolset_id=toolset_id,
@@ -121,7 +121,7 @@ class TaskSpec:
         return cls(
             task_id=str(data.get("task_id") or ""),
             goal=str(data.get("goal") or ""),
-            mode_hint=str(data.get("mode_hint") or "solo"),
+            mode_hint=str(data.get("mode_hint") or "auto"),
             read_intent=_string_list(data.get("read_intent")),
             write_intent=_string_list(data.get("write_intent")),
             toolset_id=str(data.get("toolset_id") or "general_agent"),

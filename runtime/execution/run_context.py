@@ -30,6 +30,9 @@ class ToolOutputArtifact:
     task_ids: tuple[str, ...] = field(default_factory=tuple)
     evidence_ref: str = ""
     raw_artifact_ref: str = ""
+    key_fields: dict[str, Any] = field(default_factory=dict)
+    omitted_fields: tuple[str, ...] = field(default_factory=tuple)
+    redacted: bool = False
 
 
 @dataclass(frozen=True)
@@ -243,6 +246,9 @@ class RunContextStore:
         task_id: str = "",
         evidence_ref: str = "",
         raw_artifact_ref: str = "",
+        key_fields: dict[str, Any] | None = None,
+        omitted_fields: list[str] | tuple[str, ...] | None = None,
+        redacted: bool = False,
     ) -> ToolOutputArtifact:
         clean_tool = _safe_token(tool or "tool")
         clean_action = _safe_token(action or "output")
@@ -255,6 +261,9 @@ class RunContextStore:
             task_ids=_append_task_id((), task_id),
             evidence_ref=str(evidence_ref or "").strip(),
             raw_artifact_ref=str(raw_artifact_ref or "").strip(),
+            key_fields=dict(key_fields or {}),
+            omitted_fields=tuple(str(field) for field in (omitted_fields or []) if str(field).strip()),
+            redacted=bool(redacted),
         )
         self.tool_outputs.append(artifact)
         if len(self.tool_outputs) > self.max_items:
@@ -273,9 +282,30 @@ class RunContextStore:
                 "tool": clean_tool,
                 "action": clean_action,
                 "artifact_id": artifact.artifact_id,
+                "evidence_ref": artifact.evidence_ref,
+                "raw_artifact_ref": artifact.raw_artifact_ref,
             },
         )
         return artifact
+
+    def dehydrated_tool_results(self) -> list[dict[str, Any]]:
+        """Return persistable tool summaries without raw tool payloads."""
+
+        return [
+            {
+                "artifact_id": artifact.artifact_id,
+                "tool": artifact.tool,
+                "action": artifact.action,
+                "summary": artifact.summary,
+                "key_fields": dict(artifact.key_fields),
+                "evidence_ref": artifact.evidence_ref,
+                "raw_artifact_ref": artifact.raw_artifact_ref,
+                "omitted_fields": list(artifact.omitted_fields),
+                "redacted": artifact.redacted,
+                "task_ids": list(artifact.task_ids),
+            }
+            for artifact in self.tool_outputs[-self.max_items :]
+        ]
 
     def context_envelopes(self):
         from runtime.context.envelope import ContextEnvelope
@@ -424,6 +454,42 @@ class RunContextStore:
                 )
             )
         return labels
+
+
+def seed_inline_files(
+    run_context: RunContextStore | None,
+    project_root: Path,
+    inline_files: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> int:
+    if run_context is None:
+        return 0
+    root = Path(project_root).resolve()
+    recorded = 0
+    for item in list(inline_files or []):
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        candidate_path = Path(raw_path)
+        candidate = candidate_path.resolve() if candidate_path.is_absolute() else (root / candidate_path).resolve()
+        if candidate != root and root not in candidate.parents:
+            continue
+        if not candidate.is_file():
+            continue
+        excerpt = str(item.get("content") or "").strip()
+        try:
+            relative = candidate.relative_to(root).as_posix()
+            run_context.record_file_snapshot(
+                path=candidate,
+                task_id="user_attachment",
+                summary=f"User attachment {relative} staged for this run.",
+                excerpt=excerpt,
+            )
+        except (OSError, ValueError):
+            continue
+        recorded += 1
+    return recorded
 
 
 def _sha256_file(path: Path) -> str:

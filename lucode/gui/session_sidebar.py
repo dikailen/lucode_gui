@@ -341,6 +341,8 @@ class SessionSidebar(QFrame):
             widget.hide()
             if widget is self.empty_label:
                 continue
+            # Remove stale rows from the QObject tree before delayed Qt destruction.
+            widget.setParent(None)
             widget.deleteLater()
 
     def _refresh_session_cache(self) -> None:

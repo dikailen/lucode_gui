@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from runtime.agent.approval_policy import FullModeApprovalPolicy
 from runtime.agent.runner import run_agent_once
 from runtime.agent.tool_invocation_guard import ToolInvocationGuard
 from runtime.agent.tool_invocation_guard import approval_tool_rule as _guard_approval_tool_rule
@@ -28,10 +27,20 @@ async def run_with_approval(
     supervisor_approval_decider=None,
     stream_output: bool | None = None,
     on_delta=None,
+    lifecycle_sink=None,
+    run_id: str = "",
+    task_id: str = "",
+    attempt: int = 1,
 ):
     """Run an agent and ask the user before executing approval-required tools."""
 
-    guard = ToolInvocationGuard(approval_policy=approval_policy)
+    guard = ToolInvocationGuard(
+        approval_policy=approval_policy,
+        task_id=task_id,
+        run_id=run_id,
+        attempt=attempt,
+        lifecycle_sink=lifecycle_sink,
+    )
     result = await run_agent_once(
         agent,
         run_input,
@@ -43,6 +52,7 @@ async def run_with_approval(
 
     while result.interruptions:
         state = result.to_state()
+        approved_invocations = []
 
         for item in result.interruptions:
             tool_name = item.qualified_name or item.name
@@ -62,6 +72,7 @@ async def run_with_approval(
                 reason = supervisor_decision[1]
                 if action == "approve":
                     state.approve(item)
+                    approved_invocations.append(invocation)
                     record_post_tool_use(
                         hooks,
                         pre_event,
@@ -79,6 +90,7 @@ async def run_with_approval(
                 if not rejection_message:
                     rejection_message = "主管未批准该越界工具调用，请缩小范围或请求重新规划。"
                 state.reject(item, rejection_message=rejection_message)
+                _cancel_lifecycle_invocation(lifecycle_sink, invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -89,6 +101,7 @@ async def run_with_approval(
                 continue
             if policy_decision is not None and policy_decision.approve:
                 state.approve(item)
+                approved_invocations.append(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -103,6 +116,7 @@ async def run_with_approval(
                     rejection_message=policy_decision.rejection_message
                     or "主管拒绝了该工具调用，请调整为已声明的工具和命令后继续。",
                 )
+                _cancel_lifecycle_invocation(lifecycle_sink, invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -113,6 +127,7 @@ async def run_with_approval(
                 continue
             if guard.session_approval_allows(invocation):
                 state.approve(item)
+                approved_invocations.append(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -129,6 +144,7 @@ async def run_with_approval(
                         "请根据上一次工具结果直接给出最终回答。"
                     ),
                 )
+                _cancel_lifecycle_invocation(lifecycle_sink, invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -155,6 +171,7 @@ async def run_with_approval(
                     arguments=item.arguments,
                     tool_rule=tool_rule,
                     preview=preview,
+                    invocation_id=invocation.invocation_id,
                 )
             else:
                 try:
@@ -164,6 +181,7 @@ async def run_with_approval(
             if answer in {"yes", "y", "once", "o", "1"}:
                 state.approve(item)
                 guard.mark_once_approved(invocation)
+                approved_invocations.append(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -174,6 +192,7 @@ async def run_with_approval(
             elif answer in {"session", "s", "all", "2"}:
                 state.approve(item)
                 guard.mark_session_tool_approved(invocation)
+                approved_invocations.append(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -184,6 +203,7 @@ async def run_with_approval(
             elif answer in {"rule", "r", "3"}:
                 state.approve(item)
                 guard.mark_session_rule_approved(invocation)
+                approved_invocations.append(invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -199,6 +219,7 @@ async def run_with_approval(
                         "请停止请求写入、删除、命令或提交工具，并给出替代建议。"
                     ),
                 )
+                _cancel_lifecycle_invocation(lifecycle_sink, invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -220,6 +241,7 @@ async def run_with_approval(
                         "用更小范围、更明确、更安全的方式重新提出方案。"
                     ),
                 )
+                _cancel_lifecycle_invocation(lifecycle_sink, invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
@@ -235,12 +257,26 @@ async def run_with_approval(
                         "请停止请求写入、删除、命令或提交工具，并给出替代建议。"
                     ),
                 )
+                _cancel_lifecycle_invocation(lifecycle_sink, invocation)
                 record_post_tool_use(
                     hooks,
                     pre_event,
                     decision="rejected",
                     status="denied",
                     reason="user_denied_or_noninteractive",
+                )
+
+        for approved_invocation in approved_invocations:
+            if (
+                not guard.lifecycle_prepare_succeeded(approved_invocation)
+                or not _dispatch_lifecycle_invocation(lifecycle_sink, approved_invocation)
+            ):
+                _cancel_lifecycle_invocation(lifecycle_sink, approved_invocation)
+                return ApprovalTerminalResult(
+                    final_output=(
+                        "工具执行未开始：无法持久化本次已批准操作的恢复记录。\n"
+                        "为避免中断后重复执行，当前工具调用已停止。请在运行时恢复正常后重新发起请求。"
+                    )
                 )
 
         result = await run_agent_once(
@@ -263,6 +299,7 @@ async def _request_session_approval(
     arguments: str | None,
     tool_rule: str,
     preview: str,
+    invocation_id: str = "",
 ) -> str:
     requester = getattr(session, "request_tool_approval", None)
     if callable(requester):
@@ -272,8 +309,27 @@ async def _request_session_approval(
             arguments=arguments,
             tool_rule=tool_rule,
             preview=preview,
+            invocation_id=str(invocation_id or ""),
         )
     return await session.request_approval(prompt)
+
+
+def _dispatch_lifecycle_invocation(lifecycle_sink, invocation) -> bool:
+    if lifecycle_sink is None:
+        return True
+    try:
+        return lifecycle_sink.mark_dispatched(invocation) is not False
+    except Exception:
+        return False
+
+
+def _cancel_lifecycle_invocation(lifecycle_sink, invocation) -> None:
+    if lifecycle_sink is None:
+        return
+    try:
+        lifecycle_sink.cancel(invocation)
+    except Exception:
+        return
 
 
 async def _decide_with_supervisor_agent(decider, policy_decision, approval_policy, tool_name: str, arguments: str | None):

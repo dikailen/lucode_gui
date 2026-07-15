@@ -75,7 +75,7 @@ def _parse_frontmatter_block(block: str) -> dict[str, Any]:
                 scalar_parts = []
             elif raw_value == "":
                 meta[current_key] = []
-                current_mode = "list"
+                current_mode = "container"
             else:
                 meta[current_key] = _parse_inline_value(raw_value)
                 current_mode = ""
@@ -83,11 +83,21 @@ def _parse_frontmatter_block(block: str) -> dict[str, Any]:
         if not current_key or not line.startswith((" ", "\t")):
             continue
         stripped = line.strip()
-        if current_mode == "list" and stripped.startswith("- "):
+        if current_mode in {"container", "list"} and stripped.startswith("- "):
             value = stripped[2:].strip()
-            meta.setdefault(current_key, [])
+            if not isinstance(meta.get(current_key), list):
+                meta[current_key] = []
             if isinstance(meta[current_key], list):
                 meta[current_key].append(_strip_quotes(value))
+            current_mode = "list"
+            continue
+        mapping_match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.+)$", stripped)
+        if current_mode in {"container", "mapping"} and mapping_match:
+            if not isinstance(meta.get(current_key), dict):
+                meta[current_key] = {}
+            if isinstance(meta[current_key], dict):
+                meta[current_key][mapping_match.group(1).strip()] = _strip_quotes(mapping_match.group(2).strip())
+            current_mode = "mapping"
             continue
         if current_mode == "scalar":
             scalar_parts.append(stripped)

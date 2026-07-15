@@ -29,6 +29,11 @@ class DeltaCoalescer:
             self._template = dict(event)
         self._parts.append(text)
 
+    def accepts(self, event: dict[str, Any]) -> bool:
+        if not self._parts:
+            return True
+        return _delta_stream_key(self._template) == _delta_stream_key(event)
+
     def flush(self) -> dict[str, Any] | None:
         if not self._parts:
             return None
@@ -36,7 +41,6 @@ class DeltaCoalescer:
         text = "".join(self._parts)
         payload = dict(event.get("payload") if isinstance(event.get("payload"), dict) else {})
         payload["text"] = text
-        event["event_type"] = "AgentMessageDelta"
         event["message"] = text
         event["text"] = text
         event["payload"] = payload
@@ -52,7 +56,11 @@ def coalesce_events_for_test(events: list[dict[str, Any]]) -> list[dict[str, Any
     coalescer = DeltaCoalescer()
     out: list[dict[str, Any]] = []
     for event in events:
-        if str(event.get("event_type") or "") == "AgentMessageDelta":
+        if str(event.get("event_type") or "") in {"AgentMessageDelta", "FinalAnswerDelta"}:
+            if not coalescer.accepts(event):
+                flushed = coalescer.flush()
+                if flushed is not None:
+                    out.append(flushed)
             coalescer.push(event)
             continue
         flushed = coalescer.flush()
@@ -80,7 +88,9 @@ class EventBridge(QObject):
     def on_bus_event(self, event) -> None:
         try:
             event_dict = event.to_dict() if hasattr(event, "to_dict") else dict(event)
-            if str(event_dict.get("event_type") or "") == "AgentMessageDelta":
+            if str(event_dict.get("event_type") or "") in {"AgentMessageDelta", "FinalAnswerDelta"}:
+                if not self._coalescer.accepts(event_dict):
+                    self.flush()
                 self._coalescer.push(event_dict)
                 if not self._timer.isActive():
                     self._timer.start()
@@ -96,3 +106,11 @@ class EventBridge(QObject):
             self.event_received.emit(event)
         if not self._coalescer.has_pending() and self._timer.isActive():
             self._timer.stop()
+
+
+def _delta_stream_key(event: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(event.get("event_type") or ""),
+        str(event.get("agent") or ""),
+        str(event.get("task_id") or ""),
+    )

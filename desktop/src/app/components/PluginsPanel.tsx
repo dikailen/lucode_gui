@@ -1,13 +1,16 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from "react";
 
 import type { Translator } from "../i18n";
+import { resolveDroppedFilePaths } from "../localFileDrop";
 import type {
   ComfyUiStateResponse,
   ExternalMcpPayload,
   PluginMcpRow,
   PluginPackage,
   PluginRuntimeCapability,
-  PluginSkill,
+  PluginSkillMetadataProposal,
+  PluginSkillLibraryCategory,
+  PluginSkillLibraryEntry,
   PluginStateResponse,
 } from "../../shared/types";
 
@@ -30,6 +33,9 @@ export type PluginsPanelProps = {
   refreshPluginState: () => void;
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
+  applySkillMetadata: (skillId: string, payload: SkillMetadataPayload) => Promise<boolean>;
+  setSkillEnabled: (skillId: string, enabled: boolean) => Promise<boolean>;
+  reindexSkillLibrary: () => Promise<boolean>;
   installMcp: (path: string) => void;
   installPluginPackage: (path: string) => void;
   deletePluginPackage: (pluginId: string) => void;
@@ -52,6 +58,9 @@ export function PluginsPanel({
   refreshPluginState,
   deleteSkill,
   installSkill,
+  applySkillMetadata,
+  setSkillEnabled,
+  reindexSkillLibrary,
   installMcp,
   installPluginPackage,
   deletePluginPackage,
@@ -64,6 +73,9 @@ export function PluginsPanel({
 }: PluginsPanelProps) {
   const runtimeCapabilities = runtimeCapabilitiesForPlugins(t, pluginState?.runtime_capabilities || []);
   const installedPlugins = pluginState?.installed_plugins || [];
+  const skillLibrary = pluginState?.skill_library || [];
+  const skillLibraryCategories = pluginState?.skill_library_categories || [];
+  const deletableSkillIds = new Set((pluginState?.skills || []).filter((skill) => skill.deletable).map((skill) => skill.id));
   const [comfyUiUrl, setComfyUiUrl] = useState(comfyUiState?.base_url || "http://127.0.0.1:8188");
   const [managedPluginId, setManagedPluginId] = useState("");
 
@@ -102,11 +114,24 @@ export function PluginsPanel({
               </div>
               <div className="runtime-capability-list">
                 {runtimeCapabilities.map((capability) => (
-                  <RuntimeCapabilityCard key={capability.id} t={t} capability={capability} />
+                  <RuntimeCapabilityCard key={capability.id} capability={capability} />
                 ))}
               </div>
             </section>
           ) : null}
+
+          <SkillLibrarySection
+            t={t}
+            entries={skillLibrary}
+            categories={skillLibraryCategories}
+            installing={pluginInstallingTarget === "skills"}
+            onInstall={installSkill}
+            deletableSkillIds={deletableSkillIds}
+            deleteSkill={deleteSkill}
+            applySkillMetadata={applySkillMetadata}
+            setSkillEnabled={setSkillEnabled}
+            reindexSkillLibrary={reindexSkillLibrary}
+          />
 
           <section className="plugin-column plugin-package-column" aria-label={t("plugins.packageList")}>
             <div className="plugin-section-header">
@@ -119,6 +144,7 @@ export function PluginsPanel({
               description={t("plugins.dropPackageDescription")}
               installing={pluginInstallingTarget === "packages"}
               onInstall={installPluginPackage}
+              sourceKind="package"
             />
             <div className="plugin-list">
               {installedPlugins.length ? (
@@ -137,25 +163,6 @@ export function PluginsPanel({
             </div>
           </section>
 
-          <section className="plugin-column" aria-label={t("plugins.skillList")}>
-            <div className="plugin-section-header">
-              <span>{t("plugins.skillList")}</span>
-              <strong>{pluginState.skills.length}</strong>
-            </div>
-            <PluginDropZone
-              t={t}
-              title={t("plugins.dropSkill")}
-              description={t("plugins.dropSkillDescription")}
-              installing={pluginInstallingTarget === "skills"}
-              onInstall={installSkill}
-            />
-            <div className="plugin-list">
-              {pluginState.skills.map((skill) => (
-                <SkillRow key={skill.id} t={t} skill={skill} deleteSkill={deleteSkill} />
-              ))}
-            </div>
-          </section>
-
           <section className="plugin-column mcp-plugin-column" aria-label={t("plugins.mcpList")}>
             <div className="plugin-section-header">
               <span>{t("plugins.mcpList")}</span>
@@ -167,6 +174,7 @@ export function PluginsPanel({
               description={t("plugins.dropMcpDescription")}
               installing={pluginInstallingTarget === "mcp"}
               onInstall={installMcp}
+              sourceKind="mcp"
             />
             <ExternalMcpForm t={t} disabled={pluginInstallingTarget === "mcp"} registerExternalMcp={registerExternalMcp} />
             <div className="plugin-list">
@@ -193,6 +201,413 @@ export function PluginsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function SkillLibrarySection({
+  t,
+  entries,
+  categories,
+  installing,
+  onInstall,
+  deletableSkillIds,
+  deleteSkill,
+  applySkillMetadata,
+  setSkillEnabled,
+  reindexSkillLibrary,
+}: {
+  t: Translator;
+  entries: PluginSkillLibraryEntry[];
+  categories: PluginSkillLibraryCategory[];
+  installing: boolean;
+  onInstall: (path: string) => void;
+  deletableSkillIds: ReadonlySet<string>;
+  deleteSkill: (skillId: string) => void;
+  applySkillMetadata: (skillId: string, payload: SkillMetadataPayload) => Promise<boolean>;
+  setSkillEnabled: (skillId: string, enabled: boolean) => Promise<boolean>;
+  reindexSkillLibrary: () => Promise<boolean>;
+}) {
+  const [query, setQuery] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const [selectedSkillId, setSelectedSkillId] = useState("");
+  const [reindexing, setReindexing] = useState(false);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const availableCategories = categories.filter((category) =>
+    entries.some((entry) => entry.category.some((id) => id === category.id || id.startsWith(`${category.id}/`))),
+  );
+  const filteredEntries = entries.filter((entry) => {
+    const categoryMatches = !categoryId || entry.category.some((id) => id === categoryId || id.startsWith(`${categoryId}/`));
+    if (!categoryMatches) return false;
+    if (!normalizedQuery) return true;
+    const searchable = [entry.id, entry.name, entry.summary, ...entry.tags, ...entry.category].join(" ").toLocaleLowerCase();
+    return searchable.includes(normalizedQuery);
+  });
+  const selectedEntry =
+    filteredEntries.find((entry) => entry.id === selectedSkillId) || filteredEntries[0] || entries.find((entry) => entry.id === selectedSkillId) || entries[0];
+
+  return (
+    <section className="skill-library" aria-label={t("plugins.skillLibrary")}>
+      <div className="skill-library-toolbar">
+        <div className="skill-library-title">
+          <div className="runtime-capability-heading">
+            <span>{t("plugins.skillLibrary")}</span>
+            <small>{t("plugins.skillLibraryDescription")}</small>
+          </div>
+          <strong>{entries.length}</strong>
+        </div>
+        <input
+          className="skill-library-search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={t("plugins.skillLibrarySearch")}
+          aria-label={t("plugins.skillLibrarySearch")}
+        />
+        <div className="skill-library-actions">
+          <div className="skill-library-import">
+            <PluginDropZone
+              t={t}
+              title={t("plugins.skillLibraryImport")}
+              description={t("plugins.dropSkillDescription")}
+              installing={installing}
+              onInstall={onInstall}
+              sourceKind="skill"
+              compact
+              toolbar
+            />
+          </div>
+          <button
+            className="secondary-button compact"
+            type="button"
+            disabled={reindexing}
+            onClick={() => {
+              setReindexing(true);
+              void reindexSkillLibrary().finally(() => setReindexing(false));
+            }}
+          >
+            {reindexing ? t("plugins.skillLibraryReindexing") : t("plugins.skillLibraryReindex")}
+          </button>
+        </div>
+      </div>
+      <nav className="skill-library-categories skill-library-filters" aria-label={t("plugins.skillLibrary")}>
+          <button className={!categoryId ? "skill-library-category active" : "skill-library-category"} type="button" onClick={() => setCategoryId("")}>
+            {t("common.all")}
+          </button>
+          {availableCategories.map((category) => (
+            <button
+              className={categoryId === category.id ? "skill-library-category active" : "skill-library-category"}
+              type="button"
+            key={category.id}
+            title={category.description}
+            onClick={() => setCategoryId(category.id)}
+          >
+              {skillCategoryLabel(t, category)}
+            </button>
+          ))}
+      </nav>
+      <div className="skill-library-layout">
+        <div className="skill-library-list-pane">
+          <div className="skill-library-list">
+            {filteredEntries.length ? (
+              filteredEntries.map((entry) => (
+                <button
+                  className={entry.id === selectedEntry?.id ? "skill-library-entry active" : "skill-library-entry"}
+                  type="button"
+                  key={entry.id}
+                  onClick={() => setSelectedSkillId(entry.id)}
+                >
+                  <strong>{entry.name}</strong>
+                  <span>{entry.summary || entry.id}</span>
+                  <small>{entry.category.join(" / ") || entry.source}</small>
+                </button>
+              ))
+            ) : (
+              <div className="plugin-empty-row">{t("plugins.skillLibraryEmpty")}</div>
+            )}
+          </div>
+        </div>
+        {selectedEntry ? (
+          <SkillLibraryDetail
+            t={t}
+            entry={selectedEntry}
+            deletable={deletableSkillIds.has(selectedEntry.id)}
+            deleteSkill={deleteSkill}
+            applySkillMetadata={applySkillMetadata}
+            setSkillEnabled={setSkillEnabled}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function skillCategoryLabel(t: Translator, category: PluginSkillLibraryCategory): string {
+  const keyById: Record<string, Parameters<Translator>[0]> = {
+    programming: "plugins.skillCategory.programming",
+    "programming/frontend": "plugins.skillCategory.programming.frontend",
+    "programming/backend": "plugins.skillCategory.programming.backend",
+    "programming/agent_loop": "plugins.skillCategory.programming.agent_loop",
+    "programming/testing": "plugins.skillCategory.programming.testing",
+    design: "plugins.skillCategory.design",
+    "design/ui_design": "plugins.skillCategory.design.ui_design",
+    "design/image_generation": "plugins.skillCategory.design.image_generation",
+    "design/comfyui": "plugins.skillCategory.design.comfyui",
+    documentation: "plugins.skillCategory.documentation",
+    "documentation/readme": "plugins.skillCategory.documentation.readme",
+    "documentation/planning": "plugins.skillCategory.documentation.planning",
+    tools: "plugins.skillCategory.tools",
+    "tools/git": "plugins.skillCategory.tools.git",
+    "tools/terminal": "plugins.skillCategory.tools.terminal",
+    "tools/browser": "plugins.skillCategory.tools.browser",
+    mcp: "plugins.skillCategory.mcp",
+    "mcp/integration": "plugins.skillCategory.mcp.integration",
+  };
+  const key = keyById[category.id];
+  return key ? t(key) : category.name;
+}
+
+function SkillLibraryDetail({
+  t,
+  entry,
+  deletable,
+  deleteSkill,
+  applySkillMetadata,
+  setSkillEnabled,
+}: {
+  t: Translator;
+  entry: PluginSkillLibraryEntry;
+  deletable: boolean;
+  deleteSkill: (skillId: string) => void;
+  applySkillMetadata: (skillId: string, payload: SkillMetadataPayload) => Promise<boolean>;
+  setSkillEnabled: (skillId: string, enabled: boolean) => Promise<boolean>;
+}) {
+  const suggestion = entry.suggestion;
+  const suggestedCategories = suggestion.categories || [];
+  const hasSuggestion =
+    (entry.metadata_status !== "ready" && entry.editable_metadata) ||
+    suggestedCategories.length > 0 ||
+    (suggestion.tags || []).length > 0 ||
+    (suggestion.use_when || []).length > 0 ||
+    (suggestion.do_not_use_when || []).length > 0 ||
+    (suggestion.source_count > 0 && (suggestion.negative_queries.length > 0 || Object.keys(suggestion.distinguish_from).length > 0));
+  const usedCount = Number(entry.usage.used_count || 0);
+  const rejectedCount = Number(entry.usage.rejected_by_planner_count || 0);
+  const [editingAdvice, setEditingAdvice] = useState(false);
+  const [savingAdvice, setSavingAdvice] = useState(false);
+  const [updatingEnabled, setUpdatingEnabled] = useState(false);
+  const [categories, setCategories] = useState("");
+  const [tags, setTags] = useState("");
+  const [useWhen, setUseWhen] = useState("");
+  const [doNotUseWhen, setDoNotUseWhen] = useState("");
+  const [negativeQueries, setNegativeQueries] = useState("");
+  const [distinguishFrom, setDistinguishFrom] = useState("");
+  const completionReady = Boolean(categories.trim() && tags.trim() && useWhen.trim() && doNotUseWhen.trim());
+
+  useEffect(() => {
+    setEditingAdvice(false);
+    setSavingAdvice(false);
+    setUpdatingEnabled(false);
+    setCategories(mergeLines(entry.category, suggestedCategories));
+    setTags(mergeLines(entry.tags, suggestion.tags || []));
+    setUseWhen(mergeLines(entry.use_when, suggestion.use_when || []));
+    setDoNotUseWhen(mergeLines(entry.do_not_use_when, suggestion.do_not_use_when || []));
+    setNegativeQueries(mergeLines(entry.negative_queries, suggestion.negative_queries));
+    setDistinguishFrom(mergeMappings(entry.distinguish_from, suggestion.distinguish_from));
+  }, [entry.id, suggestion]);
+
+  async function applyAdvice() {
+    const parsedDistinguishFrom = parseDistinguishFrom(distinguishFrom);
+    setSavingAdvice(true);
+    const applied = await applySkillMetadata(entry.id, {
+      categories: categories.split("\n").map((value) => value.trim()).filter(Boolean),
+      tags: tags.split("\n").map((value) => value.trim()).filter(Boolean),
+      use_when: useWhen.split("\n").map((value) => value.trim()).filter(Boolean),
+      do_not_use_when: doNotUseWhen.split("\n").map((value) => value.trim()).filter(Boolean),
+      negative_queries: negativeQueries.split("\n").map((value) => value.trim()).filter(Boolean),
+      distinguish_from: parsedDistinguishFrom,
+    });
+    setSavingAdvice(false);
+    if (applied) setEditingAdvice(false);
+  }
+
+  async function updateEnabled(enabled: boolean) {
+    setUpdatingEnabled(true);
+    await setSkillEnabled(entry.id, enabled);
+    setUpdatingEnabled(false);
+  }
+
+  return (
+    <article className="skill-library-detail">
+      <div className="skill-library-detail-heading">
+        <div>
+          <h2>{entry.name}</h2>
+          <p>{entry.summary || entry.id}</p>
+        </div>
+        <div className="skill-library-detail-actions">
+          <span className={entry.assignable ? "plugin-chip good" : "plugin-chip"}>
+            {entry.assignable ? t("plugins.skillLibraryAssignable") : t("plugins.skillLibraryNotAssignable")}
+          </span>
+          {entry.editable_metadata ? (
+            <label className="skill-library-enabled-toggle">
+              <span>{entry.enabled ? t("plugins.skillLibraryEnabled") : t("plugins.skillLibraryDisabled")}</span>
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label={t("plugins.skillLibraryEnabledLabel")}
+                checked={entry.enabled}
+                disabled={updatingEnabled}
+                onChange={(event) => void updateEnabled(event.target.checked)}
+              />
+            </label>
+          ) : null}
+          {deletable ? (
+            <button className="plugin-delete-pill" type="button" onClick={() => deleteSkill(entry.id)}>
+              {t("common.delete")}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div className="skill-library-detail-meta">
+        <span>{t("plugins.skillLibrarySource")}: {entry.source}</span>
+        <span>{entry.core ? t("plugins.coreChip") : entry.metadata_status === "ready" ? t("plugins.skillLibraryMetadata") : t("plugins.skillLibraryIncomplete")}</span>
+        <span>{t("plugins.skillLibraryUsage")}: {usedCount} / {rejectedCount}</span>
+      </div>
+      <SkillLibraryList label={t("plugins.skillLibraryUseWhen")} values={entry.use_when} />
+      <SkillLibraryList label={t("plugins.skillLibraryDoNotUse")} values={entry.do_not_use_when} muted />
+      <SkillLibraryList label={t("plugins.skillLibraryNegativeQueries")} values={entry.negative_queries} muted />
+      <SkillLibraryMap label={t("plugins.skillLibraryDistinguish")} values={entry.distinguish_from} />
+      <div className={hasSuggestion ? "skill-library-suggestion" : "skill-library-suggestion empty"}>
+        {hasSuggestion ? (
+          <>
+            <div className="skill-library-suggestion-heading">
+              <div>
+                <strong>{t("plugins.skillLibraryPendingAdvice")}</strong>
+                {entry.metadata_proposal ? <SkillMetadataProposalSummary t={t} proposal={entry.metadata_proposal} /> : null}
+              </div>
+              {entry.editable_metadata ? (
+                <button
+                  className="secondary-button compact skill-library-suggestion-toggle"
+                  type="button"
+                  onClick={() => setEditingAdvice((current) => !current)}
+                >
+                  {editingAdvice ? t("common.close") : t("plugins.skillLibraryViewAdvice")}
+                </button>
+              ) : null}
+            </div>
+            {editingAdvice ? (
+              <div className="skill-library-advice-editor">
+                <SkillMetadataInput label={t("plugins.skillLibrarySuggestedCategories")} value={categories} onChange={setCategories} />
+                <SkillMetadataInput label={t("plugins.skillLibraryTags")} value={tags} onChange={setTags} />
+                <SkillMetadataInput label={t("plugins.skillLibraryUseWhen")} value={useWhen} onChange={setUseWhen} />
+                <SkillMetadataInput label={t("plugins.skillLibraryDoNotUse")} value={doNotUseWhen} onChange={setDoNotUseWhen} />
+                <SkillMetadataInput label={t("plugins.skillLibraryNegativeQueries")} value={negativeQueries} onChange={setNegativeQueries} />
+                <SkillMetadataInput label={t("plugins.skillLibraryDistinguish")} value={distinguishFrom} onChange={setDistinguishFrom} />
+                {entry.metadata_status !== "ready" && !completionReady ? <small>{t("plugins.skillLibraryCompletionRequired")}</small> : null}
+                <div className="skill-library-advice-actions">
+                  <button className="secondary-button compact" type="button" disabled={savingAdvice} onClick={() => setEditingAdvice(false)}>{t("common.cancel")}</button>
+                  <button className="primary-button compact" type="button" disabled={savingAdvice || (entry.metadata_status !== "ready" && !completionReady)} onClick={() => void applyAdvice()}>{savingAdvice ? t("common.saving") : entry.metadata_status === "ready" ? t("plugins.skillLibraryApplyAdvice") : t("plugins.skillLibraryCompleteMetadata")}</button>
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <strong>{t("plugins.skillLibraryPendingAdvice")}</strong>
+            <span>{t("plugins.skillLibraryNoAdvice")}</span>
+          </>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function SkillMetadataProposalSummary({ t, proposal }: { t: Translator; proposal: PluginSkillMetadataProposal }) {
+  return (
+    <div className="skill-library-proposal" title={proposal.updated_at}>
+      <span>{metadataProposalSourceLabel(t, proposal.source)}</span>
+      <span className={proposal.status === "pending" ? "pending" : "muted"}>{metadataProposalStatusLabel(t, proposal.status)}</span>
+      {proposal.updated_at ? <span className="muted">{shortProposalTimestamp(proposal.updated_at)}</span> : null}
+      {proposal.reason ? <small>{proposal.reason}</small> : null}
+    </div>
+  );
+}
+
+function metadataProposalSourceLabel(t: Translator, source: string): string {
+  if (source === "rules") return t("plugins.skillProposalRules");
+  if (source === "ai") return t("plugins.skillProposalAi");
+  return source || t("plugins.skillProposalUnknown");
+}
+
+function metadataProposalStatusLabel(t: Translator, status: string): string {
+  if (status === "pending") return t("plugins.skillProposalPending");
+  if (status === "stale") return t("plugins.skillProposalStale");
+  if (status === "accepted") return t("plugins.skillProposalAccepted");
+  if (status === "rejected") return t("plugins.skillProposalRejected");
+  return status || t("plugins.skillProposalUnknown");
+}
+
+function shortProposalTimestamp(value: string): string {
+  return value.replace("T", " ").replace(/\.\d{3}Z$/, "Z").slice(0, 16);
+}
+
+function parseDistinguishFrom(value: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of value.split("\n")) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    const description = line.slice(separator + 1).trim();
+    if (key && description) result[key] = description;
+  }
+  return result;
+}
+
+function SkillMetadataInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label>
+      <span>{label}</span>
+      <textarea value={value} onChange={(event) => onChange(event.target.value)} aria-label={label} />
+    </label>
+  );
+}
+
+type SkillMetadataPayload = {
+  categories?: string[];
+  tags?: string[];
+  use_when?: string[];
+  do_not_use_when?: string[];
+  negative_queries: string[];
+  distinguish_from: Record<string, string>;
+};
+
+function mergeLines(existing: string[], suggestions: string[]): string {
+  return [...existing, ...suggestions]
+    .map((value) => value.trim())
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+    .join("\n");
+}
+
+function mergeMappings(existing: Record<string, string>, suggestions: Record<string, string>): string {
+  return Object.entries({ ...suggestions, ...existing }).map(([key, value]) => `${key}: ${value}`).join("\n");
+}
+
+function SkillLibraryList({ label, values, muted = false }: { label?: string; values: string[]; muted?: boolean }) {
+  if (!values.length) return null;
+  return (
+    <div className={muted ? "skill-library-detail-block muted" : "skill-library-detail-block"}>
+      {label ? <strong>{label}</strong> : null}
+      <ul>{values.map((value) => <li key={value}>{value}</li>)}</ul>
+    </div>
+  );
+}
+
+function SkillLibraryMap({ label, values }: { label?: string; values: Record<string, string> }) {
+  const rows = Object.entries(values);
+  if (!rows.length) return null;
+  return (
+    <div className="skill-library-detail-block muted">
+      {label ? <strong>{label}</strong> : null}
+      <ul>{rows.map(([key, value]) => <li key={key}><b>{key}</b>: {value}</li>)}</ul>
+    </div>
   );
 }
 
@@ -401,38 +816,27 @@ function ComfyUiMcpCompactForm({
 }
 
 function RuntimeCapabilityCard({
-  t,
   capability,
 }: {
-  t: Translator;
   capability: RuntimeCapabilityCardModel;
 }) {
   return (
-    <article className="runtime-capability-card">
-      <div className="runtime-capability-card-header">
+    <article className="runtime-capability-strip">
+      <div className="runtime-capability-identity">
         <div className="runtime-capability-card-title">{capability.id}</div>
-        <div className="runtime-capability-card-description">{capability.description}</div>
+        <span>{capability.status}</span>
       </div>
-      <div className="runtime-capability-grid">
-        <div className="runtime-capability-row">
-          <span className="runtime-capability-label">{t("plugins.runtimeCapabilityStatus")}</span>
-          <span className="runtime-capability-value">{capability.status}</span>
-        </div>
-        <div className="runtime-capability-row">
-          <span className="runtime-capability-label">{t("plugins.runtimeCapabilityAbilities")}</span>
-          <div className="runtime-capability-chip-row">
-            {capability.abilities.map((ability) => (
-              <span className="runtime-capability-chip" key={ability}>
-                {ability}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="runtime-capability-row">
-          <span className="runtime-capability-label">{t("plugins.runtimeCapabilityRisk")}</span>
-          <span className="runtime-capability-value runtime-capability-risk">{capability.risk}</span>
+      <div className="runtime-capability-summary">
+        <span className="runtime-capability-card-description">{capability.description}</span>
+        <div className="runtime-capability-chip-row">
+          {capability.abilities.map((ability) => (
+            <span className="runtime-capability-chip" key={ability}>
+              {ability}
+            </span>
+          ))}
         </div>
       </div>
+      <span className="runtime-capability-risk">{capability.risk}</span>
     </article>
   );
 }
@@ -579,15 +983,22 @@ function PluginDropZone({
   description,
   installing,
   onInstall,
+  sourceKind = "skill",
+  compact = false,
+  toolbar = false,
 }: {
   t: Translator;
   title: string;
   description: string;
   installing: boolean;
   onInstall: (path: string) => void;
+  sourceKind?: "skill" | "mcp" | "package";
+  compact?: boolean;
+  toolbar?: boolean;
 }) {
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState("");
+  const choosePluginSource = typeof window === "undefined" ? undefined : window.lucodeDesktop?.choosePluginSource;
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -613,59 +1024,38 @@ function PluginDropZone({
     onInstall(firstPath);
   }
 
+  async function chooseSource() {
+    const sourcePath = await choosePluginSource?.(sourceKind);
+    if (sourcePath) onInstall(sourcePath);
+  }
+
   return (
     <div
-      className={dragging ? "plugin-drop-zone dragging" : "plugin-drop-zone"}
+      className={dragging ? `plugin-drop-zone${compact ? " compact" : ""}${toolbar ? " toolbar" : ""} dragging` : `plugin-drop-zone${compact ? " compact" : ""}${toolbar ? " toolbar" : ""}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       role="group"
       aria-label={title}
     >
-      <div>
-        <strong>{installing ? t("plugins.installing") : title}</strong>
-        <span>{description}</span>
-      </div>
-      <small>{installing ? t("common.installing") : t("common.drop")}</small>
+      {toolbar ? (
+        !choosePluginSource ? <span className="plugin-drop-zone-toolbar-label">{installing ? t("plugins.installing") : title}</span> : null
+      ) : (
+        <>
+          <div>
+            <strong>{installing ? t("plugins.installing") : title}</strong>
+            {compact ? null : <span>{description}</span>}
+          </div>
+          <small>{installing ? t("common.installing") : t("common.drop")}</small>
+        </>
+      )}
+      {choosePluginSource ? (
+        <button className={toolbar ? "secondary-button compact plugin-import-button" : "secondary-button compact"} type="button" disabled={installing} onClick={() => void chooseSource()}>
+          {toolbar ? title : t("plugins.chooseSource")}
+        </button>
+      ) : null}
       {localError ? <em>{localError}</em> : null}
     </div>
-  );
-}
-
-function SkillRow({
-  t,
-  skill,
-  deleteSkill,
-}: {
-  t: Translator;
-  skill: PluginSkill;
-  deleteSkill: (skillId: string) => void;
-}) {
-  return (
-    <article className="plugin-row">
-      <div className="plugin-row-main">
-        <div className="plugin-row-title">{skill.title}</div>
-        <div className="plugin-row-description">{skill.description || skill.id}</div>
-        <div className="plugin-row-footer">
-          <div className="plugin-chip-row">
-            {skill.chips.map((chip) => (
-              <span className={chip === t("plugins.coreChip") ? "plugin-chip core" : "plugin-chip"} key={chip}>
-                {chip}
-              </span>
-            ))}
-          </div>
-          <button
-            className="plugin-delete-pill"
-            type="button"
-            disabled={!skill.deletable}
-            title={skill.deletable ? t("plugins.deleteSkill") : t("plugins.coreSkillLocked")}
-            onClick={() => deleteSkill(skill.id)}
-          >
-            {t("common.delete")}
-          </button>
-        </div>
-      </div>
-    </article>
   );
 }
 
@@ -684,13 +1074,7 @@ function McpRowView({ t, row }: { t: Translator; row: PluginMcpRow }) {
 }
 
 function droppedFilePaths(files: FileList): string[] {
-  const desktopPaths = window.lucodeDesktop?.droppedFilePaths?.(files) || [];
-  if (desktopPaths.length > 0) {
-    return desktopPaths;
-  }
-  return Array.from(files)
-    .map((file) => (file as File & { path?: string }).path || "")
-    .filter(Boolean);
+  return resolveDroppedFilePaths(files, (file) => window.lucodeDesktop?.droppedFilePath?.(file) || "");
 }
 
 function splitArgs(value: string): string[] {

@@ -350,7 +350,7 @@ def test_sidebar_shows_running_dot_only_for_active_session(app):
     sidebar.refresh()
 
     dots = sidebar.findChildren(QLabel, "SessionActivityDot")
-    visible = [dot for dot in dots if dot.isVisible()]
+    visible = [dot for dot in dots if not dot.isHidden()]
 
     assert len(visible) == 1
     assert visible[0].property("state") == "running"
@@ -359,7 +359,7 @@ def test_sidebar_shows_running_dot_only_for_active_session(app):
     sidebar.set_session_activity("", "idle")
     sidebar.refresh()
 
-    assert not [dot for dot in sidebar.findChildren(QLabel, "SessionActivityDot") if dot.isVisible()]
+    assert not [dot for dot in sidebar.findChildren(QLabel, "SessionActivityDot") if not dot.isHidden()]
 
 
 
@@ -686,7 +686,7 @@ def test_run_turn_updates_streamed_answer_instead_of_adding_duplicate(app, tmp_p
             window.handle_runtime_event(
                 {
                     "event_type": "AgentMessageDelta",
-                    "agent": "full_supervisor_agent",
+                    "agent": "execution_supervisor_agent",
                     "payload": {"text": "Partial"},
                 }
             )

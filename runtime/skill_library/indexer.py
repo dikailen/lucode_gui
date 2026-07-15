@@ -31,7 +31,7 @@ def build_skill_index(workspace_context=None, *, write: bool = True) -> list[Ski
             entry = _entry_from_discovered_item(item)
             discovered.append(entry)
 
-    entries = _dedupe_entries(discovered)
+    entries = _apply_workspace_enabled_overrides(_dedupe_entries(discovered), workspace_context)
     entries.sort(key=lambda entry: (SOURCE_PRIORITY.get(entry.source, 9), entry.id))
     if write:
         try:
@@ -50,7 +50,7 @@ def load_skill_index(workspace_context=None, *, rebuild_if_missing: bool = True)
     entries = _read_index(path)
     if entries is None or (source_snapshot and not entries):
         return build_skill_index(workspace_context, write=True) if rebuild_if_missing else []
-    return _merge_usage_summary(entries, workspace_context)
+    return _merge_usage_summary(_apply_workspace_enabled_overrides(entries, workspace_context), workspace_context)
 
 
 def _read_index(path: Path) -> list[SkillIndexEntry] | None:
@@ -116,6 +116,43 @@ def _dedupe_entries(entries: list[SkillIndexEntry]) -> list[SkillIndexEntry]:
         if SOURCE_PRIORITY.get(entry.source, 9) < SOURCE_PRIORITY.get(existing.source, 9):
             chosen[entry.id] = entry
     return list(chosen.values())
+
+
+def _apply_workspace_enabled_overrides(
+    entries: list[SkillIndexEntry],
+    workspace_context=None,
+) -> list[SkillIndexEntry]:
+    """Apply workspace-only enablement without editing imported SKILL.md files."""
+
+    disabled_ids = _workspace_disabled_skill_ids(workspace_context)
+    if not disabled_ids:
+        return entries
+    return [
+        replace(entry, enabled=False, assignable=False)
+        if entry.source == "workspace" and not _is_protected_core(entry) and entry.id in disabled_ids
+        else entry
+        for entry in entries
+    ]
+
+
+def _workspace_disabled_skill_ids(workspace_context=None) -> set[str]:
+    """Read the GUI-owned workspace preference without creating a GUI dependency."""
+
+    state_path = extension_roots(workspace_context).workspace_root / ".lucode" / "gui_plugin_state.json"
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    raw_ids = data.get("disabled_skill_ids") if isinstance(data, dict) else []
+    if not isinstance(raw_ids, list):
+        return set()
+    disabled: set[str] = set()
+    for raw_id in raw_ids:
+        text = str(raw_id or "").strip()
+        if not text:
+            continue
+        disabled.add(normalize_skill_metadata({"id": text}, source="workspace", body_path="").id)
+    return disabled
 
 
 def _is_protected_core(entry: SkillIndexEntry) -> bool:

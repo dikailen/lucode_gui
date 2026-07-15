@@ -19,6 +19,13 @@ import {
 import { createSessionSearchDebouncer, type SessionSearchDebouncer } from "./sessionSearch";
 import { mergeSessionPages } from "./sessionPagination";
 import {
+  MAX_ATTACHMENT_DRAFTS,
+  mergeAttachmentDrafts,
+  removeAttachmentDraft,
+  type AttachmentDraft,
+} from "./attachmentDrafts";
+import { resolveDroppedFilePaths } from "./localFileDrop";
+import {
   closeBottomShell as closeBottomShellState,
   closeRightDock,
   closeRightDockWindow as closeRightDockWindowState,
@@ -39,6 +46,9 @@ import {
 } from "./panelLayout";
 import { resolveRuntimeConfig } from "./runtimeEnv";
 import { isTerminalRunEvent } from "./runEvents";
+import { selectActiveRunForRenderer } from "./runRecovery";
+import { runEventSequenceAction, runStreamReconnectDelay, shouldReconnectRunStream } from "./runStreamRecovery";
+import type { SettingsTab } from "./settingsTabs";
 import { RuntimeClient } from "../shared/api/runtimeClient";
 import type {
   ComfyUiInstallation,
@@ -75,12 +85,15 @@ export type LucodeAppController = {
   visibleSessionHasMore: boolean;
   visibleSessionLoadingMore: boolean;
   input: string;
+  attachmentDrafts: AttachmentDraft[];
+  runStarting: boolean;
   runtimeError: string;
   runtimeConfig: RuntimeConfig;
   modelSettings: ModelSettingsResponse | null;
   providerCatalog: ProviderCatalogResponse | null;
   pluginState: PluginStateResponse | null;
   activeWorkspace: WorkspaceId;
+  settingsTab: SettingsTab;
   rightDockTool: DockToolId;
   rightDockWindows: RightDockWindow[];
   bottomShellOpen: boolean;
@@ -98,6 +111,9 @@ export type LucodeAppController = {
   terminalError: string;
   terminalCommand: string;
   setInput: (value: string) => void;
+  chooseAttachments: () => void;
+  addDroppedAttachments: (files: FileList | File[]) => void;
+  removeAttachment: (attachmentId: string) => void;
   setTerminalCommand: (value: string) => void;
   toggleSettings: () => void;
   openSettings: () => void;
@@ -111,11 +127,14 @@ export type LucodeAppController = {
   resetRightDockWidth: () => void;
   closeSettings: () => void;
   switchWorkspace: (workspace: WorkspaceId) => void;
+  selectSettingsTab: (tab: SettingsTab) => void;
   toggleSidebar: () => void;
   refreshModelSettings: () => void;
   refreshProviderCatalog: () => void;
   refreshPluginState: () => void;
   updateRoleModel: (role: string, modelId: string) => void;
+  updateModelReasoningEffort: (modelId: string, effort: string) => void;
+  probeModelReasoningEffort: (modelId: string) => void;
   updateQueryRefiner: (enabled: boolean) => void;
   updatePrivacyMode: (mode: string) => void;
   updateWorkerPool: (modelIds: string[]) => void;
@@ -125,6 +144,9 @@ export type LucodeAppController = {
   fetchProviderModels: (payload: ProviderModelsFetchPayload) => Promise<ProviderModelsFetchResponse | null>;
   deleteSkill: (skillId: string) => void;
   installSkill: (path: string) => void;
+  applySkillMetadata: (skillId: string, payload: { negative_queries: string[]; distinguish_from: Record<string, string> }) => Promise<boolean>;
+  setSkillEnabled: (skillId: string, enabled: boolean) => Promise<boolean>;
+  reindexSkillLibrary: () => Promise<boolean>;
   installMcp: (path: string) => void;
   installPluginPackage: (path: string) => void;
   deletePluginPackage: (pluginId: string) => void;
@@ -163,11 +185,14 @@ export function useLucodeApp(): LucodeAppController {
   const [sessionSearchHasMore, setSessionSearchHasMore] = useState(false);
   const [sessionSearchPageLoading, setSessionSearchPageLoading] = useState(false);
   const [input, setInput] = useState("");
+  const [attachmentDrafts, setAttachmentDrafts] = useState<AttachmentDraft[]>([]);
+  const [runStarting, setRunStarting] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
   const [modelSettings, setModelSettings] = useState<ModelSettingsResponse | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogResponse | null>(null);
   const [pluginState, setPluginState] = useState<PluginStateResponse | null>(null);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>("chat");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("models");
   const [panelLayout, setPanelLayout] = useState(() => createPanelLayoutState());
   const rightDockTool = activeRightDockTool(panelLayout);
   const dockWindows = rightDockWindows(panelLayout);
@@ -188,6 +213,13 @@ export function useLucodeApp(): LucodeAppController {
   const [terminalError, setTerminalError] = useState("");
   const [terminalCommand, setTerminalCommand] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+  const activeRunRef = useRef({ activeRunId: state.activeRunId, runStatus: state.runStatus });
+  const runStreamCursorRef = useRef(new Map<string, number>());
+  const runStreamReconnectAttemptsRef = useRef(new Map<string, number>());
+  const runStreamReconnectTimerRef = useRef<number | null>(null);
+  const runStreamGenerationRef = useRef(0);
+  const runStartingRef = useRef(false);
+  const pendingRunRequestRef = useRef<{ fingerprint: string; requestId: string; runId: string } | null>(null);
   const browserNavigationSeqRef = useRef(0);
   const sessionSearchSeqRef = useRef(0);
   const sessionPageLoadingRef = useRef(false);
@@ -200,6 +232,7 @@ export function useLucodeApp(): LucodeAppController {
   const visibleSessions = searchActive && sessionSearchResults ? sessionSearchResults : state.sessions;
   const visibleSessionHasMore = searchActive ? sessionSearchHasMore : sessionHasMore;
   const visibleSessionLoadingMore = searchActive ? sessionSearchPageLoading : sessionPageLoading;
+  activeRunRef.current = { activeRunId: state.activeRunId, runStatus: state.runStatus };
 
   useEffect(() => () => sessionSearchDebouncerRef.current?.cancel(), []);
 
@@ -322,11 +355,24 @@ export function useLucodeApp(): LucodeAppController {
               setComfyUiError(error instanceof Error ? error.message : String(error));
             }
           });
-        const activeSessionId = sessions[0]?.session_id;
+        let recoveredRun = null;
+        try {
+          recoveredRun = selectActiveRunForRenderer(await client.listActiveRuns(), sessions[0]?.session_id || "");
+        } catch {
+          // Active-run discovery is optional while the Runtime is being upgraded.
+        }
+        const activeSessionId = recoveredRun?.session_id || sessions[0]?.session_id;
         if (activeSessionId) {
           const messages = await client.loadSessionMessages(activeSessionId);
           if (!cancelled) {
-            setState((current) => setSessionMessages(current, activeSessionId, messages));
+            setState((current) => {
+              const loaded = setSessionMessages(current, activeSessionId, messages);
+              return recoveredRun ? markRunStarted(loaded, recoveredRun.session_id, recoveredRun.run_id) : loaded;
+            });
+            if (recoveredRun) {
+              activeRunRef.current = { activeRunId: recoveredRun.run_id, runStatus: "running" };
+              openRunStream(recoveredRun.run_id);
+            }
           }
         }
       } catch (error) {
@@ -338,6 +384,8 @@ export function useLucodeApp(): LucodeAppController {
     void loadInitialState();
     return () => {
       cancelled = true;
+      clearRunStreamReconnectTimer();
+      runStreamGenerationRef.current += 1;
       socketRef.current?.close();
     };
   }, [client]);
@@ -412,6 +460,51 @@ export function useLucodeApp(): LucodeAppController {
       setPluginError(error instanceof Error ? error.message : String(error));
     } finally {
       setPluginInstallingTarget("");
+    }
+  }
+
+  async function applySkillMetadata(
+    skillId: string,
+    payload: {
+      categories?: string[];
+      tags?: string[];
+      use_when?: string[];
+      do_not_use_when?: string[];
+      negative_queries: string[];
+      distinguish_from: Record<string, string>;
+    },
+  ): Promise<boolean> {
+    if (!skillId) return false;
+    setPluginError("");
+    try {
+      setPluginState(await client.applySkillMetadata(skillId, payload));
+      return true;
+    } catch (error) {
+      setPluginError(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
+
+  async function setSkillEnabled(skillId: string, enabled: boolean): Promise<boolean> {
+    if (!skillId) return false;
+    setPluginError("");
+    try {
+      setPluginState(await client.setSkillEnabled(skillId, enabled));
+      return true;
+    } catch (error) {
+      setPluginError(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
+
+  async function reindexSkillLibrary(): Promise<boolean> {
+    setPluginError("");
+    try {
+      setPluginState(await client.reindexSkillLibrary());
+      return true;
+    } catch (error) {
+      setPluginError(error instanceof Error ? error.message : String(error));
+      return false;
     }
   }
 
@@ -647,6 +740,36 @@ export function useLucodeApp(): LucodeAppController {
     }
   }
 
+  async function updateModelReasoningEffort(modelId: string, effort: string) {
+    if (!modelId || !effort || settingsSavingRole) return;
+    setSettingsError("");
+    setSettingsSavingRole(`reasoning_effort:${modelId}`);
+    try {
+      const settings = await client.updateModelReasoningEffort(modelId, effort);
+      setModelSettings(settings);
+      setState((current) => setModelLabel(current, selectOrchestratorModelLabel(settings, current.modelLabel)));
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSettingsSavingRole("");
+    }
+  }
+
+  async function probeModelReasoningEffort(modelId: string) {
+    if (!modelId || settingsSavingRole) return;
+    setSettingsError("");
+    setSettingsSavingRole(`reasoning_probe:${modelId}`);
+    try {
+      const settings = await client.probeModelReasoningEffort(modelId);
+      setModelSettings(settings);
+      setState((current) => setModelLabel(current, selectOrchestratorModelLabel(settings, current.modelLabel)));
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSettingsSavingRole("");
+    }
+  }
+
   async function updateQueryRefiner(enabled: boolean) {
     if (settingsSavingRole) {
       return;
@@ -779,20 +902,83 @@ export function useLucodeApp(): LucodeAppController {
   async function submitRun(event: FormEvent) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || state.runStatus === "running") {
+    if (!text || state.runStatus === "running" || runStartingRef.current) {
       return;
     }
-    setInput("");
-    setRuntimeError("");
-    try {
-      const session = await ensureSession(text);
-      setState((current) => appendUserMessage(current, session.session_id, text));
-      const run = await client.startRun(session.session_id, text);
+    runStartingRef.current = true;
+    setRunStarting(true);
+      setRuntimeError("");
+      try {
+        const session = await ensureSession(text);
+        const fingerprint = runRequestFingerprint(session.session_id, text, attachmentDrafts);
+        const pendingRequest = pendingRunRequestRef.current;
+        const request = pendingRequest && pendingRequest.fingerprint === fingerprint
+          ? pendingRequest
+          : { fingerprint, requestId: createClientRequestId(), runId: "" };
+        pendingRunRequestRef.current = request;
+        const run = await client.startRun(
+          session.session_id,
+          text,
+          attachmentDrafts.map((item) => ({ path: item.path })),
+          request.requestId,
+        );
+        request.runId = run.run_id;
+      setState((current) => appendUserMessage(
+        current,
+        session.session_id,
+        text,
+        run.attachments?.length ? { attachments: run.attachments } : undefined,
+      ));
+      setInput("");
+      setAttachmentDrafts([]);
       setState((current) => markRunStarted(current, session.session_id, run.run_id));
+      activeRunRef.current = { activeRunId: run.run_id, runStatus: "running" };
       openRunStream(run.run_id);
     } catch (error) {
       setRuntimeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      runStartingRef.current = false;
+      setRunStarting(false);
     }
+  }
+
+  function addAttachmentPaths(paths: string[]) {
+    setAttachmentDrafts((current) => {
+      const result = mergeAttachmentDrafts(current, paths);
+      if (result.rejectedCount) {
+        setRuntimeError(`每条消息最多可添加 ${MAX_ATTACHMENT_DRAFTS} 个文件。`);
+      }
+      return result.drafts;
+    });
+  }
+
+  async function chooseAttachments() {
+    const picker = typeof window === "undefined" ? undefined : window.lucodeDesktop?.chooseAttachmentFiles;
+    if (!picker) {
+      setRuntimeError("当前运行环境不支持读取本地附件，请使用桌面版。");
+      return;
+    }
+    setRuntimeError("");
+    try {
+      addAttachmentPaths(await picker());
+    } catch (error) {
+      setRuntimeError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function addDroppedAttachments(files: FileList | File[]) {
+    const resolver = typeof window === "undefined" ? undefined : window.lucodeDesktop?.droppedFilePath;
+    if (!resolver) {
+      setRuntimeError("当前运行环境无法读取拖入文件的本地路径，请使用桌面版的添加文件按钮。");
+      return;
+    }
+    const paths = resolveDroppedFilePaths(files, resolver);
+    if (!paths.length && Array.from(files || []).length) {
+      setRuntimeError("没有读取到可用的本地文件路径，请改用添加文件按钮。");
+      return;
+    }
+    setRuntimeError("");
+    addAttachmentPaths(paths);
   }
 
   async function stopRun() {
@@ -820,12 +1006,26 @@ export function useLucodeApp(): LucodeAppController {
     }
   }
 
+  function clearRunStreamReconnectTimer() {
+    if (runStreamReconnectTimerRef.current !== null) {
+      window.clearTimeout(runStreamReconnectTimerRef.current);
+      runStreamReconnectTimerRef.current = null;
+    }
+  }
+
   function openRunStream(runId: string) {
-    socketRef.current?.close();
-    const socket = client.openRunEventSocket(runId);
+    clearRunStreamReconnectTimer();
+    const generation = ++runStreamGenerationRef.current;
+    const previousSocket = socketRef.current;
+    socketRef.current = null;
+    previousSocket?.close();
+    const socket = client.openRunEventSocket(runId, runStreamCursorRef.current.get(runId) || 0);
     let sawTerminalEvent = false;
     socketRef.current = socket;
     socket.addEventListener("message", (event) => {
+      if (runStreamGenerationRef.current !== generation || socketRef.current !== socket) {
+        return;
+      }
       let payload: RunEvent;
       try {
         payload = JSON.parse(event.data) as RunEvent;
@@ -833,10 +1033,30 @@ export function useLucodeApp(): LucodeAppController {
         setRuntimeError("运行事件解析失败，请查看 Runtime 日志。");
         return;
       }
+      if (payload.run_id !== runId) {
+        return;
+      }
+      const lastReceivedSeq = runStreamCursorRef.current.get(runId) || 0;
+      const sequenceAction = runEventSequenceAction(lastReceivedSeq, payload.seq);
+      if (sequenceAction === "duplicate") {
+        return;
+      }
+      if (sequenceAction === "replay_from_cursor") {
+        socket.close(4001, "event sequence gap");
+        return;
+      }
+      runStreamCursorRef.current.set(runId, payload.seq);
+      runStreamReconnectAttemptsRef.current.delete(runId);
       setState((current) => reduceRunEvent(current, payload));
       updateRightDockForRunEvent(payload);
       if (isTerminalRunEvent(payload.type)) {
+        if (pendingRunRequestRef.current?.runId === payload.run_id) {
+          pendingRunRequestRef.current = null;
+        }
         sawTerminalEvent = true;
+        clearRunStreamReconnectTimer();
+        runStreamCursorRef.current.delete(runId);
+        runStreamReconnectAttemptsRef.current.delete(runId);
         socket.close(1000, "run finished");
         if (socketRef.current === socket) {
           socketRef.current = null;
@@ -845,21 +1065,46 @@ export function useLucodeApp(): LucodeAppController {
         void refreshModelSettings();
       }
     });
-    socket.addEventListener("error", () => {
-      setRuntimeError("运行事件流连接失败，请确认 Runtime Server 仍在运行。");
-    });
     socket.addEventListener("close", () => {
-      if (sawTerminalEvent) {
+      if (runStreamGenerationRef.current !== generation || socketRef.current !== socket) {
         return;
       }
-      setState((current) =>
-        current.activeRunId === runId && current.runStatus === "running"
-          ? markRunStreamDisconnected(current, current.activeSessionId, "连接已关闭")
-          : current,
-      );
-      if (socketRef.current === socket) {
-        socketRef.current = null;
+      socketRef.current = null;
+      if (!shouldReconnectRunStream({
+        activeRunId: activeRunRef.current.activeRunId,
+        runStatus: activeRunRef.current.runStatus,
+        runId,
+        sawTerminalEvent,
+      })) {
+        return;
       }
+      const attempt = (runStreamReconnectAttemptsRef.current.get(runId) || 0) + 1;
+      const delay = runStreamReconnectDelay(attempt);
+      if (delay === null) {
+        setState((current) =>
+          current.activeRunId === runId && current.runStatus === "running"
+            ? markRunStreamDisconnected(current, current.activeSessionId, "重连次数已达上限")
+            : current,
+        );
+        setRuntimeError("运行事件流重连失败，请确认 Runtime Server 仍在运行。");
+        return;
+      }
+      runStreamReconnectAttemptsRef.current.set(runId, attempt);
+      runStreamReconnectTimerRef.current = window.setTimeout(() => {
+        runStreamReconnectTimerRef.current = null;
+        if (runStreamGenerationRef.current !== generation) {
+          return;
+        }
+        if (!shouldReconnectRunStream({
+          activeRunId: activeRunRef.current.activeRunId,
+          runStatus: activeRunRef.current.runStatus,
+          runId,
+          sawTerminalEvent: false,
+        })) {
+          return;
+        }
+        openRunStream(runId);
+      }, delay);
     });
   }
 
@@ -1000,6 +1245,7 @@ export function useLucodeApp(): LucodeAppController {
         setSessionHasMore(sessionPage.has_more);
       }
       setRuntimeError("");
+      setAttachmentDrafts([]);
       setActiveWorkspace("chat");
       setState((current) =>
         setSessionMessages(
@@ -1027,6 +1273,7 @@ export function useLucodeApp(): LucodeAppController {
     setActiveWorkspace("chat");
     try {
       const messages = await client.loadSessionMessages(sessionId);
+      setAttachmentDrafts([]);
       setState((current) => setSessionMessages(current, sessionId, messages));
     } catch (error) {
       setRuntimeError(error instanceof Error ? error.message : String(error));
@@ -1058,12 +1305,15 @@ export function useLucodeApp(): LucodeAppController {
     visibleSessionHasMore,
     visibleSessionLoadingMore,
     input,
+    attachmentDrafts,
+    runStarting,
     runtimeError,
     runtimeConfig,
     modelSettings,
     providerCatalog,
     pluginState,
     activeWorkspace,
+    settingsTab,
     rightDockTool,
     rightDockWindows: dockWindows,
     bottomShellOpen,
@@ -1081,6 +1331,9 @@ export function useLucodeApp(): LucodeAppController {
     terminalError,
     terminalCommand,
     setInput,
+    chooseAttachments: () => void chooseAttachments(),
+    addDroppedAttachments,
+    removeAttachment: (attachmentId) => setAttachmentDrafts((current) => removeAttachmentDraft(current, attachmentId)),
     setTerminalCommand,
     toggleSettings: () => {
       setPanelLayout((current) => closeRightDock(current));
@@ -1088,6 +1341,7 @@ export function useLucodeApp(): LucodeAppController {
     },
     openSettings: () => {
       setPanelLayout((current) => closeRightDock(current));
+      setSidebarCollapsed(false);
       setActiveWorkspace("settings");
     },
     showRightDockHome: () => setPanelLayout((current) => toggleRightDockTool(current, "home")),
@@ -1102,15 +1356,21 @@ export function useLucodeApp(): LucodeAppController {
     switchWorkspace: (workspace) => {
       setActiveWorkspace(workspace);
       if (workspace === "plugins") {
+        setPanelLayout((current) => closeRightDock(current));
         void refreshPluginState();
         void refreshComfyUiState();
+      } else if (workspace === "settings") {
+        setSidebarCollapsed(false);
       }
     },
+    selectSettingsTab: setSettingsTab,
     toggleSidebar: () => setSidebarCollapsed((current) => !current),
     refreshModelSettings: () => void refreshModelSettings(),
     refreshProviderCatalog: () => void refreshProviderCatalog(),
     refreshPluginState: () => void refreshPluginState(),
     updateRoleModel: (role, modelId) => void updateRoleModel(role, modelId),
+    updateModelReasoningEffort: (modelId, effort) => void updateModelReasoningEffort(modelId, effort),
+    probeModelReasoningEffort: (modelId) => void probeModelReasoningEffort(modelId),
     updateQueryRefiner: (enabled) => void updateQueryRefiner(enabled),
     updatePrivacyMode: (mode) => void updatePrivacyMode(mode),
     updateWorkerPool: (modelIds) => void updateWorkerPool(modelIds),
@@ -1118,8 +1378,11 @@ export function useLucodeApp(): LucodeAppController {
     saveProvider,
     deleteProvider,
     fetchProviderModels,
-    deleteSkill: (skillId) => void deleteSkill(skillId),
-    installSkill: (path) => void installSkill(path),
+      deleteSkill: (skillId) => void deleteSkill(skillId),
+      installSkill: (path) => void installSkill(path),
+      applySkillMetadata,
+    setSkillEnabled,
+    reindexSkillLibrary,
     installMcp: (path) => void installMcp(path),
     installPluginPackage: (path) => void installPluginPackage(path),
     deletePluginPackage: (pluginId) => void deletePluginPackage(pluginId),
@@ -1152,6 +1415,22 @@ function isBrowserCapabilityEvent(event: RunEvent): boolean {
   const action = stringPayloadField(payload, "action") || actionFromToolName(toolName);
   const haystack = `${toolName} ${action}`.toLowerCase();
   return haystack.includes("desktop_browser") || haystack.includes("browser_");
+}
+
+function runRequestFingerprint(sessionId: string, input: string, attachments: AttachmentDraft[]): string {
+  return [
+    sessionId,
+    input,
+    ...attachments.map((item) => item.path).sort(),
+  ].join("\u0000");
+}
+
+function createClientRequestId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  if (randomId) {
+    return `desktop_${randomId}`;
+  }
+  return `desktop_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
 function rightDockStatusFromBrowserEvent(event: RunEvent): RightDockWindowStatus {

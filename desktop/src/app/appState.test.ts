@@ -11,10 +11,13 @@ import {
   selectPrimaryModelLabel,
   formatSessionTime,
   markPendingDeleteSession,
+  recentRunEvents,
   removeSession,
   setSessionMessages,
   workAreaSnapshotFromMessage,
+  workAreaSnapshot,
 } from "./appState";
+import { buildChatTurns } from "./chatTurns";
 import type { ModelSettingsModel, ModelSettingsResponse, RunEvent } from "../shared/types";
 
 describe("appState", () => {
@@ -57,7 +60,7 @@ describe("appState", () => {
     expect(selectOrchestratorModelLabel(settings, "DeepSeek Chat")).toBe("claude-sonnet-4");
   });
 
-  it("keeps user message and folds streaming/final run events into chat", () => {
+  it("shows only final-answer deltas in chat before replacing them with the completed answer", () => {
     let state = createInitialAppState();
     state = appendUserMessage(state, "session_1", "检查项目结构");
     state = reduceRunEvent(state, {
@@ -76,15 +79,26 @@ describe("appState", () => {
       seq: 2,
       type: "worker.delta",
       created_at: "2026-06-30T00:00:01+08:00",
-      payload: { text: "项目" },
+      payload: { task_id: "inspect_project", text: "项目" },
     });
+    expect(state.messages).toHaveLength(1);
     state = reduceRunEvent(state, {
       schema_version: "run_event.v1",
       run_id: "run_1",
       session_id: "session_1",
       seq: 3,
-      type: "run.completed",
+      type: "answer.delta",
       created_at: "2026-06-30T00:00:02+08:00",
+      payload: { text: "项目" },
+    });
+    expect(state.messages.map((message) => message.content)).toEqual(["检查项目结构", "项目"]);
+    state = reduceRunEvent(state, {
+      schema_version: "run_event.v1",
+      run_id: "run_1",
+      session_id: "session_1",
+      seq: 4,
+      type: "run.completed",
+      created_at: "2026-06-30T00:00:03+08:00",
       payload: { final_output: "项目结构清晰" },
     });
 
@@ -94,7 +108,31 @@ describe("appState", () => {
     expect(state.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(state.messages[0].content).toBe("检查项目结构");
     expect(state.messages[1].content).toBe("项目结构清晰");
-    expect(state.events.map((event) => event.type)).toEqual(["run.started", "worker.delta", "run.completed"]);
+    expect(state.events.map((event) => event.type)).toEqual(["run.started", "worker.delta", "answer.delta", "run.completed"]);
+  });
+
+  it("keeps public attachment metadata on the optimistic user message", () => {
+    const state = appendUserMessage(createInitialAppState(), "session_1", "read this", {
+      attachments: [{ name: "notes.md", kind: "text", size_bytes: 12 }],
+    });
+
+    expect(state.messages[0].metadata).toEqual({
+      attachments: [{ name: "notes.md", kind: "text", size_bytes: 12 }],
+    });
+  });
+
+  it("keeps final-answer deltas out of the runtime activity strip", () => {
+    const state = {
+      ...createInitialAppState(),
+      events: [
+        runEvent("run_1", 1, "planner.started", {}),
+        runEvent("run_1", 2, "worker.delta", { task_id: "task_1", text: "working" }),
+        runEvent("run_1", 3, "answer.delta", { text: "partial answer" }),
+        runEvent("run_1", 4, "tool.completed", {}),
+      ],
+    };
+
+    expect(recentRunEvents(state).map((event) => event.type)).toEqual(["planner.started", "tool.completed"]);
   });
 
   it("marks a run as running immediately after startRun returns", () => {
@@ -230,7 +268,71 @@ describe("appState", () => {
     expect(state.runStatus).toBe("cancelled");
     expect(state.messages.at(-1)?.content).toContain("已停止");
   });
+
+  it("binds each completed run snapshot to its own assistant response across consecutive runs", () => {
+    let state = createInitialAppState();
+    state = completeRun(state, "run_1", "first request", "first answer");
+    state = completeRun(state, "run_2", "second request", "second answer");
+
+    const assistants = state.messages.filter((message) => message.role === "assistant");
+    const historicalProcesses = Object.fromEntries(
+      assistants.map((message) => [message.id, workAreaSnapshotFromMessage(message)]),
+    );
+    const turns = buildChatTurns(state.messages, workAreaSnapshot(state), historicalProcesses);
+
+    expect(assistants).toHaveLength(2);
+    expect(workAreaSnapshotFromMessage(assistants[0])?.tasks[0].title).toBe("run_1 task");
+    expect(workAreaSnapshotFromMessage(assistants[1])?.tasks[0].title).toBe("run_2 task");
+    expect(turns.map((turn) => turn.process?.tasks[0].title)).toEqual(["run_1 task", "run_2 task"]);
+  });
+
+  it("does not attach the previous run process to a new turn before its plan arrives", () => {
+    let state = createInitialAppState();
+    state = completeRun(state, "run_1", "first request", "first answer");
+    state = appendUserMessage(state, "session_1", "second request");
+    state = markRunStarted(state, "session_1", "run_2");
+
+    expect(workAreaSnapshot(state)).toBeNull();
+  });
+
+  it("keeps three completed run snapshots independent after a later run completes", () => {
+    let state = createInitialAppState();
+    state = completeRun(state, "run_1", "one", "answer one");
+    state = completeRun(state, "run_2", "two", "answer two");
+    state = completeRun(state, "run_3", "three", "answer three");
+
+    const snapshots = state.messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => workAreaSnapshotFromMessage(message)?.tasks[0].title);
+
+    expect(snapshots).toEqual(["run_1 task", "run_2 task", "run_3 task"]);
+  });
 });
+
+function completeRun(state: ReturnType<typeof createInitialAppState>, runId: string, input: string, output: string) {
+  const sessionId = "session_1";
+  let next = appendUserMessage(state, sessionId, input);
+  next = markRunStarted(next, sessionId, runId);
+  next = reduceRunEvent(next, runEvent(runId, 1, "run.started", { input }));
+  next = reduceRunEvent(next, runEvent(runId, 2, "planner.completed", {
+    route_type: "single_agent",
+    tasks: [{ id: `${runId}_task`, title: `${runId} task`, model: "model", mcp: [], depends_on: [], parallel_group: "" }],
+  }));
+  next = reduceRunEvent(next, runEvent(runId, 3, "task.completed", { task_id: `${runId}_task` }));
+  return reduceRunEvent(next, runEvent(runId, 4, "run.completed", { final_output: output }));
+}
+
+function runEvent(runId: string, seq: number, type: string, payload: Record<string, unknown>): RunEvent {
+  return {
+    schema_version: "run_event.v1",
+    run_id: runId,
+    session_id: "session_1",
+    seq,
+    type,
+    created_at: `2026-07-11T00:00:0${seq}Z`,
+    payload,
+  };
+}
 
 function modelSettingsFixture({
   selectedModelId,
@@ -278,6 +380,11 @@ function modelSettingsModel(
     privacy_level: "cloud",
     supports_tools: true,
     reasoning_level: "medium",
+    supports_reasoning_effort: false,
+    reasoning_effort_levels: [],
+    selected_reasoning_effort: "auto",
+    reasoning_effort_probe_status: "unknown",
+    reasoning_effort_verification: "",
     cost_level: "medium",
     model_tier: "standard",
   };

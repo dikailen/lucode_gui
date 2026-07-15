@@ -127,6 +127,7 @@ class PlannerResult:
     synthesis_instruction: str = ""
     memory_interface: dict[str, Any] = field(default_factory=dict)
     skill_interface: dict[str, Any] = field(default_factory=dict)
+    recovery_interface: dict[str, Any] = field(default_factory=dict)
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -235,6 +236,7 @@ def parse_planner_result(text: str, fallback_user_input: str = "") -> PlannerRes
         synthesis_instruction=str(data.get("synthesis_instruction") or ""),
         memory_interface=dict(data.get("memory_interface") or {}),
         skill_interface=dict(data.get("skill_interface") or {}) if isinstance(data.get("skill_interface"), dict) else {},
+        recovery_interface=_normalize_recovery_interface(data.get("recovery_interface")),
     )
     return _normalize_planner_result(result, fallback_user_input=fallback_user_input)
 
@@ -412,6 +414,7 @@ def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = 
     _extract_internal_synthesizer_task(result)
     result.memory_interface = dict(result.memory_interface or {})
     result.skill_interface = dict(result.skill_interface or {})
+    result.recovery_interface = _normalize_recovery_interface(result.recovery_interface)
     fallback_route_text = _extract_user_route_text(_extract_current_turn_input(sanitize_text(fallback_user_input)))
 
     browser_text = "\n".join(
@@ -831,6 +834,19 @@ def _dedupe(values: list[str]) -> list[str]:
         if value and value not in seen:
             result.append(value)
             seen.add(value)
+    return result
+
+
+def _normalize_recovery_interface(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    disposition = str(value.get("disposition") or "").strip().lower()
+    if disposition not in {"continue_safe", "replan", "ignore_previous"}:
+        return {}
+    result: dict[str, Any] = {"disposition": disposition}
+    reason = sanitize_text(str(value.get("reason") or "")).strip()
+    if reason:
+        result["reason"] = reason[:300]
     return result
 
 

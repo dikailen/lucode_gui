@@ -43,6 +43,22 @@ def test_missing_required_metadata_is_marked_incomplete():
     assert set(entry.missing_fields) >= {"name", "description", "category", "tags", "use_when", "do_not_use_when"}
 
 
+def test_normalize_skill_metadata_uses_author_supplied_nested_trigger():
+    entry = normalize_skill_metadata(
+        {
+            "name": "Humanizer",
+            "description": "Rewrite text to remove generic AI writing patterns.",
+            "metadata": {"trigger": "Edit or review text to remove AI writing traces."},
+        },
+        source="workspace",
+        body_path=".lucode/skills/humanizer-zh-main/SKILL.md",
+        folder="humanizer-zh-main",
+    )
+
+    assert entry.use_when == ("Edit or review text to remove AI writing traces.",)
+    assert "use_when" not in entry.missing_fields
+
+
 def test_core_and_disabled_skills_are_not_assignable():
     core_entry = normalize_skill_metadata(
         {

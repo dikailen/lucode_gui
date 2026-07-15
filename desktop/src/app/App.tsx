@@ -7,6 +7,7 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import { createTranslator } from "./i18n";
+import { shouldRenderSessionSidebar } from "./panelLayout";
 import { useLucodeApp } from "./useLucodeApp";
 
 export function App() {
@@ -14,6 +15,7 @@ export function App() {
   const { state } = controller;
   const language = controller.modelSettings?.ui_preferences?.language || "zh";
   const t = createTranslator(language);
+  const showSessionSidebar = shouldRenderSessionSidebar(controller.activeWorkspace);
   const shellStyle = {
     "--right-dock-width": `${controller.rightDockWidth}px`,
   } as CSSProperties;
@@ -29,33 +31,40 @@ export function App() {
         .join(" ")}
       style={shellStyle}
     >
-      <SessionSidebar
-        t={t}
-        sessions={controller.visibleSessions}
-        sessionSearchQuery={controller.sessionSearchQuery}
-        activeSessionId={state.activeSessionId}
-        pendingDeleteSessionId={state.pendingDeleteSessionId}
-        activeWorkspace={controller.activeWorkspace}
-        collapsed={controller.sidebarCollapsed}
-        runStatus={state.runStatus}
-        hasMoreSessions={controller.visibleSessionHasMore}
-        loadingMoreSessions={controller.visibleSessionLoadingMore}
-        createNewSession={controller.createNewSession}
-        searchSessions={controller.searchSessions}
-        loadMoreSessions={controller.loadMoreSessions}
-        selectSession={controller.selectSession}
-        requestDeleteSession={controller.requestDeleteSession}
-        switchWorkspace={controller.switchWorkspace}
-        openSettings={controller.openSettings}
-        toggleSidebar={controller.toggleSidebar}
-      />
+      {showSessionSidebar ? (
+        <SessionSidebar
+          t={t}
+          sessions={controller.visibleSessions}
+          sessionSearchQuery={controller.sessionSearchQuery}
+          activeSessionId={state.activeSessionId}
+          pendingDeleteSessionId={state.pendingDeleteSessionId}
+          activeWorkspace={controller.activeWorkspace}
+          settingsTab={controller.settingsTab}
+          collapsed={controller.sidebarCollapsed}
+          runStatus={state.runStatus}
+          hasMoreSessions={controller.visibleSessionHasMore}
+          loadingMoreSessions={controller.visibleSessionLoadingMore}
+          createNewSession={controller.createNewSession}
+          searchSessions={controller.searchSessions}
+          loadMoreSessions={controller.loadMoreSessions}
+          selectSession={controller.selectSession}
+          requestDeleteSession={controller.requestDeleteSession}
+          switchWorkspace={controller.switchWorkspace}
+          selectSettingsTab={controller.selectSettingsTab}
+          openSettings={controller.openSettings}
+          toggleSidebar={controller.toggleSidebar}
+        />
+      ) : null}
       <div className="workspace-column">
         <div className="workspace-main">
           <WorkspacePanel
             t={t}
             activeWorkspace={controller.activeWorkspace}
+            settingsTab={controller.settingsTab}
             state={state}
             input={controller.input}
+            attachmentDrafts={controller.attachmentDrafts}
+            runStarting={controller.runStarting}
             runtimeError={controller.runtimeError}
             pluginState={controller.pluginState}
             pluginError={controller.pluginError}
@@ -70,6 +79,9 @@ export function App() {
             bottomShellOpen={controller.bottomShellOpen}
             rightDockOpen={Boolean(controller.rightDockTool)}
             setInput={controller.setInput}
+            chooseAttachments={controller.chooseAttachments}
+            addDroppedAttachments={controller.addDroppedAttachments}
+            removeAttachment={controller.removeAttachment}
             submit={controller.submit}
             stopRun={controller.stopRun}
             showRightDockHome={controller.showRightDockHome}
@@ -78,9 +90,12 @@ export function App() {
             toggleBottomShell={controller.toggleBottomShell}
             openSettings={controller.openSettings}
             closeSettings={controller.closeSettings}
+            selectSettingsTab={controller.selectSettingsTab}
             refreshModelSettings={controller.refreshModelSettings}
             refreshProviderCatalog={controller.refreshProviderCatalog}
             updateRoleModel={controller.updateRoleModel}
+            updateModelReasoningEffort={controller.updateModelReasoningEffort}
+            probeModelReasoningEffort={controller.probeModelReasoningEffort}
             updateQueryRefiner={controller.updateQueryRefiner}
             updatePrivacyMode={controller.updatePrivacyMode}
             updateWorkerPool={controller.updateWorkerPool}
@@ -89,9 +104,12 @@ export function App() {
             deleteProvider={controller.deleteProvider}
             fetchProviderModels={controller.fetchProviderModels}
             refreshPluginState={controller.refreshPluginState}
-            deleteSkill={controller.deleteSkill}
-            installSkill={controller.installSkill}
-            installMcp={controller.installMcp}
+              deleteSkill={controller.deleteSkill}
+              installSkill={controller.installSkill}
+              applySkillMetadata={controller.applySkillMetadata}
+              setSkillEnabled={controller.setSkillEnabled}
+              reindexSkillLibrary={controller.reindexSkillLibrary}
+              installMcp={controller.installMcp}
             installPluginPackage={controller.installPluginPackage}
             deletePluginPackage={controller.deletePluginPackage}
             registerExternalMcp={controller.registerExternalMcp}

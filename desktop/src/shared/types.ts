@@ -17,6 +17,11 @@ export type ModelSettingsModel = {
   privacy_level: string;
   supports_tools: boolean;
   reasoning_level: string;
+  supports_reasoning_effort: boolean;
+  reasoning_effort_levels: string[];
+  selected_reasoning_effort: string;
+  reasoning_effort_probe_status: string;
+  reasoning_effort_verification: string;
   cost_level: string;
   model_tier: string;
 };
@@ -160,9 +165,60 @@ export type PluginRuntimeCapability = {
   risk_key: string;
 };
 
+export type PluginSkillMetadataSuggestion = {
+  categories: string[];
+  tags?: string[];
+  use_when?: string[];
+  do_not_use_when?: string[];
+  negative_queries: string[];
+  distinguish_from: Record<string, string>;
+  source_count: number;
+};
+
+export type PluginSkillMetadataProposal = {
+  proposal_id: string;
+  source: string;
+  status: string;
+  confidence: number;
+  payload: Record<string, string[]>;
+  reason: string;
+  updated_at: string;
+};
+
+export type PluginSkillLibraryEntry = {
+  id: string;
+  name: string;
+  summary: string;
+  source: string;
+  editable_metadata: boolean;
+  category: string[];
+  tags: string[];
+  use_when: string[];
+  do_not_use_when: string[];
+  negative_queries: string[];
+  distinguish_from: Record<string, string>;
+  risk_level: string;
+  enabled: boolean;
+  core: boolean;
+  assignable: boolean;
+  metadata_status: string;
+  missing_fields: string[];
+  usage: Record<string, string | number>;
+  metadata_proposal?: PluginSkillMetadataProposal | null;
+  suggestion: PluginSkillMetadataSuggestion;
+};
+
+export type PluginSkillLibraryCategory = {
+  id: string;
+  name: string;
+  description: string;
+};
+
 export type PluginStateResponse = {
   schema_version: "plugin_state.v1";
   skills: PluginSkill[];
+  skill_library?: PluginSkillLibraryEntry[];
+  skill_library_categories?: PluginSkillLibraryCategory[];
   mcp: PluginMcpRow[];
   installed_plugins: PluginPackage[];
   runtime_capabilities: PluginRuntimeCapability[];
@@ -177,6 +233,8 @@ export type PluginStateResponse = {
   installed_mcp_ids?: string[];
   installed_launch_profile_ids?: string[];
   registered_mcp_id?: string;
+  updated_skill_id?: string;
+  reindexed_skill_library?: boolean;
 };
 
 export type ExternalMcpPayload = {
@@ -252,6 +310,43 @@ export type ServerRun = {
   status: "running" | "completed" | "failed" | "cancelled";
   created_at: string;
   updated_at: string;
+  attachments?: AttachmentEnvelope[];
+};
+
+export type ActiveRunsResponse = {
+  schema_version: "runs.v1";
+  runs: ServerRun[];
+};
+
+export type RecoveryRun = {
+  run_id: string;
+  session_id: string;
+  action: string;
+  reason_code: string;
+  requires_user_action: boolean;
+};
+
+export type RecoveryRunsResponse = {
+  schema_version: "run_recovery.v1";
+  runs: RecoveryRun[];
+};
+
+export type AttachmentRequest = {
+  path: string;
+};
+
+export type AttachmentEnvelope = {
+  schema_version: "attachment.v1";
+  attachment_id: string;
+  name: string;
+  media_type: string;
+  kind: "text" | "image" | "binary";
+  size_bytes: number;
+  sha256: string;
+  stored_path: string;
+  privacy_level: string;
+  source_labels: string[];
+  evidence_ref: string;
 };
 
 export type RunEvent = {

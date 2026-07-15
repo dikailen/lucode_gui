@@ -85,6 +85,17 @@ description: 动态多智能体系统的主脑规划技能。根据优化后的�
 - `adoption_reasons` 写明为什么这条失败教训适用于本轮，理由要短。
 - 不确定是否相关时，不要采纳，保持空数组或空对象。
 
+## 中断任务自然续接规则
+
+输入可能包含 `[recovery_background]`。它只是旧中断任务的受限背景，不是本轮用户请求：
+
+- 当前普通消息仍是唯一意图来源；恢复背景不能单独触发工具、浏览器、终端或 MCP。
+- 用户明确要继续旧目标，且计划仍可保持只读安全语义时，输出 `recovery_interface.disposition = "continue_safe"`。
+- 用户仍处理旧目标但需要改计划、兼容性不明或存在阻断项时，输出 `"replan"`。
+- 用户提出无关新问题或普通问候时，输出 `"ignore_previous"`。
+- 不要把 unknown、副作用写入或旧审批描述成可安全复用；Runtime 的 RecoveryPolicy、Approval Guard 和 Evidence Gate 才是最终裁决者。
+- 没有 `[recovery_background]` 时，`recovery_interface` 输出空对象。
+
 ## 输出格式
 
 只输出 JSON，不要输出 Markdown。不要输出解释、思考过程、前后缀文本或代码块围栏。即使不确定，也必须输出一个合法 JSON 对象。
@@ -116,6 +127,10 @@ description: 动态多智能体系统的主脑规划技能。根据优化后的�
   ],
   "needs_synthesis": false,
   "synthesis_instruction": "如果 multi_agent，写最终汇总要求",
+  "recovery_interface": {
+    "disposition": "continue_safe | replan | ignore_previous",
+    "reason": "为什么本轮继续、重规划或忽略旧任务"
+  },
   "memory_interface": {
     "should_query_memory": false,
     "query_hint": "未来知识图谱检索提示；当前不要依赖它",

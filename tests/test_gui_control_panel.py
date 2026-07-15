@@ -73,8 +73,8 @@ def test_set_query_refiner_enabled_persists(tmp_path):
 
 def test_set_execution_mode_normalizes_and_persists(tmp_path):
     session = GuiChatSession(workspace=tmp_path)
-    assert session.set_execution_mode("FULL") == "full"
-    assert session.settings.execution_mode == "full"
+    assert session.set_execution_mode("FULL") == "auto"
+    assert session.settings.execution_mode == "auto"
     assert session.set_execution_mode("bogus") == "auto"
     assert session.settings.execution_mode == "auto"
 

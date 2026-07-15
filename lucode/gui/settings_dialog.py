@@ -254,7 +254,7 @@ class SettingsContent(QWidget):
         self._models: list[tuple[str, str]] = []
         self._role_models: dict[str, str] = {}
         self._worker_pool: list[str] = []
-        self._mode = "solo"
+        self._mode = "auto"
         self._refiner_enabled = False
         self._building = True
         self._role_rows: dict[str, _RoleRow] = {}

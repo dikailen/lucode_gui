@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from runtime.config.execution_mode import EXECUTION_MODES, execution_mode_policy, normalize_execution_mode
+from runtime.config.execution_mode import normalize_execution_mode
 from runtime.config.model_config import ROLE_ORDER
 from runtime.safety.privacy import PRIVACY_MODES
 
@@ -16,16 +16,8 @@ UNIFIED_LOOP_ROLES: list[tuple[str, str]] = [
     ("final_synthesizer", "conditional"),
 ]
 
-MODE_ROLE_USAGE: dict[str, list[tuple[str, str]]] = {
-    "auto": list(UNIFIED_LOOP_ROLES),
-    "solo": list(UNIFIED_LOOP_ROLES),
-    "serial": list(UNIFIED_LOOP_ROLES),
-    "full": list(UNIFIED_LOOP_ROLES),
-}
-
-
 def _visible_execution_mode(mode: str) -> str:
-    return execution_mode_policy(mode).canonical_mode
+    return normalize_execution_mode(mode)
 
 
 def execution_mode_label(mode: str, language: str = "zh") -> str:
@@ -49,7 +41,6 @@ def execution_mode_options(language: str = "zh") -> list[tuple[str, str]]:
     return [
         (mode, execution_mode_label(mode, language))
         for mode in EXECUTION_MODE_ORDER
-        if mode in EXECUTION_MODES
     ]
 
 
@@ -81,7 +72,8 @@ def roles_for_mode(mode: str) -> list[tuple[str, str]]:
     """Return (role_id, usage) the given execution mode actually uses."""
 
     normalized = normalize_execution_mode(mode)
-    return list(MODE_ROLE_USAGE.get(normalized, MODE_ROLE_USAGE["auto"]))
+    del normalized
+    return list(UNIFIED_LOOP_ROLES)
 
 
 def query_refiner_available_for_mode(mode: str) -> bool:
@@ -94,7 +86,8 @@ def query_refiner_available_for_mode(mode: str) -> bool:
 def worker_pool_available_for_mode(mode: str) -> bool:
     """Expose the worker pool when the selected policy may schedule parallel workers."""
 
-    return execution_mode_policy(mode).parallel_enabled
+    del mode
+    return True
 
 
 def _index_for_value(options: list[tuple[str, str]], value: str) -> int:

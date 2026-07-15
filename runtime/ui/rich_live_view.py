@@ -38,19 +38,6 @@ def build_rich_live_view(run_state, *, mode: str, attempt: int, active: str = ""
     events = _event_snapshot(run_state)
     controller_state = _controller_snapshot(run_state)
     model_labels = _model_labels(run_state)
-    if _clean(mode).lower() == "solo" or route == "solo":
-        return _solo_live_view(
-            run_state,
-            mode=mode,
-            route=route,
-            attempt=attempt,
-            active=active,
-            tasks=tasks,
-            events=events,
-            controller_state=controller_state,
-            model_labels=model_labels,
-        )
-
     plan_items = [
         RichPlanItem(
             id=_clean(getattr(task, "id", "")) or f"task_{index + 1}",
@@ -94,41 +81,6 @@ def build_rich_live_view(run_state, *, mode: str, attempt: int, active: str = ""
         attempt=int(attempt or 0),
         plan_items=plan_items,
         actor_blocks=actor_blocks,
-    )
-
-
-def _solo_live_view(
-    run_state,
-    *,
-    mode: str,
-    route: str,
-    attempt: int,
-    active: str,
-    tasks: list[Any],
-    events: list[Any],
-    controller_state: Any,
-    model_labels: dict[str, str],
-) -> RichLiveView:
-    task = tasks[0] if tasks else None
-    status = _status_label(getattr(task, "status", "")) if task is not None else _phase_value(getattr(controller_state, "phase", ""))
-    model_id = _clean(getattr(task, "model", "")) if task is not None else ""
-    action = _task_current_action(task, events, active=active) if task is not None else _clean(active)
-    if not action:
-        action = "Answering request"
-    return RichLiveView(
-        mode=_clean(mode),
-        route=route,
-        attempt=int(attempt or 0),
-        actor_blocks=[
-            RichActorBlock(
-                role="agent",
-                title="Agent",
-                subtitle="solo",
-                model_label=_compact_model_label(_display_model_label(model_id, model_labels)),
-                current_action=action,
-                status=status or "running",
-            )
-        ],
     )
 
 

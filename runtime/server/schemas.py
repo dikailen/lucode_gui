@@ -10,6 +10,7 @@ MODEL_LIST_SCHEMA_VERSION = "models.v1"
 SESSION_SCHEMA_VERSION = "session.v1"
 SESSION_MESSAGES_SCHEMA_VERSION = "messages.v1"
 RUN_SCHEMA_VERSION = "run.v1"
+RUN_LIST_SCHEMA_VERSION = "runs.v1"
 RUN_EVENT_SCHEMA_VERSION = "run_event.v1"
 TERMINAL_SCHEMA_VERSION = "terminal.v1"
 
@@ -45,9 +46,11 @@ class ServerRun:
     status: str
     created_at: str
     updated_at: str
+    attachments: list[dict[str, Any]] = field(default_factory=list)
+    inline_files: list[dict[str, str]] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": RUN_SCHEMA_VERSION,
             "run_id": self.run_id,
             "session_id": self.session_id,
@@ -55,6 +58,9 @@ class ServerRun:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.attachments:
+            payload["attachments"] = [dict(item) for item in self.attachments]
+        return payload
 
 
 @dataclass(frozen=True)

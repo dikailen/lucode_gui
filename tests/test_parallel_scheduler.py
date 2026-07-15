@@ -109,14 +109,14 @@ def test_shared_resource_lock_forces_serial_batches_with_reason():
     assert "terminal" in " ".join(decisions[1].details)
 
 
-def test_legacy_serial_modes_disable_parallel_without_being_user_visible_modes():
+def test_legacy_mode_values_do_not_disable_safe_parallelism():
     tasks = [_task("a"), _task("b")]
 
     decisions = execution_batch_decisions_for_mode(tasks, "serial")
 
-    assert [_ids(decision) for decision in decisions] == [["a"], ["b"]]
-    assert [decision.reason for decision in decisions] == ["parallel_disabled", "parallel_disabled"]
-    assert _execution_batches_for_mode(tasks, "serial") == [[tasks[0]], [tasks[1]]]
+    assert [_ids(decision) for decision in decisions] == [["a", "b"]]
+    assert decisions[0].status == "parallel"
+    assert _execution_batches_for_mode(tasks, "serial") == [tasks]
 
 def test_multi_agent_runtime_emits_scheduler_decision_reasons(monkeypatch, tmp_path):
     from planning.planner_schema import PlannerResult

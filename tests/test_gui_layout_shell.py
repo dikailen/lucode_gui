@@ -48,7 +48,10 @@ def test_main_window_uses_splitter_with_sidebar_and_chat_pane(app, tmp_path):
     assert workspace_stack is not None
     assert window.session_title_label.text() == "新会话"
     assert window.scroll_area.parentWidget().objectName() == "ChatWorkspacePage"
-    assert window.input_box.parentWidget().parentWidget().parentWidget().objectName() == "ChatWorkspacePage"
+    ancestor = window.input_box.parentWidget()
+    while ancestor is not None and ancestor.objectName() != "ChatWorkspacePage":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None
 
 
 def test_sidebar_toggle_hides_and_restores_sidebar(app, tmp_path):

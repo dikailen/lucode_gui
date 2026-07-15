@@ -40,7 +40,7 @@ DEFAULT_READONLY_BUDGET_PROFILE = {
     "supervisor_extra_read_calls": "0",
     "supervisor_extra_total_chars": "0",
 }
-FULL_SUPERVISOR_READONLY_BUDGET_PROFILE = {
+SUPERVISOR_READONLY_BUDGET_PROFILE = {
     "max_read_calls": "14",
     "max_files_per_call": "8",
     "max_chars_per_file": "9000",
@@ -51,7 +51,7 @@ FULL_SUPERVISOR_READONLY_BUDGET_PROFILE = {
     "supervisor_extra_read_calls": "6",
     "supervisor_extra_total_chars": "30000",
 }
-FULL_SUPERVISOR_READONLY_MCP_IDS = {"project_filesystem_readonly", "skills_filesystem_readonly"}
+SUPERVISOR_READONLY_MCP_IDS = {"project_filesystem_readonly", "skills_filesystem_readonly"}
 
 
 def _env_value(name: str, default: str) -> str:
@@ -509,16 +509,16 @@ class MCPServerManager:
         raise KeyError(f"Unknown MCP server id: {mcp_id}")
 
 
-def apply_full_supervisor_readonly_budget_profile(mcp_manager, mcp_ids: list[str]) -> bool:
-    """Apply the wider full-mode readonly budget before MCP servers start."""
+def apply_supervisor_readonly_budget_profile(mcp_manager, mcp_ids: list[str]) -> bool:
+    """Apply the wider supervisor readonly budget before MCP servers start."""
 
     setter = getattr(mcp_manager, "set_readonly_budget_profile", None)
     if not callable(setter):
         return False
     applied = False
     for mcp_id in list(mcp_ids or []):
-        if mcp_id not in FULL_SUPERVISOR_READONLY_MCP_IDS:
+        if mcp_id not in SUPERVISOR_READONLY_MCP_IDS:
             continue
-        setter(mcp_id, FULL_SUPERVISOR_READONLY_BUDGET_PROFILE)
+        setter(mcp_id, SUPERVISOR_READONLY_BUDGET_PROFILE)
         applied = True
     return applied

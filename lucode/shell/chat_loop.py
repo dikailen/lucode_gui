@@ -12,10 +12,10 @@ from lucode.shell.turn_display import (
     turn_status_label,
 )
 from runtime.common.conversation import append_recent_turn, compose_recent_context
+from runtime.context.middleware import ContextCompressionMiddleware
 from runtime.common.text_utils import sanitize_text
-from runtime.config.execution_mode import explicit_execution_mode_for_input
 from runtime.config.workspace import discover_workspace_context
-from runtime.history import HistoryStore
+from runtime.history import HistoryFacade, HistoryStore
 from runtime.kernel import KernelFacade
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.safety.session_checkpoint import SessionCheckpointManager
@@ -50,6 +50,7 @@ async def chat_loop(
     recent_turns = []
     checkpoint_manager = SessionCheckpointManager(project_root)
     session_store = HistoryStore(workspace_context.workspace_root)
+    history_browser = HistoryFacade(workspace_context.workspace_root, history_store=session_store)
     current_session_id: str | None = None
     resumed_session_summary = ""
     started_mcp_ids: list[str] = []
@@ -107,7 +108,13 @@ async def chat_loop(
         turn_settings = _settings_for_turn(runtime_settings, user_input)
         turn_mode = turn_settings.execution_mode
 
-        run_input = compose_recent_context(recent_turns, user_input, session_summary=resumed_session_summary)
+        legacy_run_input = compose_recent_context(recent_turns, user_input, session_summary=resumed_session_summary)
+        context_result = ContextCompressionMiddleware(history=history_browser).prepare_run_input(
+            session_id=current_session_id or "",
+            user_input=user_input,
+            current_input_persisted=False,
+        )
+        run_input = context_result.run_input if context_result.applied else legacy_run_input
         checkpoint_manager.begin_turn()
         turn_stopped = False
         kernel_response = None
@@ -193,12 +200,8 @@ def _is_max_turns_exceeded(exc: Exception) -> bool:
 
 
 def _settings_for_turn(runtime_settings, user_input: str):
-    explicit_mode = explicit_execution_mode_for_input(user_input)
-    if not explicit_mode or explicit_mode == getattr(runtime_settings, "execution_mode", ""):
-        return runtime_settings
-    turn_settings = copy(runtime_settings)
-    turn_settings.execution_mode = explicit_mode
-    return turn_settings
+    del user_input
+    return runtime_settings
 
 
 def _record_session_turn(

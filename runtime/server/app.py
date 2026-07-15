@@ -64,6 +64,30 @@ def create_app(
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
 
+    async def update_model_reasoning_effort(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(
+                manager.update_model_reasoning_effort(
+                    model_id=str(request.path_params.get("model_id") or ""),
+                    effort=str(payload.get("effort") or ""),
+                )
+            )
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
+    async def probe_model_reasoning_effort(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.probe_model_reasoning_effort(model_id=str(request.path_params.get("model_id") or "")))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
     async def update_query_refiner(request: Request) -> JSONResponse:
         try:
             auth.require_http(request)
@@ -183,6 +207,37 @@ def create_app(
             return _error("unauthorized", "invalid runtime token", status_code=401)
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
+
+    async def apply_skill_metadata(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            return JSONResponse(manager.apply_skill_metadata_tuning(str(request.path_params.get("skill_id") or ""), payload))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
+    async def set_skill_enabled(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            payload = await _json_body(request)
+            if not isinstance(payload.get("enabled"), bool):
+                raise ValueError("enabled must be a boolean")
+            return JSONResponse(
+                manager.set_skill_enabled(str(request.path_params.get("skill_id") or ""), bool(payload["enabled"]))
+            )
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("bad_request", str(exc), status_code=400)
+
+    async def reindex_skill_library(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.reindex_skill_library())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
 
     async def install_mcp(request: Request) -> JSONResponse:
         try:
@@ -368,6 +423,8 @@ def create_app(
             result = manager.start_run(
                 session_id=str(payload.get("session_id") or ""),
                 user_input=str(payload.get("input") or payload.get("user_input") or ""),
+                attachments=payload.get("attachments"),
+                client_request_id=str(payload.get("client_request_id") or ""),
             )
             return JSONResponse(result)
         except RuntimeAuthError:
@@ -376,6 +433,29 @@ def create_app(
             return _error("run_conflict", str(exc), status_code=409)
         except ValueError as exc:
             return _error("bad_request", str(exc), status_code=400)
+
+    async def active_runs(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.list_active_runs())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+
+    async def recovery_runs(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.list_recovery_runs())
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+
+    async def abandon_recovery_run(request: Request) -> JSONResponse:
+        try:
+            auth.require_http(request)
+            return JSONResponse(manager.abandon_recovery_run(str(request.path_params.get("run_id") or "")))
+        except RuntimeAuthError:
+            return _error("unauthorized", "invalid runtime token", status_code=401)
+        except ValueError as exc:
+            return _error("not_found", str(exc), status_code=404)
 
     async def stop_run(request: Request) -> JSONResponse:
         try:
@@ -404,6 +484,7 @@ def create_app(
 
     async def run_events(websocket: WebSocket) -> None:
         run_id = str(websocket.path_params.get("run_id") or "")
+        after_seq = _event_cursor(websocket.query_params.get("after_seq"))
         if not auth.is_websocket_authorized(websocket):
             await websocket.close(code=1008)
             return
@@ -411,15 +492,22 @@ def create_app(
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        for event in manager.events.snapshot(run_id):
-            await websocket.send_json(event.to_dict())
         try:
             with manager.events.subscribe(run_id) as queue:
+                last_sent_seq = after_seq
+                for event in manager.events.snapshot(run_id, after_seq=after_seq):
+                    if event.seq <= last_sent_seq:
+                        continue
+                    await websocket.send_json(event.to_dict())
+                    last_sent_seq = event.seq
                 while True:
                     event = await _next_stream_event_or_disconnect(websocket, queue)
                     if event is None:
                         break
+                    if event.seq <= last_sent_seq:
+                        continue
                     await websocket.send_json(event.to_dict())
+                    last_sent_seq = event.seq
         except (asyncio.CancelledError, WebSocketDisconnect):
             return
 
@@ -430,6 +518,8 @@ def create_app(
             Route("/api/models", models, methods=["GET"]),
             Route("/api/settings/models", model_settings, methods=["GET"]),
             Route("/api/settings/models/roles/{role}", update_model_role, methods=["PUT"]),
+            Route("/api/settings/models/{model_id}/reasoning-effort", update_model_reasoning_effort, methods=["PUT"]),
+            Route("/api/settings/models/{model_id}/probe-reasoning-effort", probe_model_reasoning_effort, methods=["POST"]),
             Route("/api/settings/query-refiner", update_query_refiner, methods=["PUT"]),
             Route("/api/settings/privacy", update_privacy, methods=["PUT"]),
             Route("/api/settings/worker-pool", update_worker_pool, methods=["PUT"]),
@@ -441,6 +531,9 @@ def create_app(
             Route("/api/settings/providers/{provider_id}", delete_provider, methods=["DELETE"]),
             Route("/api/plugins", plugin_state, methods=["GET"]),
             Route("/api/plugins/skills/install", install_skill, methods=["POST"]),
+            Route("/api/plugins/skills/reindex", reindex_skill_library, methods=["POST"]),
+            Route("/api/plugins/skills/{skill_id}/metadata", apply_skill_metadata, methods=["PUT"]),
+            Route("/api/plugins/skills/{skill_id}/enabled", set_skill_enabled, methods=["PUT"]),
             Route("/api/plugins/mcp/install", install_mcp, methods=["POST"]),
             Route("/api/plugins/packages/install", install_plugin_package, methods=["POST"]),
             Route("/api/plugins/packages/{plugin_id}", delete_plugin_package, methods=["DELETE"]),
@@ -461,6 +554,9 @@ def create_app(
             Route("/api/sessions/{session_id}/messages", session_messages, methods=["GET"]),
             Route("/api/sessions/{session_id}", delete_session, methods=["DELETE"]),
             Route("/api/runs", create_run, methods=["POST"]),
+            Route("/api/runs/active", active_runs, methods=["GET"]),
+            Route("/api/runs/recovery", recovery_runs, methods=["GET"]),
+            Route("/api/runs/{run_id}/abandon", abandon_recovery_run, methods=["POST"]),
             Route("/api/runs/{run_id}/stop", stop_run, methods=["POST"]),
             Route("/api/runs/{run_id}/approvals/{approval_id}", resolve_run_approval, methods=["POST"]),
             WebSocketRoute("/api/runs/{run_id}/events", run_events),
@@ -491,6 +587,13 @@ def _error(code: str, message: str, *, status_code: int) -> JSONResponse:
         },
         status_code=status_code,
     )
+
+
+def _event_cursor(value: str | None) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _next_stream_event_or_disconnect(websocket: WebSocket, queue):

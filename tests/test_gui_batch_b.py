@@ -32,6 +32,31 @@ def test_delta_coalescer_ignores_empty_delta():
     assert coalescer.flush() is None
 
 
+def test_delta_coalescer_preserves_final_answer_delta_type():
+    coalescer = DeltaCoalescer()
+    coalescer.push({"event_type": "FinalAnswerDelta", "payload": {"text": "part"}})
+    coalescer.push({"event_type": "FinalAnswerDelta", "payload": {"text": "ial"}})
+
+    result = coalescer.flush()
+
+    assert result["event_type"] == "FinalAnswerDelta"
+    assert result["payload"]["text"] == "partial"
+
+
+def test_delta_coalescer_does_not_merge_worker_and_final_answer_streams():
+    events = [
+        {"event_type": "AgentMessageDelta", "agent": "worker", "task_id": "task_1", "payload": {"text": "worker"}},
+        {"event_type": "FinalAnswerDelta", "agent": "direct_answer", "payload": {"text": "answer"}},
+    ]
+
+    result = coalesce_events_for_test(events)
+
+    assert [(event["event_type"], event["payload"]["text"]) for event in result] == [
+        ("AgentMessageDelta", "worker"),
+        ("FinalAnswerDelta", "answer"),
+    ]
+
+
 def test_turn_state_guard_prevents_old_turn_from_mutating_new_turn():
     guard = TurnStateGuard()
     first = guard.start()

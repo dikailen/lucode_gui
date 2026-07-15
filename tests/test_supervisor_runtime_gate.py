@@ -7,10 +7,10 @@ import pytest
 
 from planning.planner_schema import PlannedTask, PlannerResult
 from runtime.agent.approval import run_with_approval
-from runtime.agent.approval_policy import FullModeApprovalPolicy, SupervisorApprovalRequest
+from runtime.agent.approval_policy import SupervisorApprovalPolicy, SupervisorApprovalRequest
 from runtime.agent.supervisor import WorkerReport
 from runtime.execution.supervisor_observer import build_supervisor_plan_view
-from runtime.execution.supervisor_scheduler import supervisor_execution_batches_for_full
+from runtime.execution.supervisor_scheduler import supervisor_execution_batches_for_team
 
 
 def _write_task(task_id: str, path: str) -> PlannedTask:
@@ -27,7 +27,7 @@ def _write_task(task_id: str, path: str) -> PlannedTask:
 
 
 def test_supervisor_gate_approves_declared_workspace_write():
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     decision = policy.decide(
         "workspace_edit.write_file",
@@ -39,7 +39,7 @@ def test_supervisor_gate_approves_declared_workspace_write():
 
 
 def test_supervisor_gate_rejects_out_of_scope_workspace_write():
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     decision = policy.decide(
         "workspace_edit.write_file",
@@ -58,8 +58,8 @@ def test_supervisor_gate_rejects_out_of_scope_workspace_write():
 
 
 def test_supervisor_gate_can_be_disabled_for_legacy_prompt_path(monkeypatch):
-    monkeypatch.setenv("LUCODE_FULL_SUPERVISOR_GATE", "0")
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    monkeypatch.setenv("LUCODE_SUPERVISOR_GATE", "0")
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     decision = policy.decide(
         "workspace_edit.write_file",
@@ -81,7 +81,7 @@ def test_high_risk_preflight_is_disabled_when_evidence_gate_is_not_enforcing(mon
         model="worker",
         mcp=["desktop_browser"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "desktop_browser.browser_click_element",
@@ -104,7 +104,7 @@ def test_high_risk_preflight_sends_browser_action_to_supervisor(monkeypatch):
         model="worker",
         mcp=["desktop_browser"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "desktop_browser.browser_submit_form",
@@ -133,7 +133,7 @@ def test_high_risk_preflight_sends_safe_delete_to_supervisor(monkeypatch):
         mcp=["safe_backup"],
         write_intent=["build/tmp.txt"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "safe_backup.safe_delete_file",
@@ -161,7 +161,7 @@ def test_high_risk_preflight_sends_external_mcp_mutation_to_supervisor(monkeypat
         model="worker",
         mcp=["private_crm_mcp"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "private_crm_mcp.update_record",
@@ -207,7 +207,7 @@ def test_high_risk_preflight_uses_workspace_mcp_manifest_metadata(monkeypatch, t
         model="worker",
         mcp=["private_crm"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "private_crm.sync",
@@ -251,7 +251,7 @@ def test_high_risk_preflight_does_not_treat_manifest_readonly_mcp_as_mutation(mo
         model="worker",
         mcp=["readonly_docs"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "readonly_docs.fetch_doc",
@@ -329,7 +329,7 @@ def test_run_with_approval_rejects_manifest_high_risk_external_mcp_without_super
         model="worker",
         mcp=["private_crm"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     result = asyncio.run(run_with_approval("agent", "input", hooks, approval_policy=policy))
 
@@ -369,7 +369,7 @@ def test_high_risk_preflight_uses_workspace_mcp_servers_json_metadata(monkeypatc
         model="worker",
         mcp=["comfyui_graph"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "comfyui_graph.queue",
@@ -413,7 +413,7 @@ def test_high_risk_preflight_normalizes_hyphenated_mcp_manifest_ids(monkeypatch,
         model="worker",
         mcp=["comfyui-graph"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "comfyui-graph.queue",
@@ -454,7 +454,7 @@ def test_high_risk_preflight_uses_heuristic_when_mcp_manifest_lacks_risk_metadat
         model="worker",
         mcp=["readonly_docs"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "readonly_docs.fetch",
@@ -494,7 +494,7 @@ def test_high_risk_preflight_supports_requires_approval_manifest_alias(monkeypat
         model="worker",
         mcp=["comfyui_graph"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "comfyui_graph.queue",
@@ -534,7 +534,7 @@ def test_high_risk_preflight_treats_non_empty_approval_required_list_as_required
         model="worker",
         mcp=["workflow_bridge"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "workflow_bridge.queue",
@@ -573,7 +573,7 @@ def test_high_risk_preflight_falls_back_to_http_method_for_external_mcp_without_
         model="worker",
         mcp=["external_docs"],
     )
-    policy = FullModeApprovalPolicy.from_task(task)
+    policy = SupervisorApprovalPolicy.from_task(task)
 
     decision = policy.decide(
         "external_docs.request",
@@ -591,7 +591,7 @@ def test_supervisor_conflict_view_marks_conflicts_as_serialized():
     plan = PlannerResult(route_type="multi_agent", reason="", refined_request="edit files", tasks=tasks)
 
     view = build_supervisor_plan_view(plan, mode="full")
-    batches = supervisor_execution_batches_for_full(tasks)
+    batches = supervisor_execution_batches_for_team(tasks)
 
     assert len(batches) == 2
     assert view.conflicts
@@ -636,7 +636,7 @@ def test_run_with_approval_rejects_out_of_scope_write_without_executing(monkeypa
 
     monkeypatch.setattr("runtime.agent.approval.run_agent_once", fake_run_agent_once)
     hooks = type("Hooks", (), {"tool_events": []})()
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     result = asyncio.run(run_with_approval("agent", "input", hooks, approval_policy=policy))
 
@@ -760,7 +760,7 @@ def test_run_with_approval_allows_out_of_scope_write_when_supervisor_agent_appro
 
     monkeypatch.setattr("runtime.agent.approval.run_agent_once", fake_run_agent_once)
     hooks = type("Hooks", (), {"tool_events": []})()
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     result = asyncio.run(
         run_with_approval(
@@ -821,7 +821,7 @@ def test_run_with_approval_falls_back_when_supervisor_agent_unavailable(monkeypa
 
     monkeypatch.setattr("runtime.agent.approval.run_agent_once", fake_run_agent_once)
     hooks = type("Hooks", (), {"tool_events": []})()
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     result = asyncio.run(
         run_with_approval(
@@ -888,7 +888,7 @@ def test_run_with_approval_rejects_when_supervisor_agent_blocks_or_serializes(mo
 
     monkeypatch.setattr("runtime.agent.approval.run_agent_once", fake_run_agent_once)
     hooks = type("Hooks", (), {"tool_events": []})()
-    policy = FullModeApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
+    policy = SupervisorApprovalPolicy.from_task(_write_task("worker-auth", "runtime/auth.py"))
 
     result = asyncio.run(
         run_with_approval(
@@ -964,12 +964,12 @@ def test_full_multi_agent_passes_supervisor_decider_to_worker(monkeypatch, tmp_p
             run_state=PipelineRunState.create("edit auth", plan, project_root=tmp_path, mode="full"),
             execution_mode="full",
             show_progress=False,
-            approval_policy_factory=FullModeApprovalPolicy.from_task,
+            approval_policy_factory=SupervisorApprovalPolicy.from_task,
         )
     )
 
     assert "主管最终汇报" in output
-    assert captured["execution_mode"] == "full"
+    assert captured["execution_mode"] == "auto"
     assert captured["approval_policy"] is not None
     assert callable(getattr(captured["approval_policy"], "supervisor_approval_decider", None))
 

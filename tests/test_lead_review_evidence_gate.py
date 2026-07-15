@@ -10,7 +10,7 @@ from runtime.evidence.schema import Claim, EvidenceGateResult, GateVerdict
 from runtime.execution.multi_agent_runner import (
     _render_lead_supervisor_output,
     _render_supervisor_finalize_prompt,
-    _review_full_worker_reports,
+    _review_worker_reports,
 )
 from runtime.execution.pipeline import PipelineRunState
 
@@ -48,7 +48,7 @@ def test_observe_evidence_gate_records_verdict_without_changing_findings(monkeyp
         tool_calls=[{"tool": "workspace_edit", "action": "write_file", "status": "completed"}],
     )
 
-    findings = _review_full_worker_reports(plan, [report], state, mode="full")
+    findings = _review_worker_reports(plan, [report], state, mode="auto")
 
     assert findings == []
     evidence = state.to_dict()["evidence"]
@@ -70,7 +70,7 @@ def test_evidence_gate_defaults_to_warn_for_lead_review(monkeypatch, tmp_path):
         tool_calls=[{"tool": "workspace_edit", "action": "write_file", "status": "completed"}],
     )
 
-    findings = _review_full_worker_reports(plan, [report], state, mode="full")
+    findings = _review_worker_reports(plan, [report], state, mode="auto")
 
     assert findings == []
     assert state.to_dict()["evidence"]["mode"] == "warn"
@@ -88,7 +88,7 @@ def test_warn_evidence_gate_adds_non_reworkable_lead_warning(monkeypatch, tmp_pa
         artifacts=["claimed_completed: changed runtime/auth.py"],
     )
 
-    findings = _review_full_worker_reports(plan, [report], state, mode="full")
+    findings = _review_worker_reports(plan, [report], state, mode="auto")
     actions, limits = plan_lead_rework_actions(findings, {"worker-a": 0}, max_attempts=2)
 
     assert any(finding.kind == "evidence_gate_needs_recheck" for finding in findings)
@@ -107,7 +107,7 @@ def test_enforce_high_risk_evidence_gate_adds_reworkable_error(monkeypatch, tmp_
         artifacts=["claimed_changes: changed runtime/auth.py"],
     )
 
-    findings = _review_full_worker_reports(plan, [report], state, mode="full")
+    findings = _review_worker_reports(plan, [report], state, mode="auto")
     actions, limits = plan_lead_rework_actions(findings, {"worker-a": 0}, max_attempts=2)
 
     enforced = [finding for finding in findings if finding.kind == "evidence_gate_enforced"]
@@ -131,7 +131,7 @@ def test_enforce_high_risk_does_not_rework_low_risk_unverified_observation(monke
         artifacts=["note: implementation risk needs later discussion"],
     )
 
-    findings = _review_full_worker_reports(plan, [report], state, mode="full")
+    findings = _review_worker_reports(plan, [report], state, mode="auto")
     actions, limits = plan_lead_rework_actions(findings, {"worker-a": 0}, max_attempts=2)
 
     assert not any(finding.kind == "evidence_gate_enforced" for finding in findings)
@@ -153,7 +153,7 @@ def test_enforce_all_reworks_unaccepted_low_risk_claim(monkeypatch, tmp_path):
         artifacts=["note: implementation risk needs later discussion"],
     )
 
-    findings = _review_full_worker_reports(plan, [report], state, mode="full")
+    findings = _review_worker_reports(plan, [report], state, mode="auto")
     actions, limits = plan_lead_rework_actions(findings, {"worker-a": 0}, max_attempts=2)
 
     assert any(finding.kind == "evidence_gate_enforced" for finding in findings)

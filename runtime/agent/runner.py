@@ -12,9 +12,9 @@ async def run_agent_once(agent, run_input, hooks, max_turns=20, stream_output: b
     if stream_output is False or not streaming_enabled():
         return await Runner.run(agent, run_input, hooks=hooks, max_turns=max_turns)
 
-    result = Runner.run_streamed(agent, run_input, hooks=hooks, max_turns=max_turns)
     printed_any = False
     try:
+        result = Runner.run_streamed(agent, run_input, hooks=hooks, max_turns=max_turns)
         async for event in result.stream_events():
             delta = stream_delta_text(event)
             if not delta:
@@ -31,6 +31,8 @@ async def run_agent_once(agent, run_input, hooks, max_turns=20, stream_output: b
                     pass
             print(delta, end="", flush=True)
     except Exception as exc:
+        if not printed_any and _is_stream_unsupported_error(exc):
+            return await Runner.run(agent, run_input, hooks=hooks, max_turns=max_turns)
         if not (printed_any and _is_recoverable_stream_tail_error(exc)):
             raise
     if printed_any:
@@ -65,4 +67,18 @@ def _is_recoverable_stream_tail_error(exc: Exception) -> bool:
             "peer closed connection without sending complete message body",
             "response ended prematurely",
         ]
+    )
+
+
+def _is_stream_unsupported_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "streaming is not supported",
+            "stream is not supported",
+            "streaming not supported",
+            "does not support streaming",
+            "unsupported stream",
+        )
     )

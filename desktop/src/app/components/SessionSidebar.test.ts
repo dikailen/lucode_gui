@@ -26,6 +26,7 @@ function renderSidebar(sessionCount = 12, overrides: Partial<Parameters<typeof S
       activeSessionId: "session_1",
       pendingDeleteSessionId: "",
       activeWorkspace: "chat",
+      settingsTab: "models",
       collapsed: false,
       runStatus: "idle",
       hasMoreSessions: false,
@@ -36,6 +37,7 @@ function renderSidebar(sessionCount = 12, overrides: Partial<Parameters<typeof S
       selectSession: () => undefined,
       requestDeleteSession: () => undefined,
       switchWorkspace: () => undefined,
+      selectSettingsTab: () => undefined,
       openSettings: () => undefined,
       toggleSidebar: () => undefined,
       ...overrides,
@@ -74,5 +76,23 @@ describe("SessionSidebar", () => {
     expect(html).toContain("Accounting");
     expect(html).toContain('value="refund ledger"');
     expect(html).not.toContain("No matching chats");
+  });
+
+  it("renders a settings context instead of the plugin workspace for settings", () => {
+    const html = renderSidebar(0, { activeWorkspace: "settings" });
+
+    expect(html).toContain("Settings center");
+    expect(html).not.toContain("Plugin workspace");
+    expect(html).toContain('class="settings-sidebar-tabs"');
+    expect(html).toContain("Models");
+    expect(html).toContain("Privacy");
+  });
+
+  it("keeps the compact workbench new-chat command as an icon plus a readable label", () => {
+    const html = renderSidebar();
+
+    expect(html).toContain('class="new-session-button"');
+    expect(html).toContain('class="new-session-icon" aria-hidden="true">+</span>');
+    expect(html).toContain('class="new-session-label">New chat</span>');
   });
 });

@@ -18,8 +18,10 @@ async def execute_dynamic_request(
     show_plan: bool = False,
     settings: "RuntimeSettings | None" = None,
     display_input: str | None = None,
+    routing_input: str | None = None,
     output_controller: Any = None,
     event_bus: Any = None,
+    inline_files: Any = None,
 ) -> str:
     from runtime.execution.dynamic import execute_dynamic_request as _execute_dynamic_request
 
@@ -33,8 +35,10 @@ async def execute_dynamic_request(
         show_plan=show_plan,
         settings=settings,
         display_input=display_input,
+        routing_input=routing_input,
         output_controller=output_controller,
         event_bus=event_bus,
+        inline_files=inline_files,
     )
 
 

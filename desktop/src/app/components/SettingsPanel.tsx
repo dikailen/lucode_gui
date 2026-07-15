@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import type { Translator } from "../i18n";
 import { compactDisplayModelName, displayModelNameForModel } from "../modelDisplay";
+import { SETTINGS_TABS, type SettingsTab } from "../settingsTabs";
 import type {
   ModelSettingsModel,
   ModelSettingsProvider,
@@ -19,10 +20,14 @@ export type SettingsPanelProps = {
   providerCatalog: ProviderCatalogResponse | null;
   settingsError: string;
   settingsSavingRole: string;
+  activeTab: SettingsTab;
+  onTabChange: (tab: SettingsTab) => void;
   closeSettings: () => void;
   refreshModelSettings: () => void;
   refreshProviderCatalog: () => void;
   updateRoleModel: (role: string, modelId: string) => void;
+  updateModelReasoningEffort: (modelId: string, effort: string) => void;
+  probeModelReasoningEffort: (modelId: string) => void;
   updateQueryRefiner: (enabled: boolean) => void;
   updatePrivacyMode: (mode: string) => void;
   updateWorkerPool: (modelIds: string[]) => void;
@@ -31,8 +36,6 @@ export type SettingsPanelProps = {
   deleteProvider: (providerId: string) => Promise<boolean>;
   fetchProviderModels: (payload: ProviderModelsFetchPayload) => Promise<ProviderModelsFetchResponse | null>;
 };
-
-type SettingsTab = "models" | "privacy" | "providers" | "language" | "shortcuts" | "about";
 
 type ProviderFormState = {
   editingProviderId: string;
@@ -93,25 +96,20 @@ export function toggleProviderModelSelection(modelsText: string, modelId: string
   return nextModels.join("\n");
 }
 
-const TABS: Array<{ id: SettingsTab; labelKey: Parameters<Translator>[0] }> = [
-  { id: "models", labelKey: "settings.models" },
-  { id: "privacy", labelKey: "settings.privacy" },
-  { id: "providers", labelKey: "settings.providers" },
-  { id: "language", labelKey: "settings.language" },
-  { id: "shortcuts", labelKey: "settings.shortcuts" },
-  { id: "about", labelKey: "settings.about" },
-];
-
 export function SettingsPanel({
   t,
   modelSettings,
   providerCatalog,
   settingsError,
   settingsSavingRole,
+  activeTab,
+  onTabChange,
   closeSettings,
   refreshModelSettings,
   refreshProviderCatalog,
   updateRoleModel,
+  updateModelReasoningEffort,
+  probeModelReasoningEffort,
   updateQueryRefiner,
   updatePrivacyMode,
   updateWorkerPool,
@@ -120,7 +118,6 @@ export function SettingsPanel({
   deleteProvider,
   fetchProviderModels,
 }: SettingsPanelProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("models");
   const configuredModels = modelSettings?.models.filter((model) => model.configured) ?? [];
 
   return (
@@ -136,12 +133,12 @@ export function SettingsPanel({
       </header>
 
       <nav className="settings-tabs" aria-label={t("settings.tabsAria")}>
-        {TABS.map((tab) => (
+        {SETTINGS_TABS.map((tab) => (
           <button
             key={tab.id}
             className={activeTab === tab.id ? "settings-tab active" : "settings-tab"}
             type="button"
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => onTabChange(tab.id)}
           >
             {t(tab.labelKey)}
           </button>
@@ -160,6 +157,8 @@ export function SettingsPanel({
           settingsSavingRole={settingsSavingRole}
           refreshModelSettings={refreshModelSettings}
           updateRoleModel={updateRoleModel}
+          updateModelReasoningEffort={updateModelReasoningEffort}
+          probeModelReasoningEffort={probeModelReasoningEffort}
           updateQueryRefiner={updateQueryRefiner}
           updateWorkerPool={updateWorkerPool}
         />
@@ -195,6 +194,8 @@ function ModelsSettingsPage({
   settingsSavingRole,
   refreshModelSettings,
   updateRoleModel,
+  updateModelReasoningEffort,
+  probeModelReasoningEffort,
   updateQueryRefiner,
   updateWorkerPool,
 }: {
@@ -204,6 +205,8 @@ function ModelsSettingsPage({
   settingsSavingRole: string;
   refreshModelSettings: () => void;
   updateRoleModel: (role: string, modelId: string) => void;
+  updateModelReasoningEffort: (modelId: string, effort: string) => void;
+  probeModelReasoningEffort: (modelId: string) => void;
   updateQueryRefiner: (enabled: boolean) => void;
   updateWorkerPool: (modelIds: string[]) => void;
 }) {
@@ -303,6 +306,26 @@ function ModelsSettingsPage({
             ) : (
               <div className="settings-muted-line">{t("settings.noConfiguredModels")}</div>
             )}
+          </div>
+        </div>
+        <SettingsDivider />
+        <div className="settings-config-block">
+          <div className="settings-config-block-header">
+            <div>
+              <div className="settings-config-title">{t("settings.reasoningCapability")}</div>
+              <div className="settings-config-description">{t("settings.reasoningCapabilityDescription")}</div>
+            </div>
+          </div>
+          <div className="model-capability-list">
+            {configuredModels.map((model) => (
+              <div className="model-capability-row" key={model.id}>
+                <span title={displayModelNameForModel(model)}>{compactDisplayModelName(model, 28)}</span>
+                <small>{model.reasoning_effort_levels.length ? model.reasoning_effort_levels.join(" / ") : t("settings.reasoningCapabilityUnknown")}</small>
+                <button className="secondary-button compact" type="button" disabled={settingsSavingRole === `reasoning_probe:${model.id}`} onClick={() => probeModelReasoningEffort(model.id)}>
+                  {settingsSavingRole === `reasoning_probe:${model.id}` ? t("common.loading") : t("settings.probeReasoningCapability")}
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       </section>

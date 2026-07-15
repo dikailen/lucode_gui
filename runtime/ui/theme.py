@@ -94,7 +94,7 @@ def render_theme_preview(name: str | None, *, workspace_root: Path | str | None 
             f"主题预览：{theme.name}",
             f"brand={theme.brand} border={theme.border} model_label={theme.model_label}",
             f"项目  {workspace_label}",
-            "模式  full 审核并行",
+            "模式  自动执行",
             "主脑  DeepSeek V4 Pro",
             "工具  按需加载 · 审批保护",
         ]

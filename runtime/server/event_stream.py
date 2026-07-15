@@ -29,8 +29,9 @@ class RunEventStream:
             queue.put_nowait(event)
         return event
 
-    def snapshot(self, run_id: str) -> list[RunEvent]:
-        return list(self._events.get(str(run_id), []))
+    def snapshot(self, run_id: str, *, after_seq: int = 0) -> list[RunEvent]:
+        cursor = max(0, int(after_seq or 0))
+        return [event for event in self._events.get(str(run_id), []) if event.seq > cursor]
 
     def subscriber_count(self, run_id: str) -> int:
         return len(self._subscribers.get(str(run_id), []))

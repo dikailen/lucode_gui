@@ -76,6 +76,22 @@ def test_plugin_state_rejects_invalid_skill_ids(tmp_path):
     assert not (tmp_path / ".lucode" / "gui_plugin_state.json").exists()
 
 
+def test_plugin_state_persists_disabled_skill_ids_without_touching_skill_files(tmp_path):
+    workspace = tmp_path / "workspace"
+    skill_file = workspace / ".lucode" / "skills" / "demo_skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("---\nname: Demo\n---\n", encoding="utf-8")
+    store = PluginStateStore(workspace)
+
+    disabled = store.set_skill_enabled("demo_skill", False)
+
+    assert disabled is False
+    assert store.load_disabled_skill_ids() == {"demo_skill"}
+    assert skill_file.read_text(encoding="utf-8") == "---\nname: Demo\n---\n"
+    store.set_skill_enabled("demo_skill", True)
+    assert store.load_disabled_skill_ids() == set()
+
+
 def test_plugin_state_installs_skill_folder_into_workspace_local_skills(tmp_path):
     source = tmp_path / "source-skill"
     source.mkdir()

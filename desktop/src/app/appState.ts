@@ -163,13 +163,19 @@ export function setModelLabel(state: AppState, label: string): AppState {
   return { ...state, modelLabel: label || "\u672a\u914d\u7f6e\u6a21\u578b" };
 }
 
-export function appendUserMessage(state: AppState, sessionId: string, content: string): AppState {
+export function appendUserMessage(
+  state: AppState,
+  sessionId: string,
+  content: string,
+  metadata?: ChatMessage["metadata"],
+): AppState {
   const message: ChatMessage = {
     id: nextMessageId("user"),
     sessionId,
     role: "user",
     content: content.trim(),
     status: "completed",
+    metadata,
   };
   return {
     ...state,
@@ -245,11 +251,18 @@ export function runStageMeta(state: AppState, t?: Translator): StageMeta {
 }
 
 export function recentRunEvents(state: AppState, limit = 4): RunEvent[] {
-  return state.events.filter((event) => event.type !== "worker.delta").slice(-Math.max(1, limit));
+  return state.events
+    .filter((event) => event.type !== "worker.delta" && event.type !== "answer.delta")
+    .slice(-Math.max(1, limit));
 }
 
 export function workAreaSnapshot(state: AppState, t?: Translator): WorkAreaSnapshot | null {
-  return workAreaSnapshotFromEvents(state.events, state.runStatus, t);
+  // A transient process panel belongs only to the active run. Completed runs are
+  // represented by the snapshot persisted on their assistant response.
+  const activeEvents = state.activeRunId
+    ? state.events.filter((event) => event.run_id === state.activeRunId)
+    : [];
+  return workAreaSnapshotFromEvents(activeEvents, state.runStatus, t);
 }
 
 export function workAreaSnapshotFromMessage(message: ChatMessage, t?: Translator): WorkAreaSnapshot | null {
@@ -427,6 +440,13 @@ export function renderMessageParts(content: string): RenderedMessagePart[] {
 }
 
 export function reduceRunEvent(state: AppState, event: RunEvent): AppState {
+  const highestSequence = state.events.reduce(
+    (highest, current) => current.run_id === event.run_id ? Math.max(highest, current.seq) : highest,
+    0,
+  );
+  if (event.seq > 0 && event.seq <= highestSequence) {
+    return state;
+  }
   const base = {
     ...state,
     activeSessionId: event.session_id || state.activeSessionId,
@@ -439,12 +459,13 @@ export function reduceRunEvent(state: AppState, event: RunEvent): AppState {
   }
 
   if (event.type === "worker.delta") {
+    return { ...base, runStatus: "running" };
+  }
+
+  if (event.type === "answer.delta") {
     const text = textPayload(event, "text") || textPayload(event, "message");
     if (!text) {
       return base;
-    }
-    if (taskIdFromEvent(event)) {
-      return { ...base, runStatus: "running" };
     }
     return {
       ...base,
@@ -455,13 +476,18 @@ export function reduceRunEvent(state: AppState, event: RunEvent): AppState {
 
   if (event.type === "run.completed") {
     const finalOutput = textPayload(event, "final_output");
+    const runSnapshot = {
+      schema_version: "run_snapshot.v1",
+      run_status: "completed",
+      events: base.events.filter((item) => item.run_id === event.run_id),
+    };
     return {
       ...base,
       activeRunId: "",
       runStatus: "completed",
       messages: finalOutput
-        ? mergeAssistantMessage(base.messages, event.session_id, finalOutput, "completed", false)
-        : markLastAssistant(base.messages, "completed"),
+        ? mergeAssistantMessage(base.messages, event.session_id, finalOutput, "completed", false, { run_snapshot: runSnapshot })
+        : markLastAssistant(base.messages, "completed", { run_snapshot: runSnapshot }),
     };
   }
 
@@ -523,8 +549,9 @@ function mergeAssistantMessage(
   content: string,
   status: ChatMessage["status"],
   append: boolean,
+  metadata?: ChatMessage["metadata"],
 ): ChatMessage[] {
-  const index = lastAssistantIndex(messages, sessionId);
+  const index = lastAssistantIndexForCurrentTurn(messages, sessionId);
   if (index < 0) {
     return [
       ...messages,
@@ -534,6 +561,7 @@ function mergeAssistantMessage(
         role: "assistant",
         content,
         status,
+        metadata,
       },
     ];
   }
@@ -545,21 +573,39 @@ function mergeAssistantMessage(
       ...message,
       content: append ? `${message.content}${content}` : content,
       status,
+      metadata: metadata ? { ...(message.metadata || {}), ...metadata } : message.metadata,
     };
   });
 }
 
-function markLastAssistant(messages: ChatMessage[], status: ChatMessage["status"]): ChatMessage[] {
-  const index = lastAssistantIndex(messages, "");
+function markLastAssistant(
+  messages: ChatMessage[],
+  status: ChatMessage["status"],
+  metadata?: ChatMessage["metadata"],
+): ChatMessage[] {
+  const index = lastAssistantIndexForCurrentTurn(messages, "");
   if (index < 0) {
     return messages;
   }
-  return messages.map((message, currentIndex) => (currentIndex === index ? { ...message, status } : message));
+  return messages.map((message, currentIndex) => (
+    currentIndex === index ? { ...message, status, metadata: metadata ? { ...(message.metadata || {}), ...metadata } : message.metadata } : message
+  ));
 }
 
-function lastAssistantIndex(messages: ChatMessage[], sessionId: string): number {
+function lastAssistantIndexForCurrentTurn(messages: ChatMessage[], sessionId: string): number {
+  let latestUserIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    if (message.role === "user" && (!sessionId || message.sessionId === sessionId)) {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (index <= latestUserIndex) {
+      break;
+    }
     if (message.role === "assistant" && (!sessionId || message.sessionId === sessionId)) {
       return index;
     }

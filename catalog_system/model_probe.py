@@ -11,6 +11,7 @@ import requests
 
 CACHE_VERSION = 5
 CACHE_RELATIVE_PATH = Path(".agent_cache") / "model_capabilities.json"
+REASONING_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 
 
 def load_probe_cache(project_root: Path) -> dict:
@@ -45,6 +46,93 @@ def cached_probe_for_model(project_root: Path, model_info: dict) -> dict | None:
     if entry.get("fingerprint") != model_fingerprint(model_info):
         return None
     return entry
+
+
+def probe_reasoning_effort_capabilities(
+    project_root: Path,
+    model_info: dict,
+    *,
+    levels: list[str] | tuple[str, ...] | None = None,
+    timeout: float = 12.0,
+) -> dict[str, Any]:
+    """Probe which standard Chat Completions reasoning effort values a model accepts.
+
+    This deliberately tests transport acceptance only. A compatible proxy can accept
+    and ignore a field, so callers must present the result as a probe, not a vendor
+    guarantee of reasoning quality.
+    """
+
+    probe_input = _probe_input_for_model(model_info)
+    configured = validate_probe_input(probe_input)
+    requested = _normalized_reasoning_effort_levels(levels)
+    fingerprint = model_fingerprint(model_info)
+    model_id = str(model_info.get("id") or "").strip()
+    if not model_id:
+        raise ValueError("model id is required")
+
+    accepted: list[str] = []
+    errors: dict[str, str] = {}
+    if configured.get("status") == "config_ok":
+        endpoint = _chat_completions_endpoint(probe_input)
+        headers = _headers(probe_input)
+        for level in requested:
+            response, error = _safe_post_json(
+                endpoint,
+                headers,
+                {
+                    "model": probe_input["model_name"],
+                    "messages": [{"role": "user", "content": "Reply only: OK"}],
+                    "max_tokens": 1,
+                    "stream": False,
+                    "reasoning_effort": level,
+                },
+                timeout,
+            )
+            if response is not None and 200 <= response.status_code < 300:
+                accepted.append(level)
+            else:
+                errors[level] = _probe_error_summary(response, error)
+    else:
+        errors = {level: "model configuration is incomplete" for level in requested}
+
+    result = {
+        "supports_reasoning_effort": bool(accepted),
+        "reasoning_effort_levels": accepted,
+        "reasoning_effort": {
+            "status": "accepted" if accepted else "unsupported",
+            "accepted_levels": accepted,
+            "tested_levels": requested,
+            "errors": errors,
+            "verification": "transport_accepted",
+            "probed_at": time.time(),
+        },
+        "fingerprint": fingerprint,
+    }
+    cache = load_probe_cache(project_root)
+    existing = cache.setdefault("results", {}).get(model_id)
+    entry = dict(existing or {}) if isinstance(existing, dict) and existing.get("fingerprint") == fingerprint else {}
+    entry.update(result)
+    cache["results"][model_id] = entry
+    save_probe_cache(project_root, cache)
+    return entry
+
+
+def _normalized_reasoning_effort_levels(levels: list[str] | tuple[str, ...] | None) -> list[str]:
+    requested = list(levels or REASONING_EFFORT_LEVELS)
+    normalized: list[str] = []
+    for value in requested:
+        level = str(value or "").strip().lower()
+        if level in REASONING_EFFORT_LEVELS and level not in normalized:
+            normalized.append(level)
+    return normalized or list(REASONING_EFFORT_LEVELS)
+
+
+def _probe_error_summary(response, error) -> str:
+    if error is not None:
+        return error.__class__.__name__
+    if response is None:
+        return "no response"
+    return f"HTTP {getattr(response, 'status_code', 'unknown')}"
 
 
 def refresh_model_probe_cache(

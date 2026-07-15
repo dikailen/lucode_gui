@@ -33,7 +33,7 @@ def test_user_message_bubble_is_compact_and_has_no_role_label(app):
     assert not hasattr(bubble, "role_label")
     assert bubble.findChildren(QLabel, "RoleLabel") == []
     assert 72 <= bubble.width() <= 520
-    assert bubble.minimumWidth() == 0
+    assert bubble.minimumWidth() == 72
     assert bubble.sizePolicy().horizontalPolicy() == QSizePolicy.Maximum
 
 

@@ -1,5 +1,5 @@
 ---
-name: full-worker-contract
+name: worker-contract
 description: Unified Agent Loop Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements for supervised execution.
 ---
 

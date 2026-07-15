@@ -25,6 +25,8 @@
       "gpt-5-nano"
     ],
     "supports_tools": true,
+    "supports_reasoning_effort": true,
+    "reasoning_effort_levels": ["low", "medium", "high", "xhigh"],
     "reasoning_level": "high",
     "cost_level": "high",
     "strengths": [

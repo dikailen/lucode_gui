@@ -1,8 +1,7 @@
-import { KeyboardEvent, MouseEvent } from "react";
-
 import { formatSessionTime, type RunStatus } from "../appState";
 import type { Translator } from "../i18n";
 import { shouldLoadNextSessionPage } from "../sessionPagination";
+import { SETTINGS_TABS, type SettingsTab } from "../settingsTabs";
 import type { WorkspaceId } from "../useLucodeApp";
 import type { ServerSession } from "../../shared/types";
 
@@ -13,6 +12,7 @@ export type SessionSidebarProps = {
   activeSessionId: string;
   pendingDeleteSessionId: string;
   activeWorkspace: WorkspaceId;
+  settingsTab: SettingsTab;
   collapsed: boolean;
   runStatus: RunStatus;
   hasMoreSessions: boolean;
@@ -23,6 +23,7 @@ export type SessionSidebarProps = {
   selectSession: (sessionId: string) => void;
   requestDeleteSession: (sessionId: string) => void;
   switchWorkspace: (workspace: WorkspaceId) => void;
+  selectSettingsTab: (tab: SettingsTab) => void;
   openSettings: () => void;
   toggleSidebar: () => void;
 };
@@ -34,6 +35,7 @@ export function SessionSidebar({
   activeSessionId,
   pendingDeleteSessionId,
   activeWorkspace,
+  settingsTab,
   collapsed,
   runStatus,
   hasMoreSessions,
@@ -44,23 +46,10 @@ export function SessionSidebar({
   selectSession,
   requestDeleteSession,
   switchWorkspace,
+  selectSettingsTab,
   openSettings,
   toggleSidebar,
 }: SessionSidebarProps) {
-  function handleDeleteClick(event: MouseEvent, sessionId: string) {
-    event.stopPropagation();
-    requestDeleteSession(sessionId);
-  }
-
-  function handleDeleteKeyDown(event: KeyboardEvent, sessionId: string) {
-    if (event.key !== "Enter" && event.key !== " ") {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    requestDeleteSession(sessionId);
-  }
-
   if (collapsed) {
     return (
       <aside className="session-sidebar collapsed" aria-label={t("sidebar.collapsedLabel")}>
@@ -82,7 +71,7 @@ export function SessionSidebar({
           P
         </button>
         <div className="rail-spacer" />
-        <button className="rail-button" type="button" title={t("common.settings")} onClick={openSettings}>
+        <button className={activeWorkspace === "settings" ? "rail-button active" : "rail-button"} type="button" title={t("common.settings")} onClick={openSettings}>
           S
         </button>
         <button className="rail-button" type="button" title={t("sidebar.expand")} onClick={toggleSidebar}>
@@ -114,7 +103,8 @@ export function SessionSidebar({
       {activeWorkspace === "chat" ? (
         <div className="sidebar-chat-panel">
           <button className="new-session-button" type="button" onClick={createNewSession}>
-            {t("sidebar.newChat")}
+            <span className="new-session-icon" aria-hidden="true">+</span>
+            <span className="new-session-label">{t("sidebar.newChatLabel")}</span>
           </button>
 
           <input
@@ -154,34 +144,49 @@ export function SessionSidebar({
               sessions.map((session) => {
                 const confirmingDelete = pendingDeleteSessionId === session.session_id;
                 return (
-                  <button
-                    key={session.session_id}
-                    className={session.session_id === activeSessionId ? "session-row active" : "session-row"}
-                    type="button"
-                    onClick={() => selectSession(session.session_id)}
-                  >
+                  <div key={session.session_id} className={session.session_id === activeSessionId ? "session-row active" : "session-row"}>
+                    <button className="session-select" type="button" onClick={() => selectSession(session.session_id)}>
                     <span className="session-row-main">
                       <span className="session-title" title={session.title}>
                         {session.display_title || session.title || t("sidebar.untitled")}
                       </span>
                       <span className="session-meta">{formatSessionTime(session.updated_at, new Date(), t)}</span>
                     </span>
-                    <span
+                    </button>
+                    <button
                       className={confirmingDelete ? "session-delete confirming" : "session-delete"}
-                      role="button"
-                      tabIndex={0}
+                      type="button"
                       title={confirmingDelete ? t("sidebar.confirmDeleteTitle") : t("sidebar.deleteTitle")}
-                      onClick={(event) => handleDeleteClick(event, session.session_id)}
-                      onKeyDown={(event) => handleDeleteKeyDown(event, session.session_id)}
+                      aria-label={confirmingDelete ? t("sidebar.confirmDeleteTitle") : t("sidebar.deleteTitle")}
+                      onClick={() => requestDeleteSession(session.session_id)}
                     >
-                      {confirmingDelete ? t("common.confirm") : t("common.delete")}
-                    </span>
-                  </button>
+                      {confirmingDelete ? t("common.confirm") : "×"}
+                    </button>
+                  </div>
                 );
               })
             )}
             {loadingMoreSessions ? <span className="session-list-loader" aria-hidden="true" /> : null}
           </div>
+        </div>
+      ) : activeWorkspace === "settings" ? (
+        <div className="settings-sidebar-panel">
+          <div className="sidebar-settings-hint">
+            <strong>{t("sidebar.settingsHintTitle")}</strong>
+            <span>{t("sidebar.settingsHintBody")}</span>
+          </div>
+          <nav className="settings-sidebar-tabs" aria-label={t("settings.tabsAria")}>
+            {SETTINGS_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                className={settingsTab === tab.id ? "settings-sidebar-tab active" : "settings-sidebar-tab"}
+                type="button"
+                onClick={() => selectSettingsTab(tab.id)}
+              >
+                {t(tab.labelKey)}
+              </button>
+            ))}
+          </nav>
         </div>
       ) : (
         <div className="sidebar-plugin-hint">
@@ -191,8 +196,8 @@ export function SessionSidebar({
       )}
 
       <div className="sidebar-utility-bar">
-        <button className="sidebar-utility-button" type="button" onClick={openSettings}>
-          {t("common.settings")}
+        <button className={activeWorkspace === "settings" ? "sidebar-utility-button settings-active" : "sidebar-utility-button"} type="button" onClick={activeWorkspace === "settings" ? () => switchWorkspace("chat") : openSettings}>
+          {activeWorkspace === "settings" ? t("sidebar.returnToChat") : t("common.settings")}
         </button>
         <button className="sidebar-collapse-button" type="button" onClick={toggleSidebar} title={t("sidebar.collapse")}>
           &lt;
