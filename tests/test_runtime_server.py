@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -14,11 +15,13 @@ from starlette.testclient import TestClient, WebSocketDisconnect
 
 from runtime.events import ExecutionEventBus
 from runtime.config.model_config import provider_api_key_value
+from runtime.recovery.journal import RunJournal
 from runtime.server.app import create_app
 from runtime.server.execution_bridge import KernelAgentLoopExecutor, RunExecutionRequest, RunExecutionResult
 from runtime.server.event_stream import RunEventStream
 from runtime.server.run_manager import RuntimeRunManager
 from runtime.server.schemas import ServerRun
+from runtime.storage.sqlite_store import connect
 
 
 TOKEN = "test-runtime-token"
@@ -59,6 +62,67 @@ def _client(tmp_path, *, token: str = TOKEN, model_catalog_provider=None, run_ex
         run_executor=run_executor or _quick_stage_runner,
     )
     return TestClient(app)
+
+
+@pytest.mark.parametrize("journal_error", [sqlite3.OperationalError("database is locked"), OSError("disk full")])
+def test_runtime_server_keeps_normal_sessions_available_when_run_journal_initialization_fails(
+    tmp_path,
+    monkeypatch,
+    journal_error,
+):
+    class BrokenJournal:
+        def __init__(self, *_args, **_kwargs):
+            raise journal_error
+
+    monkeypatch.setenv("LUCODE_RUN_RECOVERY", "reconnect")
+    monkeypatch.setattr("runtime.server.run_manager.RunJournal", BrokenJournal)
+
+    manager = RuntimeRunManager(tmp_path)
+
+    assert manager.health()["run_recovery"] == {
+        "mode": "reconnect",
+        "journal_enabled": False,
+        "degraded": True,
+        "degraded_run_count": 1,
+    }
+    assert manager.create_session("normal session remains available")["title"] == "normal session remains available"
+
+
+def test_runtime_rejects_corrupt_persisted_request_for_idempotency_reuse(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUCODE_RUN_RECOVERY", "reconnect")
+    seed_manager = RuntimeRunManager(tmp_path)
+    session_id = seed_manager.create_session("corrupt journal request")["session_id"]
+    journal = RunJournal(tmp_path)
+    journal.create_run(
+        run_id="run-corrupt-request",
+        session_id=session_id,
+        status="completed",
+        client_request_id="request-corrupt",
+    )
+    started = journal.append_event(
+        run_id="run-corrupt-request",
+        session_id=session_id,
+        event_type="run.started",
+        payload={"input_hash": "known-input-hash"},
+    )
+    journal.append_event(
+        run_id="run-corrupt-request",
+        session_id=session_id,
+        event_type="task.progress",
+        payload={"step": 2},
+    )
+    with connect(tmp_path) as connection:
+        connection.execute(
+            "delete from run_events where run_id = ? and seq = ?",
+            ("run-corrupt-request", started.seq),
+        )
+
+    restarted_manager = RuntimeRunManager(tmp_path)
+
+    assert restarted_manager._journal_request_run("request-corrupt") is None
+    assert "request:request-corrupt" in restarted_manager._journal_degraded_runs
+    assert "sequence gap" in restarted_manager._journal_degraded_runs["request:request-corrupt"]
+    assert "run-corrupt-request" not in restarted_manager._runs
 
 
 def _make_comfyui_portable(root):

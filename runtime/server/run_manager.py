@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import os
 import re
+import sqlite3
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,8 +108,13 @@ class RuntimeRunManager:
         self._run_executor = run_executor or KernelAgentLoopExecutor()
         self.events = event_stream or RunEventStream()
         self._run_recovery_settings = run_recovery_settings_from_env()
-        self._run_journal = RunJournal(self.workspace_root) if self._run_recovery_settings.records_journal else None
         self._journal_degraded_runs: dict[str, str] = {}
+        self._run_journal = None
+        if self._run_recovery_settings.records_journal:
+            try:
+                self._run_journal = RunJournal(self.workspace_root)
+            except (OSError, sqlite3.Error) as exc:
+                self._journal_degraded_runs["journal_init"] = str(exc)
         self._recovery_decisions: list[RecoveryDecision] = []
         self._recovery_claims_by_run: dict[str, RecoveryClaim] = {}
         self._recovery_envelopes_by_run: dict[str, dict[str, Any]] = {}

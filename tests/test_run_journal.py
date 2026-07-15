@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -98,6 +100,66 @@ def test_run_journal_rejects_event_with_modified_payload(tmp_path):
 
     with pytest.raises(CorruptRunEventError, match="checksum"):
         journal.events_for_run("run-1")
+
+
+def test_run_journal_rejects_a_valid_checksum_event_sequence_gap(tmp_path):
+    journal = _journal_with_run(tmp_path)
+    journal.append_event(
+        run_id="run-1",
+        session_id="session-1",
+        event_type="task.progress",
+        payload={"step": 1},
+    )
+    payload_json = '{"step":3}'
+    with connect(tmp_path) as connection:
+        connection.execute(
+            """
+            insert into run_events(event_id, run_id, session_id, seq, event_type, payload_json, payload_checksum, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-gap",
+                "run-1",
+                "session-1",
+                3,
+                "task.progress",
+                payload_json,
+                hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                "2026-07-15T00:00:00.000Z",
+            ),
+        )
+
+    with pytest.raises(CorruptRunEventError, match="sequence gap"):
+        journal.events_for_run("run-1")
+
+
+def test_run_journal_database_rejects_duplicate_event_sequence_for_one_run(tmp_path):
+    journal = _journal_with_run(tmp_path)
+    event = journal.append_event(
+        run_id="run-1",
+        session_id="session-1",
+        event_type="task.progress",
+        payload={"step": 1},
+    )
+
+    with connect(tmp_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            connection.execute(
+                """
+                insert into run_events(event_id, run_id, session_id, seq, event_type, payload_json, payload_checksum, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event-duplicate-seq",
+                    "run-1",
+                    "session-1",
+                    event.seq,
+                    "task.progress",
+                    "{}",
+                    hashlib.sha256(b"{}").hexdigest(),
+                    "2026-07-15T00:00:00.000Z",
+                ),
+            )
 
 
 def test_latest_checkpoint_uses_durable_insert_order_when_timestamps_collide(tmp_path, monkeypatch):

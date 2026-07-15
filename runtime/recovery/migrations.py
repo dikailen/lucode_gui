@@ -6,7 +6,7 @@ from runtime.recovery.models import RecoverySchemaInitResult, utc_now_iso
 from runtime.storage.sqlite_store import database_path, connect
 
 
-RUN_RECOVERY_SCHEMA_VERSION = "run_recovery.v1"
+RUN_RECOVERY_SCHEMA_VERSION = "run_recovery.v2"
 
 
 def initialize_run_recovery_schema(workspace_root: Path | str) -> RecoverySchemaInitResult:
@@ -16,6 +16,7 @@ def initialize_run_recovery_schema(workspace_root: Path | str) -> RecoverySchema
     with connect(workspace_root) as connection:
         connection.executescript(schema)
         _ensure_agent_run_columns(connection)
+        _ensure_retention_index(connection)
         connection.execute(
             """
             insert into run_recovery_meta(key, value, updated_at)
@@ -37,3 +38,12 @@ def _ensure_agent_run_columns(connection) -> None:
         connection.execute("alter table agent_runs add column recovery_state text not null default 'none'")
     if "interrupted_at" not in columns:
         connection.execute("alter table agent_runs add column interrupted_at text not null default ''")
+
+
+def _ensure_retention_index(connection) -> None:
+    connection.execute(
+        """
+        create index if not exists idx_agent_runs_terminal_updated
+        on agent_runs(status, updated_at asc, run_id asc)
+        """
+    )

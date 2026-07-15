@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from runtime.recovery.journal import RunJournal
 from runtime.recovery.migrations import RUN_RECOVERY_SCHEMA_VERSION, initialize_run_recovery_schema
 from runtime.storage.sqlite_store import initialize_sqlite_store
 
@@ -70,3 +71,34 @@ def test_dropping_recovery_tables_does_not_damage_existing_session_rows(tmp_path
         session = connection.execute("select title from sessions where session_id = ?", ("session-1",)).fetchone()
 
     assert session == ("Existing session",)
+
+
+def test_run_recovery_schema_v2_adds_retention_index_without_rewriting_existing_events(tmp_path):
+    initialize_run_recovery_schema(tmp_path)
+    journal = RunJournal(tmp_path)
+    journal.create_run(
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        created_at="2026-01-01T00:00:00.000Z",
+    )
+    journal.append_event(
+        run_id="run-1",
+        session_id="session-1",
+        event_type="final.ready",
+        payload={"summary": "keep this event until maintenance runs"},
+    )
+
+    with sqlite3.connect(tmp_path / ".lucode" / "lucode.db") as connection:
+        connection.execute("drop index if exists idx_agent_runs_terminal_updated")
+        connection.execute(
+            "update run_recovery_meta set value = 'run_recovery.v1' where key = 'schema_version'"
+        )
+
+    upgraded = initialize_run_recovery_schema(tmp_path)
+
+    assert upgraded.schema_version == "run_recovery.v2"
+    assert journal.events_for_run("run-1")[0].payload == {"summary": "keep this event until maintenance runs"}
+    with sqlite3.connect(tmp_path / ".lucode" / "lucode.db") as connection:
+        indexes = {row[1] for row in connection.execute("pragma index_list(agent_runs)").fetchall()}
+    assert "idx_agent_runs_terminal_updated" in indexes

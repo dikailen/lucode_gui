@@ -21,6 +21,9 @@ create table if not exists agent_runs (
 create index if not exists idx_agent_runs_session_updated
 on agent_runs(session_id, updated_at desc, run_id desc);
 
+create index if not exists idx_agent_runs_terminal_updated
+on agent_runs(status, updated_at asc, run_id asc);
+
 create table if not exists run_events (
   event_id text primary key,
   run_id text not null,

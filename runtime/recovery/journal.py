@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ from runtime.storage.sqlite_store import connect
 TOOL_INVOCATION_STATUSES = frozenset(
     {"prepared", "dispatched", "completed", "failed", "cancelled", "unknown", "reconciled"}
 )
+TERMINAL_RUN_STATUSES = ("completed", "failed", "cancelled", "abandoned")
+PRUNED_EVENT_PAYLOAD = {"retention": "payload_pruned.v1"}
 
 
 class RunJournal:
@@ -113,7 +116,13 @@ class RunJournal:
                 (str(run_id),),
             ).fetchall()
         events: list[RunJournalEvent] = []
+        expected_seq = 1
         for row in rows:
+            seq = int(row[2])
+            if seq != expected_seq:
+                raise CorruptRunEventError(
+                    f"run event sequence gap: {run_id}: expected {expected_seq}, found {seq}"
+                )
             payload_json = str(row[4])
             if _sha256(payload_json) != str(row[5]):
                 raise CorruptRunEventError(f"run event checksum mismatch: {run_id}:{row[2]}")
@@ -121,12 +130,13 @@ class RunJournal:
                 RunJournalEvent(
                     run_id=str(row[0]),
                     session_id=str(row[1]),
-                    seq=int(row[2]),
+                    seq=seq,
                     event_type=str(row[3]),
                     payload=_as_mapping(json.loads(payload_json)),
                     created_at=str(row[6]),
                 )
             )
+            expected_seq += 1
         return events
 
     def find_run_by_client_request_id(self, client_request_id: str) -> dict[str, str] | None:
@@ -1012,6 +1022,79 @@ class RunJournal:
                 (utc_now_iso(), str(run_id)),
             )
             return updated.rowcount == 1
+
+    def prune_terminal_event_payloads(
+        self,
+        *,
+        before: str,
+        dry_run: bool = True,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Prune detail payloads only for expired terminal runs.
+
+        This is an explicit maintenance operation. It never deletes run rows,
+        checkpoints, or evidence references, and does not run during startup.
+        """
+
+        cutoff = _normalize_retention_cutoff(before)
+        max_runs = max(1, int(limit))
+        marker_json = canonical_json(PRUNED_EVENT_PAYLOAD)
+        marker_checksum = _sha256(marker_json)
+        with connect(self.workspace_root) as connection:
+            if dry_run:
+                rows = _terminal_event_payload_prune_candidates(connection, cutoff=cutoff, limit=max_runs)
+            else:
+                connection.execute("begin immediate")
+                rows = _terminal_event_payload_prune_candidates(connection, cutoff=cutoff, limit=max_runs)
+                for run_id, event_count in rows:
+                    updated = connection.execute(
+                        """
+                        update run_events
+                        set payload_json = ?, payload_checksum = ?
+                        where run_id = ? and created_at < ? and payload_json != ?
+                        """,
+                        (marker_json, marker_checksum, str(run_id), cutoff, marker_json),
+                    )
+                    if updated.rowcount != int(event_count):
+                        raise RuntimeError("terminal event payload retention changed concurrently")
+        return {
+            "run_ids": tuple(str(run_id) for run_id, _event_count in rows),
+            "event_count": sum(int(event_count) for _run_id, event_count in rows),
+            "dry_run": bool(dry_run),
+        }
+
+
+def _terminal_event_payload_prune_candidates(connection, *, cutoff: str, limit: int) -> list[tuple[str, int]]:
+    marker_json = canonical_json(PRUNED_EVENT_PAYLOAD)
+    placeholders = ", ".join("?" for _status in TERMINAL_RUN_STATUSES)
+    rows = connection.execute(
+        """
+        select run.run_id, count(event.event_id)
+        from agent_runs as run
+        join run_events as event on event.run_id = run.run_id
+        where run.status in ("""
+        + placeholders
+        + """)
+          and run.updated_at < ?
+          and event.created_at < ?
+          and event.payload_json != ?
+        group by run.run_id
+        order by min(event.created_at) asc, run.run_id asc
+        limit ?
+        """,
+        (*TERMINAL_RUN_STATUSES, cutoff, cutoff, marker_json, max(1, int(limit))),
+    ).fetchall()
+    return [(str(row[0]), int(row[1])) for row in rows]
+
+
+def _normalize_retention_cutoff(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("retention cutoff must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("retention cutoff must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _normalize_invocation_status(value: str) -> str:
