@@ -22,6 +22,9 @@ async def execute_dynamic_request(
     output_controller: Any = None,
     event_bus: Any = None,
     inline_files: Any = None,
+    recovery_envelope: Any = None,
+    checkpoint_sink: Any = None,
+    tool_lifecycle_sink: Any = None,
 ) -> str:
     from runtime.execution.dynamic import execute_dynamic_request as _execute_dynamic_request
 
@@ -39,6 +42,9 @@ async def execute_dynamic_request(
         output_controller=output_controller,
         event_bus=event_bus,
         inline_files=inline_files,
+        recovery_envelope=recovery_envelope,
+        checkpoint_sink=checkpoint_sink,
+        tool_lifecycle_sink=tool_lifecycle_sink,
     )
 
 
